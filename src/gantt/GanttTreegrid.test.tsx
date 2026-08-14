@@ -85,8 +85,15 @@ const fixtureRows = [
     milestone: true,
     critical: false,
     totalFloatMinutes: 240,
-    start: "2026-08-18T12:00:00",
-    finish: "2026-08-18T12:00:00",
+    start: "2026-08-17T17:00:00",
+    finish: "2026-08-17T17:00:00",
+    baseline: {
+      start: "2026-08-16T17:00:00",
+      finish: "2026-08-16T17:00:00",
+      durationMinutes: 0,
+      startVarianceMinutes: 1_440,
+      finishVarianceMinutes: 1_440,
+    },
   }),
   row({
     taskId: "task-c",
@@ -97,9 +104,10 @@ const fixtureRows = [
     name: "Closeout",
     critical: false,
     totalFloatMinutes: -60,
-    start: "2026-08-19T08:00:00",
-    finish: "2026-08-19T10:00:00",
+    start: "2026-08-17T17:00:00",
+    finish: "2026-08-18T10:00:00",
     durationMinutes: 120,
+    predecessorIds: ["task-a", "task-b"],
   }),
 ];
 
@@ -107,7 +115,9 @@ describe("GanttTreegrid", () => {
   it("renders stable treegrid semantics and every authoritative schedule fact as text", () => {
     render(<GanttTreegrid readModel={model(fixtureRows)} />);
 
-    const grid = screen.getByRole("treegrid", { name: "Work breakdown schedule" });
+    const grid = screen.getByRole("treegrid", {
+      name: "Work breakdown schedule",
+    });
     expect(grid).toHaveAttribute("aria-rowcount", "5");
     expect(grid).toHaveAttribute("aria-colcount", "7");
 
@@ -127,24 +137,47 @@ describe("GanttTreegrid", () => {
     expect(milestoneRow).toHaveTextContent("Milestone");
     expect(milestoneRow).toHaveTextContent("+240 min");
 
-    const negativeFloat = screen.getByRole("gridcell", { name: /2 Closeout, total float, -60 min/ });
+    const negativeFloat = screen.getByRole("gridcell", {
+      name: /2 Closeout, total float, -60 min/,
+    });
     expect(negativeFloat).toHaveTextContent("-60 min");
     expect(negativeFloat.querySelector("svg")).toBeInTheDocument();
 
     const summaryRow = screen.getByRole("row", { name: /1 Site work/ });
     expect(summaryRow).toHaveAttribute("aria-expanded", "true");
-    expect(within(summaryRow).getByRole("button", { name: "Collapse Site work" })).toHaveAttribute(
-      "tabindex",
-      "-1",
-    );
+    expect(within(summaryRow).getByRole("button", { name: "Collapse Site work" })).toHaveAttribute("tabindex", "-1");
     expect(grid.querySelectorAll('[role="rowheader"][tabindex="0"], [role="gridcell"][tabindex="0"]')).toHaveLength(1);
+
+    const timeline = screen.getByTestId("gantt-timeline");
+    expect(timeline).toHaveAttribute("aria-hidden", "true");
+    expect(timeline.querySelector('[data-timeline-task-id="summary"]')).toHaveClass("gantt-timeline__summary");
+    expect(timeline.querySelector('[data-timeline-task-id="task-a"]')).toHaveClass("gantt-timeline__task--critical");
+    expect(timeline.querySelector('[data-baseline-task-id="task-a"]')).toBeInTheDocument();
+    const liveBar = timeline.querySelector<SVGRectElement>('[data-timeline-task-id="task-a"]')!;
+    const baselineBar = timeline.querySelector<SVGRectElement>('[data-baseline-task-id="task-a"]')!;
+    expect(Number(liveBar.getAttribute("y")) + Number(liveBar.getAttribute("height"))).toBeLessThan(
+      Number(baselineBar.getAttribute("y")),
+    );
+    expect(timeline.querySelector('[data-timeline-task-id="task-b"]')).toHaveClass("gantt-timeline__milestone");
+    const milestone = timeline.querySelector<SVGRectElement>('[data-timeline-task-id="task-b"]')!;
+    const milestoneBaseline = timeline.querySelector<SVGRectElement>('[data-baseline-task-id="task-b"]')!;
+    const milestoneCenter = Number(milestone.getAttribute("y")) + Number(milestone.getAttribute("height")) / 2;
+    const rotatedMilestoneBottom = milestoneCenter + Math.sqrt(50);
+    expect(rotatedMilestoneBottom).toBeLessThan(Number(milestoneBaseline.getAttribute("y")));
+    const tightDependency = timeline.querySelector<SVGPathElement>('[data-dependency="task-a->task-c"]')!;
+    expect(tightDependency).toBeInTheDocument();
+    expect(Number(tightDependency.dataset.approachX)).toBeLessThan(Number(tightDependency.dataset.finishX));
+    expect(tightDependency.getAttribute("d")).toMatch(/Q .* H /);
+    expect(timeline.querySelector('[data-dependency="task-b->task-c"]')).toBeInTheDocument();
   });
 
   it("moves one roving cell focus, collapses hierarchy, and reaches offscreen logical rows", async () => {
     const user = userEvent.setup();
     render(<GanttTreegrid readModel={model(fixtureRows)} viewportHeight={96} />);
 
-    const summaryTask = screen.getByRole("rowheader", { name: /1 Site work, task/ });
+    const summaryTask = screen.getByRole("rowheader", {
+      name: /1 Site work, task/,
+    });
     summaryTask.focus();
     await user.keyboard("{ArrowRight}");
     expect(screen.getByRole("gridcell", { name: /1 Site work, duration/ })).toHaveFocus();
@@ -176,7 +209,9 @@ describe("GanttTreegrid", () => {
   it("keeps focus on the same task when a new projection reorders it", () => {
     const initial = model(fixtureRows);
     const { rerender } = render(<GanttTreegrid readModel={initial} />);
-    const focused = screen.getByRole("rowheader", { name: /1\.2 Inspection, task/ });
+    const focused = screen.getByRole("rowheader", {
+      name: /1\.2 Inspection, task/,
+    });
     focused.focus();
 
     const reordered = [fixtureRows[0]!, fixtureRows[2]!, fixtureRows[1]!, fixtureRows[3]!].map(

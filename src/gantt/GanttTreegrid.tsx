@@ -12,6 +12,7 @@ import {
 import { useVirtualizer } from "@tanstack/react-virtual";
 
 import type { GanttReadModel, GanttRow } from "../types/gantt";
+import { GANTT_ZOOMS, GanttTimeline, type GanttZoom } from "./GanttTimeline";
 import { selectVisibleGanttRows } from "./visibleRows";
 import "./ganttTreegrid.css";
 
@@ -45,13 +46,14 @@ export function GanttTreegrid({
   const cellRefs = useRef(new Map<string, HTMLTableCellElement>());
   const shouldRestoreFocusRef = useRef(false);
   const [rowHeight, setRowHeight] = useState(ROW_HEIGHT_FALLBACK);
-  const [collapsedTaskIds, setCollapsedTaskIds] = useState<ReadonlySet<string>>(
-    () => new Set<string>(),
-  );
-  const visibleRows = useMemo(
-    () => selectVisibleGanttRows(readModel, collapsedTaskIds),
-    [collapsedTaskIds, readModel],
-  );
+  const [zoom, setZoom] = useState<GanttZoom>("week");
+  const [zoomAnchor, setZoomAnchor] = useState<{
+    minute: number;
+    screenX: number;
+  } | null>(null);
+  const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
+  const [collapsedTaskIds, setCollapsedTaskIds] = useState<ReadonlySet<string>>(() => new Set<string>());
+  const visibleRows = useMemo(() => selectVisibleGanttRows(readModel, collapsedTaskIds), [collapsedTaskIds, readModel]);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(() =>
     readModel.rows[0] ? { taskId: readModel.rows[0].taskId, columnIndex: 0 } : null,
   );
@@ -100,13 +102,13 @@ export function GanttTreegrid({
   const tabStopCell = activeCellIsMounted
     ? activeCell
     : fallbackRow
-      ? { taskId: fallbackRow.taskId, columnIndex: activeCell?.columnIndex ?? 0 }
+      ? {
+          taskId: fallbackRow.taskId,
+          columnIndex: activeCell?.columnIndex ?? 0,
+        }
       : null;
   const topSpacer = virtualRows[0]?.start ?? 0;
-  const bottomSpacer = Math.max(
-    0,
-    rowVirtualizer.getTotalSize() - (virtualRows[virtualRows.length - 1]?.end ?? 0),
-  );
+  const bottomSpacer = Math.max(0, rowVirtualizer.getTotalSize() - (virtualRows[virtualRows.length - 1]?.end ?? 0));
 
   const focusMountedCell = useCallback((target: HTMLTableCellElement) => {
     target.focus({ preventScroll: true });
@@ -130,28 +132,31 @@ export function GanttTreegrid({
     }
   }, []);
 
-  const focusCell = useCallback((next: ActiveCell, rowIndex: number) => {
-    setActiveCell(next);
-    rowVirtualizer.scrollToIndex(rowIndex, { align: "auto" });
+  const focusCell = useCallback(
+    (next: ActiveCell, rowIndex: number) => {
+      setActiveCell(next);
+      rowVirtualizer.scrollToIndex(rowIndex, { align: "auto" });
 
-    const mountedTarget = cellRefs.current.get(cellKey(next));
-    if (mountedTarget) {
-      focusMountedCell(mountedTarget);
-      return;
-    }
-
-    let attempts = 0;
-    const tryFocus = () => {
-      const target = cellRefs.current.get(cellKey(next));
-      if (target) {
-        focusMountedCell(target);
+      const mountedTarget = cellRefs.current.get(cellKey(next));
+      if (mountedTarget) {
+        focusMountedCell(mountedTarget);
         return;
       }
-      attempts += 1;
-      if (attempts < 4) requestAnimationFrame(tryFocus);
-    };
-    requestAnimationFrame(tryFocus);
-  }, [focusMountedCell, rowVirtualizer]);
+
+      let attempts = 0;
+      const tryFocus = () => {
+        const target = cellRefs.current.get(cellKey(next));
+        if (target) {
+          focusMountedCell(target);
+          return;
+        }
+        attempts += 1;
+        if (attempts < 4) requestAnimationFrame(tryFocus);
+      };
+      requestAnimationFrame(tryFocus);
+    },
+    [focusMountedCell, rowVirtualizer],
+  );
 
   useEffect(() => {
     if (visibleRows.length === 0) {
@@ -164,10 +169,7 @@ export function GanttTreegrid({
     }
     const activeRowIndex = visibleRows.findIndex((row) => row.taskId === activeCell.taskId);
     if (activeRowIndex >= 0) {
-      if (
-        shouldRestoreFocusRef.current &&
-        !cellRefs.current.has(cellKey(activeCell))
-      ) {
+      if (shouldRestoreFocusRef.current && !cellRefs.current.has(cellKey(activeCell))) {
         focusCell(activeCell, activeRowIndex);
       }
       return;
@@ -185,7 +187,10 @@ export function GanttTreegrid({
       }
       parentId = readModel.rows.find((row) => row.taskId === parentId)?.parentTaskId ?? null;
     }
-    const next = { taskId: visibleRows[0]!.taskId, columnIndex: activeCell.columnIndex };
+    const next = {
+      taskId: visibleRows[0]!.taskId,
+      columnIndex: activeCell.columnIndex,
+    };
     if (shouldRestoreFocusRef.current) focusCell(next, 0);
     else setActiveCell(next);
   }, [activeCell, focusCell, readModel.rows, visibleRows]);
@@ -280,92 +285,133 @@ export function GanttTreegrid({
     event.currentTarget.focus();
   }
 
+  function changeZoom(nextZoom: GanttZoom) {
+    const scrollport = scrollRef.current;
+    const timeline = scrollport?.querySelector<HTMLElement>(".gantt-timeline-pane");
+    if (scrollport && timeline) {
+      const domainStart = Number(timeline.dataset.domainStartMinute);
+      const dayWidth = Number(timeline.dataset.dayWidth);
+      const origin = Number(timeline.dataset.originX);
+      const tableWidth = scrollport.querySelector<HTMLElement>(".gantt-treegrid-viewport")?.offsetWidth ?? 0;
+      const screenX = tableWidth + Math.max(0, scrollport.clientWidth - tableWidth) / 2;
+      const centerContent = scrollport.scrollLeft + screenX;
+      const centerTimelineX = centerContent - timeline.offsetLeft;
+      setZoomAnchor({
+        minute: domainStart + ((centerTimelineX - origin) / dayWidth) * 1_440,
+        screenX,
+      });
+    }
+    setZoom(nextZoom);
+  }
+
   return (
-    <div
-      className="gantt-treegrid-scrollport"
-      ref={scrollRef}
-      style={{ "--gantt-viewport-height": `${viewportHeight}px` } as CSSProperties}
-      onFocusCapture={() => {
-        shouldRestoreFocusRef.current = true;
-      }}
-      onBlurCapture={(event) => {
-        if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget)) {
-          shouldRestoreFocusRef.current = false;
-        }
-      }}
-      onScroll={() => {
-        requestAnimationFrame(() => {
-          const scrollport = scrollRef.current;
-          if (
-            !scrollport ||
-            !shouldRestoreFocusRef.current ||
-            scrollport.contains(document.activeElement)
-          ) {
-            return;
+    <section className="gantt-schedule">
+      <div className="gantt-schedule__toolbar" role="group" aria-label="Timeline zoom">
+        {GANTT_ZOOMS.map((option) => (
+          <button type="button" key={option} aria-pressed={zoom === option} onClick={() => changeZoom(option)}>
+            {option[0]!.toUpperCase() + option.slice(1)}
+          </button>
+        ))}
+      </div>
+      <div
+        className="gantt-treegrid-scrollport"
+        data-testid="gantt-scrollport"
+        ref={scrollRef}
+        style={{ "--gantt-viewport-height": `${viewportHeight}px` } as CSSProperties}
+        onFocusCapture={() => {
+          shouldRestoreFocusRef.current = true;
+        }}
+        onBlurCapture={(event) => {
+          if (!event.relatedTarget || !event.currentTarget.contains(event.relatedTarget)) {
+            shouldRestoreFocusRef.current = false;
           }
-          const target = scrollport.querySelector<HTMLTableCellElement>(
-            '[role="rowheader"][tabindex="0"], [role="gridcell"][tabindex="0"]',
-          );
-          if (target) focusMountedCell(target);
-        });
-      }}
-    >
-      <div ref={rowHeightProbeRef} className="gantt-treegrid__row-height-probe" aria-hidden="true" />
-      <table
-        className="gantt-treegrid"
-        role="treegrid"
-        aria-label={ariaLabel}
-        aria-rowcount={readModel.rowCount + 1}
-        aria-colcount={columns.length}
-      >
-        {visibleRows.length === 0 ? (
-          <caption className="gantt-treegrid__empty">No scheduled tasks</caption>
-        ) : null}
-        <colgroup>
-          <col className="gantt-treegrid__wbs-column" />
-          <col className="gantt-treegrid__name-column" />
-          <col className="gantt-treegrid__duration-column" />
-          <col className="gantt-treegrid__date-column" />
-          <col className="gantt-treegrid__date-column" />
-          <col className="gantt-treegrid__predecessor-column" />
-          <col className="gantt-treegrid__float-column" />
-        </colgroup>
-        <thead>
-          <tr aria-rowindex={1}>
-            {columns.map((column) => (
-              <th scope="col" key={column}>
-                {column}
-              </th>
-            ))}
-          </tr>
-        </thead>
-        <tbody>
-          {topSpacer > 0 ? <SpacerRow height={topSpacer} /> : null}
-          {virtualRows.map((virtualRow) => {
-            const ganttRow = visibleRows[virtualRow.index];
-            if (!ganttRow) return null;
-            return (
-              <TaskRow
-                key={ganttRow.taskId}
-                row={ganttRow}
-                visibleIndex={virtualRow.index}
-                collapsed={collapsedTaskIds.has(ganttRow.taskId)}
-                tabStopCell={tabStopCell}
-                registerCell={(key, element) => {
-                  if (element) cellRefs.current.set(key, element);
-                  else cellRefs.current.delete(key);
-                }}
-                onActivate={activateCell}
-                onFocusCell={(row, columnIndex) => setActiveCell({ taskId: row.taskId, columnIndex })}
-                onKeyDown={onCellKeyDown}
-                onToggle={toggleCollapsed}
-              />
+        }}
+        onScroll={() => {
+          requestAnimationFrame(() => {
+            const scrollport = scrollRef.current;
+            if (!scrollport || !shouldRestoreFocusRef.current || scrollport.contains(document.activeElement)) {
+              return;
+            }
+            const target = scrollport.querySelector<HTMLTableCellElement>(
+              '[role="rowheader"][tabindex="0"], [role="gridcell"][tabindex="0"]',
             );
-          })}
-          {bottomSpacer > 0 ? <SpacerRow height={bottomSpacer} /> : null}
-        </tbody>
-      </table>
-    </div>
+            if (target) focusMountedCell(target);
+          });
+        }}
+      >
+        <div ref={rowHeightProbeRef} className="gantt-treegrid__row-height-probe" aria-hidden="true" />
+        <div className="gantt-schedule__split">
+          <div className="gantt-treegrid-viewport">
+            <table
+              className="gantt-treegrid"
+              role="treegrid"
+              aria-label={ariaLabel}
+              aria-rowcount={readModel.rowCount + 1}
+              aria-colcount={columns.length}
+            >
+              {visibleRows.length === 0 ? (
+                <caption className="gantt-treegrid__empty">No scheduled tasks</caption>
+              ) : null}
+              <colgroup>
+                <col className="gantt-treegrid__wbs-column" />
+                <col className="gantt-treegrid__name-column" />
+                <col className="gantt-treegrid__duration-column" />
+                <col className="gantt-treegrid__date-column" />
+                <col className="gantt-treegrid__date-column" />
+                <col className="gantt-treegrid__predecessor-column" />
+                <col className="gantt-treegrid__float-column" />
+              </colgroup>
+              <thead>
+                <tr aria-rowindex={1}>
+                  {columns.map((column) => (
+                    <th scope="col" key={column}>
+                      {column}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {topSpacer > 0 ? <SpacerRow height={topSpacer} /> : null}
+                {virtualRows.map((virtualRow) => {
+                  const ganttRow = visibleRows[virtualRow.index];
+                  if (!ganttRow) return null;
+                  return (
+                    <TaskRow
+                      key={ganttRow.taskId}
+                      row={ganttRow}
+                      visibleIndex={virtualRow.index}
+                      collapsed={collapsedTaskIds.has(ganttRow.taskId)}
+                      tabStopCell={tabStopCell}
+                      registerCell={(key, element) => {
+                        if (element) cellRefs.current.set(key, element);
+                        else cellRefs.current.delete(key);
+                      }}
+                      onActivate={activateCell}
+                      onFocusCell={(row, columnIndex) => setActiveCell({ taskId: row.taskId, columnIndex })}
+                      onKeyDown={onCellKeyDown}
+                      onToggle={toggleCollapsed}
+                      onHover={setHoveredTaskId}
+                    />
+                  );
+                })}
+                {bottomSpacer > 0 ? <SpacerRow height={bottomSpacer} /> : null}
+              </tbody>
+            </table>
+          </div>
+          <GanttTimeline
+            readModel={readModel}
+            rows={visibleRows}
+            virtualRows={virtualRows}
+            totalSize={rowVirtualizer.getTotalSize()}
+            rowHeight={rowHeight}
+            zoom={zoom}
+            zoomAnchor={zoomAnchor}
+            scrollRef={scrollRef}
+            hoveredTaskId={hoveredTaskId}
+          />
+        </div>
+      </div>
+    </section>
   );
 }
 
@@ -377,13 +423,9 @@ interface TaskRowProps {
   registerCell: (key: string, element: HTMLTableCellElement | null) => void;
   onActivate: (event: MouseEvent<HTMLTableCellElement>, row: GanttRow, columnIndex: number) => void;
   onFocusCell: (row: GanttRow, columnIndex: number) => void;
-  onKeyDown: (
-    event: KeyboardEvent<HTMLTableCellElement>,
-    row: GanttRow,
-    rowIndex: number,
-    columnIndex: number,
-  ) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTableCellElement>, row: GanttRow, rowIndex: number, columnIndex: number) => void;
   onToggle: (row: GanttRow) => void;
+  onHover: (taskId: string | null) => void;
 }
 
 function TaskRow({
@@ -396,16 +438,13 @@ function TaskRow({
   onFocusCell,
   onKeyDown,
   onToggle,
+  onHover,
 }: TaskRowProps) {
   const currentStart = formatLocalDateTime(row.start);
   const currentFinish = formatLocalDateTime(row.finish);
   const cells = [
     row.wbs,
-    <span
-      className="gantt-treegrid__task"
-      style={{ "--gantt-depth": row.depth } as CSSProperties}
-      key="task"
-    >
+    <span className="gantt-treegrid__task" style={{ "--gantt-depth": row.depth } as CSSProperties} key="task">
       {row.hasChildren ? (
         <button
           type="button"
@@ -468,6 +507,8 @@ function TaskRow({
       aria-setsize={row.setSize}
       aria-expanded={row.hasChildren ? !collapsed : undefined}
       data-task-id={row.taskId}
+      onMouseEnter={() => onHover(row.taskId)}
+      onMouseLeave={() => onHover(null)}
     >
       {cells.map((content, columnIndex) => {
         const active = tabStopCell?.taskId === row.taskId && tabStopCell.columnIndex === columnIndex;
@@ -531,7 +572,9 @@ function FloatValue({ row }: { row: GanttRow }) {
           <path d="M12 17h.01" />
         </svg>
       ) : null}
-      {row.critical ? `Critical · ${formatSignedMinutes(row.totalFloatMinutes)}` : formatSignedMinutes(row.totalFloatMinutes)}
+      {row.critical
+        ? `Critical · ${formatSignedMinutes(row.totalFloatMinutes)}`
+        : formatSignedMinutes(row.totalFloatMinutes)}
     </span>
   );
 }

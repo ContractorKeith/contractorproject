@@ -1,0 +1,30 @@
+{
+  "environment": {
+    "platform": "macOS",
+    "browser": "Chromium",
+    "deviceScaleFactor": 1,
+    "viewport": "1440x900",
+    "build": "Vite optimized production harness",
+    "fixtureRows": 1000,
+    "passes": 5,
+    "warmupPasses": 1
+  },
+  "results": {
+    "initialPaintMs": 185.283708,
+    "scrollP95Ms": 18.19999998807907,
+    "scrollP99Ms": 21.100000023841858,
+    "framesAbove25Percent": 0,
+    "collapseP95Ms": 27.400000035762787,
+    "zoomP95Ms": 29.69999998807907,
+    "maximumVerticalDriftPx": 0,
+    "taskRelatedNodeCount": 154,
+    "medianLongTasksAbove50Ms": 0
+  },
+  "scrollPasses": [
+    { "p95Ms": 17.899999976158142, "p99Ms": 20.799999952316284 },
+    { "p95Ms": 18.30000001192093, "p99Ms": 21.100000023841858 },
+    { "p95Ms": 18.80000001192093, "p99Ms": 21.100000023841858 },
+    { "p95Ms": 17.900000035762787, "p99Ms": 20.900000035762787 },
+    { "p95Ms": 18.19999998807907, "p99Ms": 21.19999998807907 }
+  ]
+}
