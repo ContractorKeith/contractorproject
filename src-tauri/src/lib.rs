@@ -2,6 +2,7 @@ pub mod application;
 mod domain;
 mod error;
 mod storage;
+mod work_breakdown;
 
 use application::{
     ApplicationError, ApplicationService, CreateJobRequest, CreateTaskRequest, Job,
@@ -27,6 +28,7 @@ enum CommandErrorDetails {
     },
     Validation {
         code: &'static str,
+        field: &'static str,
     },
     Record {
         resource: &'static str,
@@ -47,8 +49,8 @@ impl From<ApplicationError> for CommandError {
             ApplicationError::InvalidInput { field, .. } => {
                 CommandErrorDetails::InvalidInput { field }
             }
-            ApplicationError::ValidationFailed { code, .. } => {
-                CommandErrorDetails::Validation { code }
+            ApplicationError::ValidationFailed { code, field, .. } => {
+                CommandErrorDetails::Validation { code, field }
             }
             ApplicationError::NotFound { resource, id } => CommandErrorDetails::Record {
                 resource,
@@ -141,4 +143,30 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContractorProject");
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{ApplicationError, CommandError};
+
+    #[test]
+    fn validation_command_error_includes_code_and_field_path() {
+        let command_error = CommandError::from(ApplicationError::ValidationFailed {
+            code: "task_parent_cycle",
+            field: "newParentTaskId",
+            message: "a task cannot be placed below its descendant".into(),
+        });
+
+        assert_eq!(
+            serde_json::to_value(command_error).expect("serialize command error"),
+            json!({
+                "kind": "validation_failed",
+                "message": "a task cannot be placed below its descendant",
+                "code": "task_parent_cycle",
+                "field": "newParentTaskId"
+            })
+        );
+    }
 }

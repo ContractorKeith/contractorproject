@@ -7,10 +7,10 @@ use uuid::Uuid;
 use crate::domain::JobStatus;
 pub use crate::domain::{Job, Task};
 pub use crate::error::ApplicationError;
-use crate::storage::SqliteJobStore;
+use crate::storage::SqliteStore;
 
 pub struct ApplicationService {
-    jobs: SqliteJobStore,
+    store: SqliteStore,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -65,7 +65,7 @@ pub struct ReorderTaskRequest {
 impl ApplicationService {
     pub fn open(database_path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         Ok(Self {
-            jobs: SqliteJobStore::open(database_path)?,
+            store: SqliteStore::open(database_path)?,
         })
     }
 
@@ -83,12 +83,12 @@ impl ApplicationService {
             version: 1,
         };
 
-        self.jobs.insert_job(&job)?;
+        self.store.insert_job(&job)?;
         Ok(job)
     }
 
     pub fn list_jobs(&self) -> Result<Vec<Job>, ApplicationError> {
-        self.jobs.list_jobs()
+        self.store.list_jobs()
     }
 
     pub fn create_task(
@@ -110,13 +110,13 @@ impl ApplicationService {
             version: 1,
         };
         let job_version = self
-            .jobs
+            .store
             .create_task(&mut task, request.expected_job_version)?;
         Ok(TaskMutation { task, job_version })
     }
 
     pub fn list_tasks(&self, job_id: &str) -> Result<TaskHierarchy, ApplicationError> {
-        let (job_version, tasks) = self.jobs.list_tasks(job_id)?;
+        let (job_version, tasks) = self.store.list_tasks(job_id)?;
         Ok(TaskHierarchy {
             job_id: job_id.into(),
             job_version,
@@ -131,7 +131,7 @@ impl ApplicationService {
         let name = required_text("name", request.name, 200)?;
         required_version("expectedVersion", request.expected_version)?;
         let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-        let (task, job_version) = self.jobs.update_task(
+        let (task, job_version) = self.store.update_task(
             &request.task_id,
             &name,
             request.expected_version,
@@ -152,7 +152,7 @@ impl ApplicationService {
                 message: "must be zero or greater".into(),
             });
         }
-        let (job_id, job_version, tasks) = self.jobs.reorder_task(
+        let (job_id, job_version, tasks) = self.store.reorder_task(
             &request.task_id,
             request.new_parent_task_id.as_deref(),
             request.new_sibling_index,

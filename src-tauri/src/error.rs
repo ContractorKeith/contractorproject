@@ -12,7 +12,11 @@ pub enum ApplicationError {
     NotFound { resource: &'static str, id: String },
 
     #[error("{message}")]
-    ValidationFailed { code: &'static str, message: String },
+    ValidationFailed {
+        code: &'static str,
+        field: &'static str,
+        message: String,
+    },
 
     #[error("{resource} {id} changed: expected version {expected}, current version {current}")]
     VersionConflict {

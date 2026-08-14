@@ -5,20 +5,22 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 
 use crate::domain::{Job, JobStatus, Task};
 use crate::error::ApplicationError;
+use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
-pub(crate) struct SqliteJobStore {
+pub(crate) struct SqliteStore {
     database_path: PathBuf,
 }
 
-impl SqliteJobStore {
+impl SqliteStore {
     pub(crate) fn open(database_path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let database_path = database_path.as_ref().to_path_buf();
+        let database_existed = database_path.exists();
         if let Some(parent) = database_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
         let store = Self { database_path };
-        store.migrate()?;
+        store.migrate(database_existed)?;
         Ok(store)
     }
 
@@ -123,12 +125,7 @@ impl SqliteJobStore {
                     resource: "task",
                     id: parent_id.into(),
                 })?;
-            if parent_job_id != task.job_id {
-                return Err(ApplicationError::ValidationFailed {
-                    code: "task_parent_cross_job",
-                    message: "a task parent must belong to the same job".into(),
-                });
-            }
+            validate_parent_job(&task.job_id, &parent_job_id, "parentTaskId")?;
         }
 
         task.sort_key = transaction.query_row(
@@ -163,50 +160,11 @@ impl SqliteJobStore {
     }
 
     pub(crate) fn list_tasks(&self, job_id: &str) -> Result<(i64, Vec<Task>), ApplicationError> {
-        let connection = self.connection()?;
-        let job_version = connection
-            .query_row("SELECT version FROM jobs WHERE id = ?1", [job_id], |row| {
-                row.get::<_, i64>(0)
-            })
-            .optional()?
-            .ok_or_else(|| ApplicationError::NotFound {
-                resource: "job",
-                id: job_id.into(),
-            })?;
-        let task_count: i64 = connection.query_row(
-            "SELECT COUNT(*) FROM tasks WHERE job_id = ?1",
-            [job_id],
-            |row| row.get(0),
-        )?;
-        let mut statement = connection.prepare(
-            "WITH RECURSIVE task_tree(
-                id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version, path
-             ) AS (
-                SELECT id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version,
-                       printf('%020d:%s', sort_key, id)
-                FROM tasks
-                WHERE job_id = ?1 AND parent_task_id IS NULL
-                UNION ALL
-                SELECT child.id, child.job_id, child.parent_task_id, child.sort_key, child.name,
-                       child.created_at, child.updated_at, child.version,
-                       parent.path || '/' || printf('%020d:%s', child.sort_key, child.id)
-                FROM tasks child
-                JOIN task_tree parent ON child.parent_task_id = parent.id
-                WHERE child.job_id = ?1
-             )
-             SELECT id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version
-             FROM task_tree
-             ORDER BY path",
-        )?;
-        let tasks = statement
-            .query_map([job_id], task_from_row)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if i64::try_from(tasks.len()).ok() != Some(task_count) {
-            return Err(ApplicationError::InvalidStoredData(format!(
-                "job {job_id} has an invalid task hierarchy"
-            )));
-        }
-        Ok((job_version, tasks))
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let hierarchy = read_task_hierarchy(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok(hierarchy)
     }
 
     pub(crate) fn update_task(
@@ -296,51 +254,40 @@ impl SqliteJobStore {
             });
         }
 
-        validate_new_parent(&transaction, &task, new_parent_task_id)?;
+        let ancestors = load_ancestor_chain(&transaction, new_parent_task_id)?;
+        validate_parent_chain(&task, &ancestors)?;
         let destination_index =
             usize::try_from(new_sibling_index).map_err(|_| ApplicationError::InvalidInput {
                 field: "newSiblingIndex",
                 message: "is too large".into(),
             })?;
-        let mut desired: Vec<(Task, Option<String>, i64)> = Vec::new();
-        if task.parent_task_id.as_deref() == new_parent_task_id {
-            let mut siblings =
-                load_siblings(&transaction, &task.job_id, task.parent_task_id.as_deref())?;
-            siblings.retain(|sibling| sibling.id != task.id);
-            validate_destination_index(destination_index, siblings.len())?;
-            siblings.insert(destination_index, task.clone());
-            for (index, sibling) in siblings.into_iter().enumerate() {
-                desired.push((sibling, task.parent_task_id.clone(), index as i64));
-            }
+        let source_siblings =
+            load_siblings(&transaction, &task.job_id, task.parent_task_id.as_deref())?;
+        let destination_siblings = if task.parent_task_id.as_deref() == new_parent_task_id {
+            Vec::new()
         } else {
-            let mut source =
-                load_siblings(&transaction, &task.job_id, task.parent_task_id.as_deref())?;
-            source.retain(|sibling| sibling.id != task.id);
-            for (index, sibling) in source.into_iter().enumerate() {
-                desired.push((sibling, task.parent_task_id.clone(), index as i64));
-            }
+            load_siblings(&transaction, &task.job_id, new_parent_task_id)?
+        };
+        let desired = plan_reorder(
+            task.clone(),
+            source_siblings,
+            destination_siblings,
+            new_parent_task_id.map(str::to_owned),
+            destination_index,
+        )?;
 
-            let mut destination = load_siblings(&transaction, &task.job_id, new_parent_task_id)?;
-            validate_destination_index(destination_index, destination.len())?;
-            destination.insert(destination_index, task.clone());
-            for (index, sibling) in destination.into_iter().enumerate() {
-                desired.push((sibling, new_parent_task_id.map(str::to_owned), index as i64));
-            }
-        }
-
-        let has_changes = desired.iter().any(|(original, parent, sort_key)| {
-            original.parent_task_id != *parent || original.sort_key != *sort_key
-        });
+        let has_changes = desired.iter().any(|placement| placement.changed());
         let mut job_version = current_job_version;
         if has_changes {
             let maximum_sort_key = desired
                 .iter()
-                .map(|(task, _, _)| task.sort_key)
+                .map(|placement| placement.task.sort_key)
                 .max()
                 .unwrap_or(0);
             let desired_count =
                 i64::try_from(desired.len()).map_err(|_| ApplicationError::ValidationFailed {
                     code: "task_order_invalid",
+                    field: "newSiblingIndex",
                     message: "too many tasks to reorder".into(),
                 })?;
             let offset = maximum_sort_key
@@ -348,35 +295,39 @@ impl SqliteJobStore {
                 .and_then(|value| value.checked_add(1))
                 .ok_or_else(|| ApplicationError::ValidationFailed {
                     code: "task_order_invalid",
+                    field: "newSiblingIndex",
                     message: "task order is too large to reorder".into(),
                 })?;
             let mut seen = HashSet::new();
-            for (original, _, _) in &desired {
-                if !seen.insert(original.id.as_str()) {
+            for placement in &desired {
+                if !seen.insert(placement.task.id.as_str()) {
                     return Err(ApplicationError::InvalidStoredData(format!(
                         "task {} appears twice in its hierarchy",
-                        original.id
+                        placement.task.id
                     )));
                 }
                 transaction.execute(
                     "UPDATE tasks SET sort_key = sort_key + ?1 WHERE id = ?2",
-                    params![offset, original.id],
+                    params![offset, placement.task.id],
                 )?;
             }
-            for (original, parent_task_id, sort_key) in &desired {
-                let changed =
-                    original.parent_task_id != *parent_task_id || original.sort_key != *sort_key;
-                if changed {
+            for placement in &desired {
+                if placement.changed() {
                     transaction.execute(
                         "UPDATE tasks
                          SET parent_task_id = ?1, sort_key = ?2, updated_at = ?3, version = version + 1
                          WHERE id = ?4",
-                        params![parent_task_id, sort_key, updated_at, original.id],
+                        params![
+                            placement.parent_task_id,
+                            placement.sort_key,
+                            updated_at,
+                            placement.task.id
+                        ],
                     )?;
                 } else {
                     transaction.execute(
                         "UPDATE tasks SET sort_key = ?1 WHERE id = ?2",
-                        params![sort_key, original.id],
+                        params![placement.sort_key, placement.task.id],
                     )?;
                 }
             }
@@ -386,9 +337,10 @@ impl SqliteJobStore {
                 params![updated_at, job_version, task.job_id],
             )?;
         }
+        let (snapshot_version, tasks) = read_task_hierarchy(&transaction, &task.job_id)?;
+        debug_assert_eq!(snapshot_version, job_version);
         transaction.commit()?;
-        let (_, tasks) = self.list_tasks(&task.job_id)?;
-        Ok((task.job_id, job_version, tasks))
+        Ok((task.job_id, snapshot_version, tasks))
     }
 
     fn connection(&self) -> Result<Connection, ApplicationError> {
@@ -397,51 +349,113 @@ impl SqliteJobStore {
         Ok(connection)
     }
 
-    fn migrate(&self) -> Result<(), ApplicationError> {
-        let connection = self.connection()?;
+    fn migrate(&self, database_existed: bool) -> Result<(), ApplicationError> {
+        let mut connection = self.connection()?;
+        connection.execute_batch("PRAGMA journal_mode = WAL;")?;
+        let has_migration_table: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type = 'table' AND name = 'schema_migrations'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if database_existed && !has_migration_table {
+            self.back_up_before_migration(&connection, 1)?;
+        }
         connection.execute_batch(
-            "PRAGMA journal_mode = WAL;
-             CREATE TABLE IF NOT EXISTS schema_migrations (
+            "CREATE TABLE IF NOT EXISTS schema_migrations (
                 version INTEGER PRIMARY KEY,
                 applied_at TEXT NOT NULL
-             );
-             CREATE TABLE IF NOT EXISTS jobs (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                status TEXT NOT NULL,
-                timezone TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK (version > 0)
-             );
-             CREATE TABLE IF NOT EXISTS tasks (
-                id TEXT PRIMARY KEY,
-                job_id TEXT NOT NULL,
-                parent_task_id TEXT,
-                sort_key INTEGER NOT NULL CHECK (sort_key >= 0),
-                name TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                version INTEGER NOT NULL CHECK (version > 0),
-                UNIQUE (job_id, id),
-                FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
-                FOREIGN KEY (job_id, parent_task_id)
-                    REFERENCES tasks(job_id, id) ON DELETE RESTRICT
-             );
-             CREATE INDEX IF NOT EXISTS tasks_job_parent_order
-                ON tasks(job_id, parent_task_id, sort_key, id);
-             CREATE UNIQUE INDEX IF NOT EXISTS tasks_root_sibling_order
-                ON tasks(job_id, sort_key) WHERE parent_task_id IS NULL;
-             CREATE UNIQUE INDEX IF NOT EXISTS tasks_child_sibling_order
-                ON tasks(job_id, parent_task_id, sort_key)
-                WHERE parent_task_id IS NOT NULL;
-             INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-             VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));
-             INSERT OR IGNORE INTO schema_migrations (version, applied_at)
-             VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+             );",
         )?;
+
+        if !migration_applied(&connection, 1)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 1)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE jobs (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    timezone TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version > 0)
+                 );
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
+
+        if !migration_applied(&connection, 2)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 2)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE tasks (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    parent_task_id TEXT,
+                    sort_key INTEGER NOT NULL CHECK (sort_key >= 0),
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK (version > 0),
+                    UNIQUE (job_id, id),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (job_id, parent_task_id)
+                        REFERENCES tasks(job_id, id) ON DELETE RESTRICT
+                 );
+                 CREATE INDEX tasks_job_parent_order
+                    ON tasks(job_id, parent_task_id, sort_key, id);
+                 CREATE UNIQUE INDEX tasks_root_sibling_order
+                    ON tasks(job_id, sort_key) WHERE parent_task_id IS NULL;
+                 CREATE UNIQUE INDEX tasks_child_sibling_order
+                    ON tasks(job_id, parent_task_id, sort_key)
+                    WHERE parent_task_id IS NOT NULL;
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (2, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
+
+    fn back_up_before_migration(
+        &self,
+        connection: &Connection,
+        target_version: i64,
+    ) -> Result<(), ApplicationError> {
+        let file_name = self
+            .database_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| {
+                ApplicationError::InvalidStoredData("database path has no file name".into())
+            })?;
+        let backup_path = self
+            .database_path
+            .with_file_name(format!("{file_name}.pre-migration-v{target_version}.bak"));
+        if !backup_path.exists() {
+            connection.backup("main", backup_path, None)?;
+        }
+        Ok(())
+    }
+}
+
+fn migration_applied(connection: &Connection, version: i64) -> Result<bool, ApplicationError> {
+    Ok(connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = ?1)",
+        [version],
+        |row| row.get(0),
+    )?)
 }
 
 fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
@@ -455,6 +469,55 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         updated_at: row.get(6)?,
         version: row.get(7)?,
     })
+}
+
+fn read_task_hierarchy(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<(i64, Vec<Task>), ApplicationError> {
+    let job_version = connection
+        .query_row("SELECT version FROM jobs WHERE id = ?1", [job_id], |row| {
+            row.get::<_, i64>(0)
+        })
+        .optional()?
+        .ok_or_else(|| ApplicationError::NotFound {
+            resource: "job",
+            id: job_id.into(),
+        })?;
+    let task_count: i64 = connection.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE job_id = ?1",
+        [job_id],
+        |row| row.get(0),
+    )?;
+    let mut statement = connection.prepare(
+        "WITH RECURSIVE task_tree(
+            id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version, path
+         ) AS (
+            SELECT id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version,
+                   printf('%020d:%s', sort_key, id)
+            FROM tasks
+            WHERE job_id = ?1 AND parent_task_id IS NULL
+            UNION ALL
+            SELECT child.id, child.job_id, child.parent_task_id, child.sort_key, child.name,
+                   child.created_at, child.updated_at, child.version,
+                   parent.path || '/' || printf('%020d:%s', child.sort_key, child.id)
+            FROM tasks child
+            JOIN task_tree parent ON child.parent_task_id = parent.id
+            WHERE child.job_id = ?1
+         )
+         SELECT id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version
+         FROM task_tree
+         ORDER BY path",
+    )?;
+    let tasks = statement
+        .query_map([job_id], task_from_row)?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    if i64::try_from(tasks.len()).ok() != Some(task_count) {
+        return Err(ApplicationError::InvalidStoredData(format!(
+            "job {job_id} has an invalid task hierarchy"
+        )));
+    }
+    Ok((job_version, tasks))
 }
 
 fn find_task(
@@ -489,20 +552,14 @@ fn load_siblings(
     Ok(tasks)
 }
 
-fn validate_new_parent(
+fn load_ancestor_chain(
     transaction: &Transaction<'_>,
-    task: &Task,
     new_parent_task_id: Option<&str>,
-) -> Result<(), ApplicationError> {
+) -> Result<Vec<Task>, ApplicationError> {
     let mut cursor = new_parent_task_id.map(str::to_owned);
     let mut visited = HashSet::new();
-    while let Some(candidate_id) = cursor {
-        if candidate_id == task.id {
-            return Err(ApplicationError::ValidationFailed {
-                code: "task_parent_cycle",
-                message: "a task cannot be placed below itself or one of its descendants".into(),
-            });
-        }
+    let mut ancestors = Vec::new();
+    while let Some(candidate_id) = cursor.take() {
         if !visited.insert(candidate_id.clone()) {
             return Err(ApplicationError::InvalidStoredData(format!(
                 "task {candidate_id} is part of a parent cycle"
@@ -513,23 +570,8 @@ fn validate_new_parent(
                 resource: "task",
                 id: candidate_id.clone(),
             })?;
-        if candidate.job_id != task.job_id {
-            return Err(ApplicationError::ValidationFailed {
-                code: "task_parent_cross_job",
-                message: "a task parent must belong to the same job".into(),
-            });
-        }
-        cursor = candidate.parent_task_id;
+        cursor = candidate.parent_task_id.clone();
+        ancestors.push(candidate);
     }
-    Ok(())
-}
-
-fn validate_destination_index(index: usize, sibling_count: usize) -> Result<(), ApplicationError> {
-    if index > sibling_count {
-        return Err(ApplicationError::InvalidInput {
-            field: "newSiblingIndex",
-            message: format!("must be between 0 and {sibling_count}"),
-        });
-    }
-    Ok(())
+    Ok(ancestors)
 }

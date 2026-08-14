@@ -1,5 +1,6 @@
 use contractorproject_lib::application::{ApplicationService, CreateJobRequest, CreateTaskRequest};
 use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
+use rusqlite::Connection;
 
 #[test]
 fn created_job_is_available_after_reopening_the_database() {
@@ -424,4 +425,59 @@ fn reorder_rejects_a_stale_job_version_without_changing_task_versions() {
     assert_eq!(error.kind(), "version_conflict");
     assert!(error.to_string().contains("current version 3"));
     assert_eq!(service.list_tasks(&job.id).expect("list hierarchy"), before);
+}
+
+#[test]
+fn version_one_database_is_backed_up_before_the_task_migration() {
+    let temp = tempfile::tempdir().expect("create temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let connection = Connection::open(&database_path).expect("create version one database");
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+             );
+             CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0)
+             );
+             INSERT INTO schema_migrations (version, applied_at)
+             VALUES (1, '2026-08-14T00:00:00.000Z');
+             INSERT INTO jobs (
+                id, name, status, timezone, created_at, updated_at, version
+             ) VALUES (
+                'job-v1', 'Existing job', 'draft', 'America/New_York',
+                '2026-08-14T00:00:00.000Z', '2026-08-14T00:00:00.000Z', 1
+             );",
+        )
+        .expect("write version one schema");
+    drop(connection);
+
+    let service = ApplicationService::open(&database_path).expect("migrate application service");
+    assert_eq!(service.list_jobs().expect("list migrated jobs").len(), 1);
+    let backup_path = temp
+        .path()
+        .join("contractorproject.sqlite3.pre-migration-v2.bak");
+    assert!(backup_path.is_file(), "pre-migration backup should exist");
+    let backup = Connection::open(backup_path).expect("open pre-migration backup");
+    let migration: i64 = backup
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("read backup migration version");
+    let task_tables: i64 = backup
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'tasks'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("inspect backup schema");
+    assert_eq!(migration, 1);
+    assert_eq!(task_tables, 0);
 }
