@@ -20,6 +20,7 @@ npm run typecheck
 
 # test the UI and Rust core
 npm test
+npm run test:browser
 cargo test --manifest-path src-tauri/Cargo.toml --all-targets
 
 # launch the desktop app
@@ -34,6 +35,7 @@ npm run tauri dev
 - `docs/DATA_MODEL.md` owns the initial domain language and persistence model.
 - `docs/SCHEDULING.md` owns the implemented deterministic scheduling contract.
 - `docs/GANTT_READ_MODEL.md` owns the versioned Rust-to-React schedule projection.
+- `docs/GANTT_TREEGRID.md` owns the production work-breakdown interaction contract.
 - `docs/LOCAL_API.md` owns the local agent interface.
 - `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
 - `src/` owns the React UI and its narrow Tauri command client.

@@ -48,6 +48,8 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
 ## 3. Gantt and baselines
 
 - [ ] Build the production work-breakdown/timeline split view from the accepted spike.
+  - [x] Ship the virtualized semantic work-breakdown treegrid.
+  - [ ] Add the viewport-cropped SVG timeline in the shared scroll view.
 - [ ] Add zoom, pan, today/data-date markers, hierarchy collapse, and dependency rendering.
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
 - [ ] Create immutable named baselines.

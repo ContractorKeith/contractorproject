@@ -1,0 +1,236 @@
+.gantt-treegrid-scrollport {
+  position: relative;
+  height: var(--gantt-viewport-height);
+  overflow: auto;
+  background: var(--color-bg);
+  border: var(--border-hairline) solid var(--color-divider);
+  scrollbar-gutter: stable;
+}
+
+.gantt-treegrid {
+  width: 100%;
+  min-width: 980px;
+  border-spacing: 0;
+  table-layout: fixed;
+  color: var(--color-text);
+  font-size: var(--font-size-table);
+}
+
+.gantt-treegrid__row-height-probe {
+  position: absolute;
+  width: 0;
+  height: var(--row-h);
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.gantt-treegrid__wbs-column {
+  width: 84px;
+}
+
+.gantt-treegrid__name-column {
+  width: 240px;
+}
+
+.gantt-treegrid__duration-column,
+.gantt-treegrid__float-column {
+  width: 100px;
+}
+
+.gantt-treegrid__date-column {
+  width: 190px;
+}
+
+.gantt-treegrid__predecessor-column {
+  width: 120px;
+}
+
+.gantt-treegrid th,
+.gantt-treegrid td {
+  height: var(--row-h);
+  padding: 0 var(--space-3);
+  overflow: hidden;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  box-shadow: inset 0 calc(-1 * var(--border-hairline)) var(--color-divider);
+}
+
+.gantt-treegrid thead {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+}
+
+.gantt-treegrid thead th {
+  height: 34px;
+  color: var(--color-neutral-700);
+  background: var(--color-surface);
+  font-family: var(--font-heading);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-heading-weight);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.gantt-treegrid :is([role="rowheader"], [role="gridcell"]) {
+  cursor: default;
+  outline-offset: -2px;
+}
+
+.gantt-treegrid :is([role="rowheader"], [role="gridcell"]):focus-visible {
+  position: relative;
+  z-index: 1;
+  outline: var(--border-focus) solid var(--color-accent);
+}
+
+.gantt-treegrid tbody tr:hover > :is(th, td) {
+  background: var(--state-row-hover);
+}
+
+.gantt-treegrid tbody th[role="rowheader"] {
+  font-weight: inherit;
+}
+
+.gantt-treegrid__summary-row > :is(th, td) {
+  color: var(--summary-text);
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+}
+
+.gantt-treegrid :is(th, td):nth-child(3),
+.gantt-treegrid :is(th, td):nth-child(4),
+.gantt-treegrid :is(th, td):nth-child(5),
+.gantt-treegrid :is(th, td):nth-child(7) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-treegrid__task {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  padding-inline-start: calc(var(--gantt-depth) * var(--row-indent));
+}
+
+.gantt-treegrid :is(th, td):first-child {
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-treegrid__task-copy,
+.gantt-treegrid__date {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: var(--space-2);
+  line-height: 1.25;
+}
+
+.gantt-treegrid__task-copy > span:first-child,
+.gantt-treegrid__date > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.gantt-treegrid__states {
+  display: flex;
+  flex: none;
+  gap: var(--space-2);
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+  font-weight: 400;
+}
+
+.gantt-treegrid__critical {
+  color: var(--state-risk);
+}
+
+.gantt-treegrid__risk {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  color: var(--state-risk);
+}
+
+.gantt-treegrid__risk svg {
+  flex: none;
+}
+
+.gantt-treegrid__secondary {
+  min-width: 0;
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+}
+
+.gantt-treegrid__disclosure,
+.gantt-treegrid__disclosure-spacer {
+  width: 24px;
+  min-width: 24px;
+  height: 24px;
+}
+
+.gantt-treegrid__disclosure {
+  display: inline-grid;
+  padding: 0;
+  place-items: center;
+  color: var(--color-text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.gantt-treegrid__disclosure svg {
+  display: block;
+  transition: transform 120ms ease;
+}
+
+.gantt-treegrid__chevron--expanded {
+  transform: rotate(90deg);
+}
+
+.gantt-treegrid__empty {
+  padding: var(--space-6);
+  color: var(--color-neutral-700);
+  background: var(--color-bg);
+  caption-side: bottom;
+  text-align: center;
+}
+
+.gantt-treegrid__spacer td {
+  padding: 0;
+  box-shadow: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gantt-treegrid,
+  .gantt-treegrid * {
+    scroll-behavior: auto !important;
+  }
+
+  .gantt-treegrid__disclosure svg {
+    transition: none;
+  }
+}
+
+@media (forced-colors: active) {
+  .gantt-treegrid-scrollport,
+  .gantt-treegrid th,
+  .gantt-treegrid td,
+  .gantt-treegrid__summary-row > :is(th, td) {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
+  }
+
+  .gantt-treegrid :is([role="rowheader"], [role="gridcell"]):focus-visible {
+    outline-color: Highlight;
+  }
+
+  .gantt-treegrid__critical {
+    color: CanvasText;
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+  }
+}
