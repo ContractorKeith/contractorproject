@@ -1,6 +1,7 @@
 pub mod application;
 mod domain;
 mod error;
+pub mod scheduling;
 mod storage;
 mod work_breakdown;
 
