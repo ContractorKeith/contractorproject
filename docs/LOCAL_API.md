@@ -56,6 +56,11 @@ Validation failures include field paths and safe remediation details. Version co
 
 Task hierarchy queries return the owning job version plus a deterministic flat pre-order list. Parent IDs and sort keys preserve nesting without making the UI or agent adapter an alternate source of hierarchy truth.
 
+`get_schedule` returns the same versioned Gantt read model used by the desktop
+UI, optionally bounded to the requested window. The contract is defined in
+[`GANTT_READ_MODEL.md`](GANTT_READ_MODEL.md); adapters do not expose SQLite
+rows or calculate schedule facts independently.
+
 ## Context and privacy
 
 - Read tools return bounded projections selected by job and requested fields.

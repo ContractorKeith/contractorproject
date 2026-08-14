@@ -1,0 +1,47 @@
+export const GANTT_READ_MODEL_VERSION = 1 as const;
+
+export type GanttTaskKind = "summary" | "task" | "milestone";
+
+export interface GanttBaselineComparison {
+  start: string;
+  finish: string;
+  durationMinutes: number;
+  startVarianceMinutes: number;
+  finishVarianceMinutes: number;
+}
+
+export interface GanttRow {
+  taskId: string;
+  parentTaskId: string | null;
+  logicalIndex: number;
+  depth: number;
+  positionInSet: number;
+  setSize: number;
+  sortKey: number;
+  wbs: string;
+  name: string;
+  kind: GanttTaskKind;
+  hasChildren: boolean;
+  durationMinutes: number;
+  start: string;
+  finish: string;
+  totalFloatMinutes: number;
+  critical: boolean;
+  milestone: boolean;
+  summary: boolean;
+  predecessorIds: string[];
+  baseline: GanttBaselineComparison | null;
+}
+
+export interface GanttReadModel {
+  contractVersion: typeof GANTT_READ_MODEL_VERSION;
+  jobId: string;
+  jobVersion: number;
+  scheduleStart: string;
+  scheduleFinish: string;
+  baselineId: string | null;
+  rowCount: number;
+  criticalTaskIds: string[];
+  criticalPath: string[];
+  rows: GanttRow[];
+}

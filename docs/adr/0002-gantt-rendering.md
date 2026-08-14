@@ -46,6 +46,8 @@ The spike also proves stable hierarchy metadata after collapse, offscreen keyboa
 
 ## Consequences
 
+- The versioned read-model contract is implemented in `src-tauri/src/gantt.rs`,
+  mirrored in `src/types/gantt.ts`, and specified in `docs/GANTT_READ_MODEL.md`.
 - Add `@tanstack/react-virtual` only with the production Gantt slice and preserve its MIT notice in shipped third-party notices.
 - Promote the read-model projection, treegrid contract, viewport state, and SVG adapter as production code; do not merge the spike switcher, benchmark panel, fixture, canvas renderer, or all-DOM control.
 - Treat the spike envelope as a regression floor, not the final performance target.
