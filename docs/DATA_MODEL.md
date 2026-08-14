@@ -1,6 +1,6 @@
 # Initial data model
 
-Status: planning baseline  
+Status: planning baseline
 Updated: 2026-08-14
 
 ## Domain language

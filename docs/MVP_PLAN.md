@@ -1,6 +1,6 @@
 # MVP delivery plan
 
-Status: proposed  
+Status: proposed
 Updated: 2026-08-14
 
 The work is sequenced as tracer slices. Each slice leaves a usable path through the real desktop app and keeps scheduling, persistence, UI, and agent interfaces aligned.

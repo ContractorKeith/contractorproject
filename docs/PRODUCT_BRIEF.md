@@ -1,6 +1,6 @@
 # ContractorProject product brief
 
-Status: v0.1 planning baseline  
+Status: v0.1 planning baseline
 Updated: 2026-08-14
 
 ## Product

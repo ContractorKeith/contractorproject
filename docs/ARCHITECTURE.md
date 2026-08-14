@@ -1,6 +1,6 @@
 # Architecture and stack recommendation
 
-Status: recommended planning baseline  
+Status: recommended planning baseline
 Updated: 2026-08-14
 
 ## Recommendation

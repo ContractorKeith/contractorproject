@@ -1,6 +1,6 @@
 # Local agent API
 
-Status: proposed v1 contract  
+Status: proposed v1 contract
 Updated: 2026-08-14
 
 ## Interface
