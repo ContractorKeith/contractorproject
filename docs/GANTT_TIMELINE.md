@@ -48,9 +48,10 @@ against the deterministic 1,000-row fixture. Its checked-in result is
 floor is initial paint at or below 750 ms, scroll p95 at or below 25 ms, p99 at
 or below 100 ms, fewer than 5% of frames above 25 ms, collapse and zoom p95 at
 or below 100 ms, drift at or below 1 px, fewer than 500 task-related nodes, and
-zero median long tasks. The isolated Chromium harness disables headless frame
-rate limiting and vsync so shared-runner display throttling is not counted as
-Gantt renderer work.
+zero median long tasks. CI runs the isolated Chromium benchmark on macOS, the
+target platform used for the checked-in evidence. The harness disables headless
+frame-rate limiting and vsync so display throttling is not counted as Gantt
+renderer work.
 
 ```bash
 npm test
