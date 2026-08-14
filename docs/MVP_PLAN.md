@@ -14,8 +14,8 @@ Portfolio dashboards, automatic resource leveling, cloud sync, LAN mode, mobile,
 ## 0. Prove the foundation
 
 - [x] Record the stack decision after a Tauri 2 hello-world builds on macOS and Windows CI.
-- [ ] Build a Gantt interaction spike with 1,000 tasks, hierarchy collapse, synchronized scrolling, zoom, baseline bars, dependency lines, and keyboard navigation.
-- [ ] Audit the Gantt approach and all proposed runtime dependencies against the candidate project licenses.
+- [x] Build a Gantt interaction spike with 1,000 tasks, hierarchy collapse, synchronized scrolling, zoom, baseline bars, dependency lines, and keyboard navigation.
+- [x] Audit the Gantt approach and all proposed runtime dependencies against the candidate project licenses.
 - [ ] Define supported OS versions and the first signing strategy.
 - [ ] Turn the data model and local API drafts into versioned schemas.
 
