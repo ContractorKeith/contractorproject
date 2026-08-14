@@ -1,10 +1,10 @@
 # ContractorProject
 
-ContractorProject is a local-first, AI-native project and job management tool for contractors. The initial goal is to establish the product and technical foundations without committing prematurely to a UI framework or application runtime.
+ContractorProject is a local-first, AI-native project and job management tool for contractors. It is the first standalone module in a planned suite of offline business applications.
 
 ## Status
 
-skeleton — last touched 2026-08-14
+v0.1 planning — last touched 2026-08-14
 
 ## Commands
 
@@ -19,16 +19,27 @@ npm run build
 npm run typecheck
 ```
 
-## Architecture
+## Planning baseline
 
-- `src/` contains the TypeScript application source.
-- `dist/` is generated build output and is not committed.
+- `docs/PRODUCT_BRIEF.md` is the product scope.
+- `docs/ARCHITECTURE.md` is the recommended Tauri, React, Rust, and SQLite architecture.
+- `docs/DATA_MODEL.md` owns the initial domain language and persistence model.
+- `docs/LOCAL_API.md` owns the local agent interface.
+- `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
+- `src/` is only the framework-neutral TypeScript scaffold until the architecture spike is accepted.
 
 ## Conventions & Gotchas
 
-- TypeScript project; keep the initial scaffold framework-neutral until product architecture is decided.
-- Preserve local-first ownership of project and job data in architectural decisions.
+- Treat `job` as the contractor-facing aggregate; do not use generic project-management language when a construction term is clearer.
+- Keep schedule calculations deterministic and independent from UI, storage, and AI adapters.
+- Route all writes through the Rust application interface; the UI and agents never write SQLite directly.
+- Preserve local-first ownership: no network dependency for core job planning and no model call without an explicit user action.
+- Keep future suite integrations behind versioned interfaces; do not build a shared platform or event bus for v1.
 
 ## Out of Scope
 
-- Selecting a UI framework, desktop shell, synchronization model, or AI provider during initial scaffolding.
+- Full estimating, CRM, invoicing, inventory, payroll, mobile apps, real-time cloud collaboration, and heavy ERP workflows.
+
+<!-- kodade:kodmem-project:v1:start -->
+Follow the managed KödMem project-context rule in `AGENTS.md`.
+<!-- kodade:kodmem-project:v1:end -->
