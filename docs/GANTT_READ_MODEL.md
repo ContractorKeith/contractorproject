@@ -41,11 +41,17 @@ Each row exposes:
 - calculated duration, current start/finish, total float, and critical state
 - stable, sorted predecessor task IDs
 - an optional baseline comparison with baseline start/finish/duration and
-  signed start/finish variance minutes
+  signed start/finish variance minutes derived by Rust from the current and
+  baseline local civil timestamps
 
 A baseline may omit a row when that task was created after the immutable
 snapshot. The baseline identity remains present at the top level while the
 row's `baseline` value is `null`.
+
+Positive variance means the current date is later than its baseline date;
+negative variance means it is earlier. Contract v1 reports the exact local
+civil-time difference in minutes. React displays that value and never
+recalculates it.
 
 ## Query boundary
 

@@ -44,8 +44,6 @@ pub struct GanttBaselineTaskSource {
     pub start: NaiveDateTime,
     pub finish: NaiveDateTime,
     pub duration_minutes: i64,
-    pub start_variance_minutes: i64,
-    pub finish_variance_minutes: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -219,7 +217,21 @@ pub fn build_gantt_read_model(
                     .get(task.id.as_str())
                     .cloned()
                     .unwrap_or_default(),
-                baseline: baseline_by_task.get(task.id.as_str()).cloned(),
+                baseline: baseline_by_task.get(task.id.as_str()).map(|baseline| {
+                    GanttBaselineComparison {
+                        start: baseline.start,
+                        finish: baseline.finish,
+                        duration_minutes: baseline.duration_minutes,
+                        start_variance_minutes: scheduled
+                            .early_start
+                            .signed_duration_since(baseline.start)
+                            .num_minutes(),
+                        finish_variance_minutes: scheduled
+                            .early_finish
+                            .signed_duration_since(baseline.finish)
+                            .num_minutes(),
+                    }
+                }),
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -403,7 +415,7 @@ fn derive_hierarchy(
 fn join_baseline(
     baseline: Option<GanttBaselineSource>,
     task_ids: &HashSet<&str>,
-) -> Result<HashMap<String, GanttBaselineComparison>, GanttReadModelError> {
+) -> Result<HashMap<String, GanttBaselineTaskSource>, GanttReadModelError> {
     let mut baseline_by_task = HashMap::new();
     let Some(baseline) = baseline else {
         return Ok(baseline_by_task);
@@ -415,17 +427,7 @@ fn join_baseline(
             });
         }
         let task_id = task.task_id.clone();
-        let comparison = GanttBaselineComparison {
-            start: task.start,
-            finish: task.finish,
-            duration_minutes: task.duration_minutes,
-            start_variance_minutes: task.start_variance_minutes,
-            finish_variance_minutes: task.finish_variance_minutes,
-        };
-        if baseline_by_task
-            .insert(task_id.clone(), comparison)
-            .is_some()
-        {
+        if baseline_by_task.insert(task_id.clone(), task).is_some() {
             return Err(GanttReadModelError::DuplicateBaselineTask { task_id });
         }
     }

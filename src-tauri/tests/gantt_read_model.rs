@@ -127,8 +127,6 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
                 start: date_time("2026-01-05T08:00:00"),
                 finish: date_time("2026-01-05T16:00:00"),
                 duration_minutes: 480,
-                start_variance_minutes: 1_440,
-                finish_variance_minutes: 1_440,
             }],
         }),
         predecessors: vec![GanttPredecessorSource {
@@ -171,14 +169,9 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
     assert_eq!(excavate.kind, GanttTaskKind::Task);
     assert!(!excavate.has_children);
     assert_eq!(excavate.predecessor_ids, vec!["layout"]);
-    assert_eq!(
-        excavate
-            .baseline
-            .as_ref()
-            .expect("baseline comparison")
-            .start_variance_minutes,
-        1_440
-    );
+    let baseline = excavate.baseline.as_ref().expect("baseline comparison");
+    assert_eq!(baseline.start_variance_minutes, 1_440);
+    assert_eq!(baseline.finish_variance_minutes, 1_440);
 }
 
 #[test]
