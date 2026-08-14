@@ -81,3 +81,6 @@ React an alternate domain owner.
 
 `src/gantt/visibleRows.test.ts` proves collapse hides descendants while the
 Rust-provided logical indices remain unchanged.
+
+The production consumer and its keyboard/accessibility contract are specified
+in [`GANTT_TREEGRID.md`](GANTT_TREEGRID.md).
