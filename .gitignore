@@ -10,3 +10,6 @@ vite.config.d.ts
 *.log
 src-tauri/target/
 src-tauri/gen/
+.scratch/
+playwright-report/
+test-results/

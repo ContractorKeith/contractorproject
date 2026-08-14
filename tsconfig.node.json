@@ -8,5 +8,10 @@
     "moduleResolution": "Bundler",
     "allowSyntheticDefaultImports": true
   },
-  "include": ["vite.config.ts"]
+  "include": [
+    "vite.config.ts",
+    "vite.gantt.config.ts",
+    "playwright.gantt.config.ts",
+    "tests/gantt/**/*.ts"
+  ]
 }

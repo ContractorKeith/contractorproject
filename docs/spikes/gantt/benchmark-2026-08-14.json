@@ -1,0 +1,44 @@
+{
+  "schema": 1,
+  "fixtureId": "gantt-1000-v1",
+  "recordedAt": "2026-08-14",
+  "environment": {
+    "hardware": "MacBook Air Mac14,2, Apple M2 8-core, 24 GB",
+    "operatingSystem": "macOS 26.5.2 (25F84)",
+    "browser": "Headless Chrome 151.0.7922.34",
+    "viewport": "1440x900 browser, 1390x532 shared viewport",
+    "devicePixelRatio": 2,
+    "build": "Vite optimized production build"
+  },
+  "method": {
+    "warmups": 1,
+    "recordedPasses": 5,
+    "scrollFramesPerPass": 180,
+    "collapseExpandCyclesPerPass": 10,
+    "zoomCyclesPerPass": 5,
+    "droppedFrameThresholdMs": 25
+  },
+  "variants": {
+    "shared-svg": [
+      { "initialPaintMs": 21.5, "taskNodes": 115, "scrollP95Ms": 25.2, "scrollP99Ms": 57.1, "droppedFramePercent": 5.0, "collapseP95Ms": 37.8, "zoomP95Ms": 34.5, "maximumVerticalDriftPx": 0, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 29.5, "taskNodes": 115, "scrollP95Ms": 18.3, "scrollP99Ms": 71.5, "droppedFramePercent": 3.3, "collapseP95Ms": 62.5, "zoomP95Ms": 46.3, "maximumVerticalDriftPx": 0, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 21.9, "taskNodes": 115, "scrollP95Ms": 18.0, "scrollP99Ms": 71.8, "droppedFramePercent": 2.2, "collapseP95Ms": 62.7, "zoomP95Ms": 34.5, "maximumVerticalDriftPx": 0, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 22.9, "taskNodes": 115, "scrollP95Ms": 18.3, "scrollP99Ms": 76.8, "droppedFramePercent": 2.8, "collapseP95Ms": 75.7, "zoomP95Ms": 56.2, "maximumVerticalDriftPx": 0, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 27.8, "taskNodes": 115, "scrollP95Ms": 17.9, "scrollP99Ms": 79.5, "droppedFramePercent": 2.2, "collapseP95Ms": 80.0, "zoomP95Ms": 52.6, "maximumVerticalDriftPx": 0, "longTasksOver50Ms": 0 }
+    ],
+    "split-canvas": [
+      { "initialPaintMs": 30.7, "taskNodes": 27, "scrollP95Ms": 25.1, "scrollP99Ms": 241.7, "droppedFramePercent": 5.0, "collapseP95Ms": 34.4, "zoomP95Ms": 34.3, "maximumVerticalDriftPx": 307, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 32.7, "taskNodes": 27, "scrollP95Ms": 23.5, "scrollP99Ms": 223.4, "droppedFramePercent": 3.9, "collapseP95Ms": 103.2, "zoomP95Ms": 34.3, "maximumVerticalDriftPx": 307, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 32.0, "taskNodes": 27, "scrollP95Ms": 23.6, "scrollP99Ms": 32.2, "droppedFramePercent": 2.2, "collapseP95Ms": 291.1, "zoomP95Ms": 34.4, "maximumVerticalDriftPx": 307, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 31.0, "taskNodes": 27, "scrollP95Ms": 25.4, "scrollP99Ms": 246.0, "droppedFramePercent": 5.0, "collapseP95Ms": 34.3, "zoomP95Ms": 33.5, "maximumVerticalDriftPx": 307, "longTasksOver50Ms": 0 },
+      { "initialPaintMs": 33.2, "taskNodes": 27, "scrollP95Ms": 23.6, "scrollP99Ms": 224.0, "droppedFramePercent": 3.9, "collapseP95Ms": 34.4, "zoomP95Ms": 104.7, "maximumVerticalDriftPx": 307, "longTasksOver50Ms": 0 }
+    ],
+    "row-dom": [
+      { "initialPaintMs": 317.1, "taskNodes": 5358, "scrollP95Ms": 119.9, "scrollP99Ms": 137.7, "droppedFramePercent": 10.0, "collapseP95Ms": 928.2, "zoomP95Ms": 918.2, "maximumVerticalDriftPx": 0.5, "longTasksOver50Ms": 47 },
+      { "initialPaintMs": 331.5, "taskNodes": 5358, "scrollP95Ms": 125.3, "scrollP99Ms": 144.3, "droppedFramePercent": 7.8, "collapseP95Ms": 913.1, "zoomP95Ms": 2196.7, "maximumVerticalDriftPx": 0.5, "longTasksOver50Ms": 51 },
+      { "initialPaintMs": 325.5, "taskNodes": 5358, "scrollP95Ms": 121.4, "scrollP99Ms": 183.7, "droppedFramePercent": 8.3, "collapseP95Ms": 1529.6, "zoomP95Ms": 1327.1, "maximumVerticalDriftPx": 0.5, "longTasksOver50Ms": 49 },
+      { "initialPaintMs": 330.8, "taskNodes": 5358, "scrollP95Ms": 121.1, "scrollP99Ms": 175.4, "droppedFramePercent": 8.9, "collapseP95Ms": 729.3, "zoomP95Ms": 1191.5, "maximumVerticalDriftPx": 0.5, "longTasksOver50Ms": 47 },
+      { "initialPaintMs": 330.4, "taskNodes": 5358, "scrollP95Ms": 121.6, "scrollP99Ms": 192.7, "droppedFramePercent": 8.3, "collapseP95Ms": 1171.0, "zoomP95Ms": 1326.1, "maximumVerticalDriftPx": 0.5, "longTasksOver50Ms": 49 }
+    ]
+  }
+}
