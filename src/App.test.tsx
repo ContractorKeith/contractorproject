@@ -1,11 +1,16 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { JobClient } from "./api/jobs";
 
 describe("job workspace", () => {
+  beforeEach(() => {
+    window.localStorage.clear();
+    delete document.documentElement.dataset.theme;
+  });
+
   it("creates a first job and shows it in the workspace", async () => {
     const user = userEvent.setup();
     const createdJob = {
@@ -33,5 +38,19 @@ describe("job workspace", () => {
       name: createdJob.name,
       timezone: expect.any(String),
     });
+  });
+
+  it("lets the user override the system theme", async () => {
+    const user = userEvent.setup();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([]),
+      createJob: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.selectOptions(screen.getByLabelText("Theme"), "dark");
+
+    expect(document.documentElement).toHaveAttribute("data-theme", "dark");
+    expect(window.localStorage.getItem("contractorproject.theme")).toBe("dark");
   });
 });

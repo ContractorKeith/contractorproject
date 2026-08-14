@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
+import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type { Job } from "./types/jobs";
 
 interface AppProps {
@@ -14,6 +15,15 @@ export function App({ client = tauriJobClient }: AppProps) {
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [theme, setTheme] = useState<ThemePreference>(loadThemePreference);
+
+  useEffect(
+    () =>
+      watchTheme(theme, (resolvedTheme) => {
+        document.documentElement.dataset.theme = resolvedTheme;
+      }),
+    [theme],
+  );
 
   useEffect(() => {
     let active = true;
@@ -63,9 +73,23 @@ export function App({ client = tauriJobClient }: AppProps) {
             Contractor<span>Project</span>
           </span>
         </a>
-        <div className="storage-state" aria-label="Local storage status">
-          <span className="storage-state__dot" />
-          Local SQLite · on this device
+        <div className="header-controls">
+          <label className="theme-control">
+            <span>Theme</span>
+            <select
+              aria-label="Theme"
+              value={theme}
+              onChange={(event) => setTheme(event.target.value as ThemePreference)}
+            >
+              <option value="system">System</option>
+              <option value="light">Light</option>
+              <option value="dark">Dark</option>
+            </select>
+          </label>
+          <div className="storage-state" aria-label="Local storage status">
+            <span className="storage-state__dot" />
+            Local SQLite · on this device
+          </div>
         </div>
       </header>
 
@@ -125,10 +149,10 @@ export function App({ client = tauriJobClient }: AppProps) {
             </div>
           ) : (
             <div className="job-list">
-              {jobs.map((job) => (
+              {jobs.map((job, index) => (
                 <article className="job-card" key={job.id}>
                   <div className="job-card__number" aria-hidden="true">
-                    {String(jobs.indexOf(job) + 1).padStart(2, "0")}
+                    {String(index + 1).padStart(2, "0")}
                   </div>
                   <div className="job-card__content">
                     <div className="job-card__meta">

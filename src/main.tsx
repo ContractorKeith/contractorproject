@@ -10,6 +10,8 @@ import "./styles.css";
 const root = document.getElementById("root");
 if (!root) throw new Error("ContractorProject root element is missing");
 
+document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "macos" : "other";
+
 createRoot(root).render(
   <StrictMode>
     <App />
