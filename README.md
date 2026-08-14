@@ -2,17 +2,20 @@
 
 Local-first, AI-native project and job management for contractors. ContractorProject is the first standalone module in a planned suite of offline business tools.
 
-Status: v0.1 planning
+Status: v0.1 foundation implementation
 
 ## Planning baseline
 
 - [Product brief](docs/PRODUCT_BRIEF.md)
 - [Architecture and stack](docs/ARCHITECTURE.md)
+- [Design guide](docs/DESIGN.md)
+- [Logo mockups](docs/LogoMockups.html)
 - [Data model](docs/DATA_MODEL.md)
 - [Local agent API](docs/LOCAL_API.md)
 - [MVP plan](docs/MVP_PLAN.md)
+- [Application foundation ADR](docs/adr/0001-application-foundation.md)
 
-The recommended implementation is a Tauri 2 desktop app with a React/TypeScript UI, a Rust application core, and SQLite storage. The repository remains a planning scaffold until the first architecture spike is accepted.
+The application foundation is a Tauri 2 desktop app with a React/TypeScript UI, a Rust application core, and SQLite storage. The first vertical slice creates a job through the Rust application interface, persists it locally, and lists it in the desktop UI.
 
 ## Development
 
@@ -20,4 +23,7 @@ The recommended implementation is a Tauri 2 desktop app with a React/TypeScript 
 npm install
 npm run build
 npm run typecheck
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+npm run tauri dev
 ```

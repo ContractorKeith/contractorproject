@@ -54,10 +54,14 @@ A contractor can create a job, build a hierarchical work plan, connect task depe
 
 ## Product decisions still open
 
-- Final product name and domain
+- Public website domain
 - Open-source license
 - Minimum supported macOS and Windows versions
 - Whether v1 ships only the custom project archive and CSV or also imports a third-party project format
 - Which Gantt rendering approach passes the interaction and licensing spike
 
 These decisions do not block the first vertical slice except for the Gantt spike and distribution-license audit.
+
+## Accepted identity
+
+ContractorProject is the product name. The three-bar dependency mark, steel palette, Barlow typography, and application visual language are defined in `DESIGN.md` and `LogoMockups.html`.

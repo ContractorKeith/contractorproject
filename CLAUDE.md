@@ -4,7 +4,7 @@ ContractorProject is a local-first, AI-native project and job management tool fo
 
 ## Status
 
-v0.1 planning — last touched 2026-08-14
+v0.1 foundation implementation — last touched 2026-08-14
 
 ## Commands
 
@@ -17,16 +17,26 @@ npm run build
 
 # typecheck
 npm run typecheck
+
+# test the UI and Rust core
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml --all-targets
+
+# launch the desktop app
+npm run tauri dev
 ```
 
 ## Planning baseline
 
 - `docs/PRODUCT_BRIEF.md` is the product scope.
 - `docs/ARCHITECTURE.md` is the recommended Tauri, React, Rust, and SQLite architecture.
+- `docs/DESIGN.md` is the accepted visual language and application identity.
 - `docs/DATA_MODEL.md` owns the initial domain language and persistence model.
 - `docs/LOCAL_API.md` owns the local agent interface.
 - `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
-- `src/` is only the framework-neutral TypeScript scaffold until the architecture spike is accepted.
+- `src/` owns the React UI and its narrow Tauri command client.
+- `src-tauri/src/application.rs` is the public application seam used by UI commands and future agents.
+- `src-tauri/src/storage.rs` owns SQLite access and migrations.
 
 ## Conventions & Gotchas
 
