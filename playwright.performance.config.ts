@@ -12,7 +12,17 @@ export default defineConfig({
     viewport: { width: 1440, height: 900 },
     deviceScaleFactor: 1,
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        launchOptions: {
+          args: ["--disable-frame-rate-limit", "--disable-gpu-vsync"],
+        },
+      },
+    },
+  ],
   webServer: {
     command: "vite preview --config vite.performance.config.ts --host 127.0.0.1 --port 4176",
     url: "http://127.0.0.1:4176/tests/browser/gantt.html",
