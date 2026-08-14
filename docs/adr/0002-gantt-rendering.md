@@ -48,8 +48,11 @@ The spike also proves stable hierarchy metadata after collapse, offscreen keyboa
 
 - The versioned read-model contract is implemented in `src-tauri/src/gantt.rs`,
   mirrored in `src/types/gantt.ts`, and specified in `docs/GANTT_READ_MODEL.md`.
+- The shared production treegrid and viewport-cropped SVG adapter are
+  implemented in `src/gantt/GanttTreegrid.tsx` and `src/gantt/GanttTimeline.tsx`.
 - Add `@tanstack/react-virtual` only with the production Gantt slice and preserve its MIT notice in shipped third-party notices.
 - Promote the read-model projection, treegrid contract, viewport state, and SVG adapter as production code; do not merge the spike switcher, benchmark panel, fixture, canvas renderer, or all-DOM control.
 - Treat the spike envelope as a regression floor, not the final performance target.
+- Run the optimized Chromium regression on macOS and isolate it from headless frame-rate limiting so CI measures renderer work rather than Linux shared-runner display throttling.
 - Every drag interaction must have a keyboard and non-drag alternative.
 - Completion requires packaged-app keyboard and assistive-technology evidence on both supported platforms.

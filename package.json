@@ -10,6 +10,7 @@
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:browser": "playwright test",
+    "test:performance": "vite build --config vite.performance.config.ts && playwright test --config playwright.performance.config.ts",
     "test:watch": "vitest",
     "tauri": "tauri"
   },

@@ -1,3 +1,30 @@
+.gantt-schedule {
+  min-width: 0;
+  --gantt-wbs-width: clamp(460px, 55vw, 720px);
+}
+
+.gantt-schedule__toolbar {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-1);
+  padding-block-end: var(--space-2);
+}
+
+.gantt-schedule__toolbar button {
+  min-height: var(--control-height-small);
+  padding: 0 var(--space-3);
+  color: var(--color-text);
+  background: transparent;
+  border: var(--border-hairline) solid var(--color-divider);
+  border-radius: var(--radius-sm);
+}
+
+.gantt-schedule__toolbar button[aria-pressed="true"] {
+  color: var(--color-on-action);
+  background: var(--color-action);
+  border-color: var(--color-action);
+}
+
 .gantt-treegrid-scrollport {
   position: relative;
   height: var(--gantt-viewport-height);
@@ -7,13 +34,158 @@
   scrollbar-gutter: stable;
 }
 
+.gantt-schedule__split {
+  display: grid;
+  grid-template-columns: var(--gantt-wbs-width) max-content;
+  align-items: start;
+  width: max-content;
+  min-width: 100%;
+}
+
+.gantt-treegrid-viewport {
+  position: sticky;
+  z-index: 3;
+  left: 0;
+  background: var(--color-bg);
+  border-right: var(--border-hairline) solid var(--color-divider);
+}
+
 .gantt-treegrid {
-  width: 100%;
-  min-width: 980px;
+  width: var(--gantt-wbs-width);
+  min-width: var(--gantt-wbs-width);
   border-spacing: 0;
   table-layout: fixed;
   color: var(--color-text);
   font-size: var(--font-size-table);
+}
+
+.gantt-timeline-pane {
+  position: relative;
+  min-width: 0;
+  outline-offset: -2px;
+}
+
+.gantt-timeline {
+  position: relative;
+  min-width: 100%;
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.gantt-timeline__ruler {
+  position: sticky;
+  z-index: 2;
+  top: 0;
+  height: 34px;
+  color: var(--color-neutral-700);
+  background: var(--color-surface);
+  box-shadow: inset 0 -1px var(--color-divider);
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-timeline__ruler-coarse,
+.gantt-timeline__ruler-fine {
+  position: relative;
+  height: 17px;
+  overflow: hidden;
+}
+
+.gantt-timeline__ruler-coarse {
+  font-family: var(--font-heading);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-heading-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.gantt-timeline__ruler-fine {
+  font-size: 10px;
+}
+
+.gantt-timeline__ruler span {
+  position: absolute;
+  padding-inline-start: var(--space-1);
+  border-inline-start: 1px solid var(--color-divider);
+  white-space: nowrap;
+}
+
+.gantt-timeline__svg {
+  position: absolute;
+  left: 0;
+  display: block;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.gantt-timeline__grid line,
+.gantt-timeline__row-rule {
+  stroke: var(--color-neutral-200);
+  stroke-width: 1;
+  shape-rendering: crispEdges;
+}
+
+.gantt-timeline__grid .gantt-timeline__period-rule {
+  stroke: var(--color-neutral-300);
+}
+
+.gantt-timeline__task {
+  fill: var(--sched-normal);
+}
+
+.gantt-timeline__task--critical {
+  fill: var(--sched-critical);
+  stroke: var(--color-accent-900);
+  stroke-width: 1;
+}
+
+.gantt-timeline__summary {
+  fill: var(--sched-summary);
+  stroke: var(--sched-summary);
+  stroke-width: 1.5;
+}
+
+.gantt-timeline__milestone {
+  fill: var(--sched-milestone);
+  stroke: var(--color-text);
+  stroke-width: 1;
+}
+
+.gantt-timeline__baseline {
+  fill: var(--sched-baseline);
+  opacity: 0.8;
+}
+
+.gantt-timeline__dependency {
+  fill: none;
+  stroke: var(--color-neutral-600);
+  stroke-width: 1;
+  transition: opacity 120ms ease, stroke 120ms ease;
+}
+
+.gantt-timeline__dependency--critical {
+  stroke: var(--sched-critical);
+  stroke-width: 1.5;
+}
+
+.gantt-timeline__dependency--active {
+  stroke: var(--color-text);
+  opacity: 1;
+}
+
+.gantt-timeline__dependency--muted {
+  opacity: 0.35;
+}
+
+.gantt-timeline__arrow path {
+  fill: var(--color-neutral-600);
+}
+
+.gantt-timeline__arrow--critical path {
+  fill: var(--sched-critical);
+}
+
+.gantt-timeline__arrow--active path {
+  fill: var(--color-text);
 }
 
 .gantt-treegrid__row-height-probe {
@@ -25,24 +197,27 @@
 }
 
 .gantt-treegrid__wbs-column {
-  width: 84px;
+  width: 8.333%;
 }
 
 .gantt-treegrid__name-column {
-  width: 240px;
+  width: 25%;
 }
 
-.gantt-treegrid__duration-column,
+.gantt-treegrid__duration-column {
+  width: 10%;
+}
+
 .gantt-treegrid__float-column {
-  width: 100px;
+  width: 10%;
 }
 
 .gantt-treegrid__date-column {
-  width: 190px;
+  width: 16.667%;
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 120px;
+  width: 13.333%;
 }
 
 .gantt-treegrid th,
@@ -212,6 +387,10 @@
   .gantt-treegrid__disclosure svg {
     transition: none;
   }
+
+  .gantt-timeline__dependency {
+    transition: none;
+  }
 }
 
 @media (forced-colors: active) {
@@ -232,5 +411,35 @@
     color: CanvasText;
     text-decoration: underline;
     text-decoration-thickness: 2px;
+  }
+
+  .gantt-timeline__task,
+  .gantt-timeline__task--critical,
+  .gantt-timeline__summary,
+  .gantt-timeline__milestone,
+  .gantt-timeline__baseline {
+    fill: Canvas;
+    stroke: CanvasText;
+    stroke-width: 1.5;
+  }
+
+  .gantt-timeline__task--critical {
+    stroke-width: 3;
+  }
+
+  .gantt-timeline__baseline {
+    stroke-dasharray: 3 2;
+  }
+
+  .gantt-timeline__dependency,
+  .gantt-timeline__grid line,
+  .gantt-timeline__row-rule {
+    stroke: CanvasText;
+  }
+
+  .gantt-timeline__arrow path,
+  .gantt-timeline__arrow--critical path,
+  .gantt-timeline__arrow--active path {
+    fill: CanvasText;
   }
 }
