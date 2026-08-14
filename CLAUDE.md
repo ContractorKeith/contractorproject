@@ -32,6 +32,7 @@ npm run tauri dev
 - `docs/ARCHITECTURE.md` is the recommended Tauri, React, Rust, and SQLite architecture.
 - `docs/DESIGN.md` is the accepted visual language and application identity.
 - `docs/DATA_MODEL.md` owns the initial domain language and persistence model.
+- `docs/SCHEDULING.md` owns the implemented deterministic scheduling contract.
 - `docs/LOCAL_API.md` owns the local agent interface.
 - `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
 - `src/` owns the React UI and its narrow Tauri command client.

@@ -26,6 +26,10 @@ This is the smallest credible architecture that supports native macOS and Window
 
 Do not give the frontend direct SQLite access. Tauri commands and MCP tools should translate inputs into the same Rust application requests, so validation, authorization, transactions, audit data, and error behavior stay local to one deep module.
 
+The implemented pure-Rust FS calculation contract is documented in
+[`SCHEDULING.md`](SCHEDULING.md). SQLite and UI adapters consume its inputs and
+outputs; neither owns schedule truth.
+
 ## Shape
 
 ```text

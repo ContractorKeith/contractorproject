@@ -47,6 +47,11 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 
 Summary tasks are ordinary tasks with children. Their calculated dates, duration, progress, and critical state are derived and cannot be edited directly.
 
+The implemented FS scheduling semantics, including working-minute boundaries,
+summary rollups, float, and deterministic path selection, are defined in
+[`SCHEDULING.md`](SCHEDULING.md). Calculated schedule fields remain a
+replaceable projection rather than canonical persisted inputs.
+
 Task hierarchy writes use two concurrency levels: each task has its own `version`, while the owning job's `version` is the aggregate token for the ordered hierarchy. Creating or editing a task increments the job version. Reordering checks both the moved task and job versions, rewrites affected sibling positions atomically, and increments the version of every task whose parent or order changed.
 
 ### `task_dependencies`
@@ -58,6 +63,9 @@ Task hierarchy writes use two concurrency levels: each task has its own `version
 - unique predecessor/successor/type tuple
 
 The application rejects self-links, cross-job links, duplicate links, and dependency cycles before commit.
+
+The first scheduling slice calculates FS links with non-negative working-time
+lag. Other relationship types and negative lag remain deferred.
 
 ### `calendars`
 
