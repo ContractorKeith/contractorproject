@@ -45,9 +45,10 @@ reader version, theme or contrast mode, and actual spoken text for each step.
    Phase 1 and Phase 2 retains logical row position 102.
 6. Use PageDown and PageUp across virtualized rows. Confirm focus never drops
    to the window or lands on an offscreen cell.
-7. Tab to the timeline region and use its arrow-key horizontal scrolling.
-   Return to the zoom group and select Day, Week, Month, and Quarter. Confirm
-   the schedule remains operable without drag input.
+7. Confirm the supplemental timeline is absent from the accessibility tree and
+   that the authoritative table retains every schedule fact. Return to the
+   zoom group and select Day, Week, Month, and Quarter. Confirm zoom and shared
+   horizontal scrolling preserve the focused task without drag input.
 8. Repeat the focused-row and timeline checks in macOS Increase Contrast or
    Windows High Contrast and with Reduce Motion enabled. Capture screenshots
    showing the focus indicator and distinguishable task, critical, milestone,
