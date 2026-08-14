@@ -13,7 +13,7 @@ Portfolio dashboards, automatic resource leveling, cloud sync, LAN mode, mobile,
 
 ## 0. Prove the foundation
 
-- [ ] Record the stack decision after a Tauri 2 hello-world builds on macOS and Windows CI.
+- [x] Record the stack decision after a Tauri 2 hello-world builds on macOS and Windows CI.
 - [ ] Build a Gantt interaction spike with 1,000 tasks, hierarchy collapse, synchronized scrolling, zoom, baseline bars, dependency lines, and keyboard navigation.
 - [ ] Audit the Gantt approach and all proposed runtime dependencies against the candidate project licenses.
 - [ ] Define supported OS versions and the first signing strategy.
@@ -23,8 +23,8 @@ Exit: the team can build, test, and package the shell on both platforms, and the
 
 ## 1. First durable job
 
-- [ ] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
-- [ ] Add SQLite initialization, forward migrations, and application-data path handling.
+- [x] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
+- [x] Add SQLite initialization, forward migrations, and application-data path handling.
 - [ ] Implement create/list/open/archive job commands.
 - [ ] Implement task hierarchy create/edit/reorder with record-version conflicts.
 - [ ] Render the job list and work breakdown table through the real application interface.
@@ -102,3 +102,5 @@ Exit: source checks, commit, package, signing, installed acceptance, publication
 ## First implementation issue
 
 Build the thinnest end-to-end slice: create a Tauri window, create one job through a Rust application command, persist it in SQLite, list it in React, restart, and prove it remains. Do not start the full Gantt implementation until that vertical path is green on macOS and Windows CI.
+
+Status: complete. The durable create/list path passed local restart verification and the macOS/Windows gates in GitHub Actions run [31816538579](https://github.com/ContractorKeith/contractorproject/actions/runs/31816538579).

@@ -1,6 +1,6 @@
 # ADR 0001: Application foundation
 
-Status: proposed pending macOS and Windows CI
+Status: accepted
 Date: 2026-08-14
 
 ## Context
@@ -21,6 +21,7 @@ The stack decision becomes accepted when the shell compiles and its tests pass i
 - The Rust application interface creates a job, persists it in SQLite, and reads it after the database is reopened.
 - The Tauri shell compiles locally on macOS.
 - The repository quality workflow exercises the native shell on macOS and Windows.
+- GitHub Actions run [31816538579](https://github.com/ContractorKeith/contractorproject/actions/runs/31816538579) passed frontend, macOS, and Windows quality gates for commit `9ba6ed26f05e555f5f0f44befd0bafaf27eae1a8`.
 
 ## Consequences
 
