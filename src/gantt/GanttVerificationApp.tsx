@@ -1,12 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { GanttTreegrid } from "./GanttTreegrid";
 import {
   createGanttVerificationReadModel,
   GANTT_VERIFICATION_FIXTURE_ID,
 } from "./verificationFixture";
-
-const VERIFICATION_APP_READY_MS = performance.now();
 
 interface PackagedBenchmarkResult {
   initialPaintMs: number;
@@ -26,17 +24,29 @@ type BenchmarkState =
 
 export function GanttVerificationApp() {
   const readModel = useMemo(createGanttVerificationReadModel, []);
+  const [initialPaintMs, setInitialPaintMs] = useState<number | null>(null);
   const [benchmark, setBenchmark] = useState<BenchmarkState>({
     status: "idle",
   });
   const commit = import.meta.env.VITE_APP_COMMIT || "unrecorded";
+
+  useEffect(() => {
+    let secondFrame = 0;
+    const firstFrame = requestAnimationFrame(() => {
+      secondFrame = requestAnimationFrame(() => setInitialPaintMs(performance.now()));
+    });
+    return () => {
+      cancelAnimationFrame(firstFrame);
+      cancelAnimationFrame(secondFrame);
+    };
+  }, []);
 
   async function handleBenchmark() {
     setBenchmark({ status: "running" });
     try {
       setBenchmark({
         status: "complete",
-        result: await runPackagedBenchmark(),
+        result: await runPackagedBenchmark(initialPaintMs ?? performance.now()),
       });
     } catch (reason: unknown) {
       setBenchmark({
@@ -99,7 +109,7 @@ export function GanttVerificationApp() {
           <button
             type="button"
             onClick={() => void handleBenchmark()}
-            disabled={benchmark.status === "running"}
+            disabled={benchmark.status === "running" || initialPaintMs === null}
           >
             {benchmark.status === "running"
               ? "Running benchmark…"
@@ -157,7 +167,9 @@ function formatMetric(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
-async function runPackagedBenchmark(): Promise<PackagedBenchmarkResult> {
+async function runPackagedBenchmark(
+  initialPaintMs: number,
+): Promise<PackagedBenchmarkResult> {
   const scrollport = document.querySelector<HTMLElement>(
     ".gantt-treegrid-scrollport",
   );
@@ -215,7 +227,7 @@ async function runPackagedBenchmark(): Promise<PackagedBenchmarkResult> {
   }
 
   return {
-    initialPaintMs: VERIFICATION_APP_READY_MS,
+    initialPaintMs,
     scrollP95Ms: median(passes.map((pass) => pass.p95)),
     scrollP99Ms: median(passes.map((pass) => pass.p99)),
     framesAbove25Percent: median(
