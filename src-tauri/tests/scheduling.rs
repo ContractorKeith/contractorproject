@@ -356,4 +356,40 @@ fn reports_an_out_of_range_schedule_instead_of_panicking() {
     })
     .expect_err("overflowing working-minute arithmetic must return an error");
     assert_eq!(error.code(), "schedule_out_of_range");
+
+    let error = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks: vec![task("A", 1_000_000_000_000_000)],
+        dependencies: vec![],
+    })
+    .expect_err("an unrepresentable terminal finish must return an error");
+    assert_eq!(error.code(), "schedule_out_of_range");
+}
+
+#[test]
+fn rejects_a_hierarchy_deeper_than_the_supported_wbs_limit() {
+    let mut tasks = Vec::new();
+    for index in 0..257 {
+        tasks.push(ScheduleTask {
+            id: format!("S{index:03}"),
+            parent_task_id: (index > 0).then(|| format!("S{:03}", index - 1)),
+            duration_minutes: None,
+        });
+    }
+    tasks.push(ScheduleTask {
+        id: "leaf".into(),
+        parent_task_id: Some("S256".into()),
+        duration_minutes: Some(480),
+    });
+
+    let error = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks,
+        dependencies: vec![],
+    })
+    .expect_err("over-deep task hierarchy must be rejected");
+
+    assert_eq!(error.code(), "task_hierarchy_too_deep");
 }

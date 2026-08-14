@@ -42,6 +42,8 @@ timezone/DST resolution are separate application slices.
 - A summary has children and `durationMinutes: None`. Entered summary duration
   is rejected rather than silently ignored.
 - Parent IDs must exist and the hierarchy must be acyclic.
+- Hierarchy depth is limited to 256 levels so malformed imports cannot exhaust
+  the native stack while summaries are derived.
 - Summaries are not dependency-graph vertices. A dependency incident to a
   summary is rejected.
 

@@ -37,7 +37,7 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 - [x] Specify duration, working-date, FS lag, weekly-calendar, and summary-task rules with executable examples.
 - [ ] Specify constraints and data-date/progress rules with examples.
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
-- [ ] Add SS, FF, and SF dependency types plus positive and negative lag.
+- [ ] Add SS, FF, and SF dependency types plus negative lag.
 - [ ] Add default working calendar and dated exceptions.
 - [ ] Expose schedule calculation through application queries with fixture-based tests.
 - [ ] Show validation failures and schedule explanations in the work breakdown table.

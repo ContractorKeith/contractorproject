@@ -4,6 +4,8 @@ use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+const MAX_HIERARCHY_DEPTH: usize = 256;
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CalendarWeekday {
@@ -197,18 +199,18 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
         let summary = !hierarchy.children[index].is_empty();
         let zero_span = offset.duration_minutes == 0;
         tasks.push(ScheduledTask {
-                id: task.id.clone(),
-                parent_task_id: task.parent_task_id.clone(),
-                duration_minutes: offset.duration_minutes,
-                early_start: calendar.task_start_instant(offset.early_start, zero_span)?,
-                early_finish: calendar.event_instant(offset.early_finish)?,
-                late_start: calendar.task_start_instant(offset.late_start, zero_span)?,
-                late_finish: calendar.event_instant(offset.late_finish)?,
-                total_float_minutes: offset.total_float_minutes,
-                critical: offset.total_float_minutes == 0,
-                milestone: !summary && zero_span,
-                summary,
-            });
+            id: task.id.clone(),
+            parent_task_id: task.parent_task_id.clone(),
+            duration_minutes: offset.duration_minutes,
+            early_start: calendar.task_start_instant(offset.early_start, zero_span)?,
+            early_finish: calendar.event_instant(offset.early_finish)?,
+            late_start: calendar.task_start_instant(offset.late_start, zero_span)?,
+            late_finish: calendar.event_instant(offset.late_finish)?,
+            total_float_minutes: offset.total_float_minutes,
+            critical: offset.total_float_minutes == 0,
+            milestone: !summary && zero_span,
+            summary,
+        });
     }
 
     let schedule_finish = tasks
@@ -280,10 +282,7 @@ impl<'a> TaskHierarchy<'a> {
                 children[parent_index].push(index);
             }
         }
-        let mut colors = vec![0_u8; tasks.len()];
-        for index in 0..tasks.len() {
-            validate_hierarchy_chain(index, &parents, &mut colors, tasks)?;
-        }
+        validate_hierarchy(&parents, tasks)?;
 
         let mut leaf_indices = Vec::new();
         for (index, task) in tasks.iter().enumerate() {
@@ -321,27 +320,52 @@ impl<'a> TaskHierarchy<'a> {
     }
 }
 
-fn validate_hierarchy_chain(
-    index: usize,
+fn validate_hierarchy(
     parents: &[Option<usize>],
-    colors: &mut [u8],
     tasks: &[ScheduleTask],
 ) -> Result<(), ScheduleError> {
-    match colors[index] {
-        2 => return Ok(()),
-        1 => {
-            return Err(invalid_task(
-                "task_hierarchy_cycle",
-                format!("task hierarchy contains a cycle at {}", tasks[index].id),
-            ))
+    let mut states = vec![0_u8; tasks.len()];
+    let mut depths = vec![0_usize; tasks.len()];
+    for start in 0..tasks.len() {
+        if states[start] == 2 {
+            continue;
         }
-        _ => {}
+        let mut current = start;
+        let mut path = Vec::new();
+        let base_depth = loop {
+            match states[current] {
+                2 => break depths[current],
+                1 => {
+                    return Err(invalid_task(
+                        "task_hierarchy_cycle",
+                        format!("task hierarchy contains a cycle at {}", tasks[current].id),
+                    ))
+                }
+                _ => {}
+            }
+            states[current] = 1;
+            path.push(current);
+            match parents[current] {
+                Some(parent) => current = parent,
+                None => break 0,
+            }
+        };
+
+        let mut depth = base_depth;
+        for index in path.into_iter().rev() {
+            depth = depth
+                .checked_add(1)
+                .ok_or(ScheduleError::ScheduleOutOfRange)?;
+            if depth > MAX_HIERARCHY_DEPTH {
+                return Err(invalid_task(
+                    "task_hierarchy_too_deep",
+                    format!("task hierarchy cannot exceed {MAX_HIERARCHY_DEPTH} levels"),
+                ));
+            }
+            depths[index] = depth;
+            states[index] = 2;
+        }
     }
-    colors[index] = 1;
-    if let Some(parent) = parents[index] {
-        validate_hierarchy_chain(parent, parents, colors, tasks)?;
-    }
-    colors[index] = 2;
     Ok(())
 }
 
@@ -526,9 +550,9 @@ impl<'a> LeafGraph<'a> {
         };
         let mut path = vec![current];
         while let Some(predecessor) = self.predecessors[current].iter().find_map(|&(index, lag)| {
-                (total_float[index] == 0
-                    && early_finish[index].checked_add(lag) == Some(early_start[current]))
-                .then_some(index)
+            (total_float[index] == 0
+                && early_finish[index].checked_add(lag) == Some(early_start[current]))
+            .then_some(index)
         }) {
             path.push(predecessor);
             current = predecessor;
@@ -661,9 +685,11 @@ impl CalendarMath {
         let calendar_days = full_weeks
             .checked_mul(7)
             .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        let calendar_delta =
+            Duration::try_days(calendar_days).ok_or(ScheduleError::ScheduleOutOfRange)?;
         let mut date = self
             .first_working_date
-            .checked_add_signed(Duration::days(calendar_days))
+            .checked_add_signed(calendar_delta)
             .ok_or(ScheduleError::ScheduleOutOfRange)?;
         let mut remaining = working_days % days_per_week;
         while remaining > 0 {
