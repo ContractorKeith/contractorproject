@@ -10,10 +10,24 @@ import "./styles.css";
 const root = document.getElementById("root");
 if (!root) throw new Error("ContractorProject root element is missing");
 
-document.documentElement.dataset.platform = /Mac/.test(navigator.platform) ? "macos" : "other";
+document.documentElement.dataset.platform = /Mac/.test(navigator.platform)
+  ? "macos"
+  : "other";
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+if (import.meta.env.VITE_GANTT_VERIFICATION === "1") {
+  void import("./gantt/GanttVerificationApp").then(
+    ({ GanttVerificationApp }) => {
+      createRoot(root).render(
+        <StrictMode>
+          <GanttVerificationApp />
+        </StrictMode>,
+      );
+    },
+  );
+} else {
+  createRoot(root).render(
+    <StrictMode>
+      <App />
+    </StrictMode>,
+  );
+}

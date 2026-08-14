@@ -16,6 +16,7 @@ Status: v0.1 foundation implementation
 - [Application foundation ADR](docs/adr/0001-application-foundation.md)
 - [Gantt treegrid contract](docs/GANTT_TREEGRID.md)
 - [Gantt timeline contract](docs/GANTT_TIMELINE.md)
+- [Packaged Gantt platform verification](docs/GANTT_PLATFORM_VERIFICATION.md)
 
 The application foundation is a Tauri 2 desktop app with a React/TypeScript UI, a Rust application core, and SQLite storage. The first vertical slice creates a job through the Rust application interface, persists it locally, and lists it in the desktop UI.
 
