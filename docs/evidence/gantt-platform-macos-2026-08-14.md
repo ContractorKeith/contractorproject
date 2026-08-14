@@ -5,13 +5,13 @@ Date: 2026-08-14
 
 ## Artifact
 
-- Commit: `3c387bb25c9dcc7607e96843a4cfae7708fc064e`
+- Commit: `dc08f52c9c58663de466907cfd01e82c65dfd5fe`
 - Fixture: `contractorproject-gantt-1000-v1`
 - Contract: Gantt read model v1
 - Rows: 1,000 task rows
 - Package: `ContractorProject Gantt Verification_0.1.0_aarch64.dmg`
-- DMG SHA-256: `2bb50574caa6debd36f7ff2d1fdfe2473b0dba2633ceec8a7c2d4f043ea13168`
-- App executable SHA-256: `b472a12014fadfc9908e40c8bee4f54dfb0e64ac54d5b221301b4a566ea0f5c1`
+- DMG SHA-256: `e83c646c29b7307b9ef18b99919bde0ba610002fb951020422f05e8328e15664`
+- App executable SHA-256: `66d9e645492b8501cbc94fc89aee4b00b413b884219dded58ea36402841e3b44`
 
 ## Platform
 
@@ -27,19 +27,17 @@ The first complete in-app run used one warm-up and five recorded passes:
 
 | Metric | Result |
 | --- | ---: |
-| Initial paint | 75 ms |
-| Scroll p95 | 27 ms |
-| Scroll p99 | 32 ms |
-| Frames above 25 ms | 10.83% |
+| Initial paint | 165 ms |
+| Scroll p95 | 26 ms |
+| Scroll p99 | 29 ms |
+| Frames above 25 ms | 6.67% |
 | Maximum vertical drift | 0 px |
 | Task-related nodes | 160 |
 | Median long tasks above 50 ms | 0 |
 
-This does not meet the issue #6 Chromium optimization envelope of p95 at or
-below 25 ms and fewer than 5% of frames above 25 ms. A second run after window
-navigation was slower (p95 40 ms, p99 41 ms, 75% above 25 ms) while retaining
-zero drift, 160 nodes, and no long tasks. Treat the WKWebView result as a real
-platform performance finding, not a passing Chromium-equivalent gate.
+This narrowly misses the issue #6 Chromium optimization envelope of p95 at or
+below 25 ms and fewer than 5% of frames above 25 ms. Treat the WKWebView result
+as a real platform performance finding, not a passing Chromium-equivalent gate.
 
 ## Keyboard and accessibility observations
 
@@ -59,6 +57,9 @@ strings while navigating entirely with the keyboard:
   task, milestone, not critical` without dropping focus to the window.
 - Zoom: Shift+Tab reached the zoom group and Space selected Month; the Month
   toggle exposed an on state.
+- Reduced Motion: the packaged app remained keyboard-operable and Space
+  selected Quarter while macOS Reduce Motion was on. The setting was restored
+  to its original off state after the check.
 
 The test driver could inspect the focused WKWebView accessibility strings while
 VoiceOver was enabled, but it could not capture the actual spoken or caption
