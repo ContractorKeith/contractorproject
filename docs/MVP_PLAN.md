@@ -26,7 +26,7 @@ Exit: the team can build, test, and package the shell on both platforms, and the
 - [x] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
 - [x] Add SQLite initialization, forward migrations, and application-data path handling.
 - [ ] Implement create/list/open/archive job commands.
-- [ ] Implement task hierarchy create/edit/reorder with record-version conflicts.
+- [x] Implement task hierarchy create/edit/reorder with record-version conflicts.
 - [ ] Render the job list and work breakdown table through the real application interface.
 - [ ] Add a consistent backup command and restore verification test.
 

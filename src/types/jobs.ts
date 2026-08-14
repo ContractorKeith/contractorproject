@@ -11,6 +11,23 @@ export interface Job {
 }
 
 export interface CreateJobRequest {
+    name: string;
+    timezone: string;
+}
+
+export interface Task {
+  id: string;
+  jobId: string;
+  parentTaskId: string | null;
+  sortKey: number;
   name: string;
-  timezone: string;
+  createdAt: string;
+  updatedAt: string;
+  version: number;
+}
+
+export interface TaskHierarchy {
+  jobId: string;
+  jobVersion: number;
+  tasks: Task[];
 }
