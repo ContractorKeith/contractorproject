@@ -47,6 +47,8 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 
 Summary tasks are ordinary tasks with children. Their calculated dates, duration, progress, and critical state are derived and cannot be edited directly.
 
+Task hierarchy writes use two concurrency levels: each task has its own `version`, while the owning job's `version` is the aggregate token for the ordered hierarchy. Creating or editing a task increments the job version. Reordering checks both the moved task and job versions, rewrites affected sibling positions atomically, and increments the version of every task whose parent or order changed.
+
 ### `task_dependencies`
 
 - `id`, `job_id`
@@ -92,6 +94,7 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
 ## Invariants
 
 - Every child record belongs to exactly one job.
+- Task parent links stay within a job and cannot form a cycle.
 - All application writes include an expected record version where concurrent or agent edits could overwrite newer work.
 - Money uses integers plus an ISO currency code; no floating-point currency values.
 - Deletes are recoverable archives inside the app unless the user explicitly purges data.

@@ -33,6 +33,7 @@ Proposal tools return a typed diff, warnings, affected versions, and an opaque p
 - `apply_proposal(proposalId, expectedVersions)`
 - `create_task(jobId, task, expectedJobVersion)`
 - `update_task(taskId, patch, expectedVersion)`
+- `reorder_task(taskId, parentTaskId?, siblingIndex, expectedVersion, expectedJobVersion)`
 - `add_dependency(jobId, dependency, expectedJobVersion)`
 - `record_actual_cost(jobId, taskId, costCodeId, amount, expectedVersion)`
 
@@ -52,6 +53,8 @@ Return stable machine-readable error kinds:
 - `provider_unavailable`
 
 Validation failures include field paths and safe remediation details. Version conflicts return the current version and require an intentional refresh; they never silently overwrite newer work.
+
+Task hierarchy queries return the owning job version plus a deterministic flat pre-order list. Parent IDs and sort keys preserve nesting without making the UI or agent adapter an alternate source of hierarchy truth.
 
 ## Context and privacy
 

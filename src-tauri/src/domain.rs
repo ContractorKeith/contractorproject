@@ -12,6 +12,19 @@ pub struct Job {
     pub version: i64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Task {
+    pub id: String,
+    pub job_id: String,
+    pub parent_task_id: Option<String>,
+    pub sort_key: i64,
+    pub name: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub version: i64,
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
