@@ -23,6 +23,9 @@ Exit: the team can build, test, and package the shell on both platforms, and the
 
 ## 1. First durable job
 
+The next recovery boundary is specified in
+[`LOCAL_RECOVERY_MILESTONE.md`](LOCAL_RECOVERY_MILESTONE.md).
+
 - [x] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
 - [x] Add SQLite initialization, forward migrations, and application-data path handling.
 - [x] Implement create/list/open job commands.
