@@ -7,8 +7,10 @@ mod storage;
 mod work_breakdown;
 
 use application::{
-    ApplicationError, ApplicationService, CommandActor, CommandContext, CreateJobRequest,
-    CreateTaskRequest, Job, ReorderTaskRequest, TaskHierarchy, TaskMutation, UpdateTaskRequest,
+    AddDependencyRequest, ApplicationError, ApplicationService, CommandActor, CommandContext,
+    CreateJobRequest, CreateTaskRequest, Job, RemoveDependencyRequest, ReorderTaskRequest,
+    TaskHierarchy, TaskMutation, UpdateScheduleRequest, UpdateTaskDurationRequest,
+    UpdateTaskRequest,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -142,6 +144,46 @@ fn reorder_task(
         .map_err(Into::into)
 }
 
+#[tauri::command]
+fn update_schedule(
+    service: State<'_, ApplicationService>,
+    request: UpdateScheduleRequest,
+) -> Result<Job, CommandError> {
+    service
+        .update_schedule(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn update_task_duration(
+    service: State<'_, ApplicationService>,
+    request: UpdateTaskDurationRequest,
+) -> Result<TaskMutation, CommandError> {
+    service
+        .update_task_duration(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn add_dependency(
+    service: State<'_, ApplicationService>,
+    request: AddDependencyRequest,
+) -> Result<TaskHierarchy, CommandError> {
+    service
+        .add_dependency(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn remove_dependency(
+    service: State<'_, ApplicationService>,
+    request: RemoveDependencyRequest,
+) -> Result<TaskHierarchy, CommandError> {
+    service
+        .remove_dependency(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
 fn tauri_command_context() -> CommandContext {
     CommandContext {
         command_id: uuid::Uuid::now_v7().to_string(),
@@ -165,7 +207,11 @@ pub fn run() {
             create_task,
             list_tasks,
             update_task,
-            reorder_task
+            reorder_task,
+            update_schedule,
+            update_task_duration,
+            add_dependency,
+            remove_dependency
         ])
         .run(tauri::generate_context!())
         .expect("error while running ContractorProject");

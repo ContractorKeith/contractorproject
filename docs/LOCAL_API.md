@@ -35,6 +35,9 @@ Proposal tools return a typed diff, warnings, affected versions, and an opaque p
 - `update_task(taskId, patch, expectedVersion)`
 - `reorder_task(taskId, parentTaskId?, siblingIndex, expectedVersion, expectedJobVersion)`
 - `add_dependency(jobId, dependency, expectedJobVersion)`
+ - `remove_dependency(jobId, predecessorTaskId, successorTaskId, expectedJobVersion)`
+ - `update_schedule(jobId, scheduleStart?, calendar, expectedJobVersion)`
+ - `update_task_duration(taskId, durationMinutes?, expectedVersion, expectedJobVersion)`
 - `record_actual_cost(jobId, taskId, costCodeId, amount, expectedVersion)`
 
 Write tools are available only in read-write mode. The default agent onboarding experience should make the selected mode visible and reversible.
@@ -70,6 +73,10 @@ Return stable machine-readable error kinds:
 Validation failures include field paths and safe remediation details. Version conflicts return the current version and require an intentional refresh; they never silently overwrite newer work.
 
 Task hierarchy queries return the owning job version plus a deterministic flat pre-order list. Parent IDs and sort keys preserve nesting without making the UI or agent adapter an alternate source of hierarchy truth.
+
+Schedule-input mutations also use the job version: changing a duration checks
+both the task and job versions; calendar, start, and dependency changes check
+the job version. A mutation and its non-secret audit summary commit together.
 
 `get_schedule` returns the same versioned Gantt read model used by the desktop
 UI, optionally bounded to the requested window. The contract is defined in

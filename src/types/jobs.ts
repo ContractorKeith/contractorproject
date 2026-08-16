@@ -8,7 +8,12 @@ export interface Job {
   createdAt: string;
   updatedAt: string;
   version: number;
+  scheduleStart?: string | null;
+  calendar?: WorkingCalendar;
 }
+
+export type CalendarWeekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
+export interface WorkingCalendar { workingWeekdays: CalendarWeekday[]; workdayStartMinute: number; workdayDurationMinutes: number; }
 
 export interface CreateJobRequest {
   name: string;
@@ -24,13 +29,16 @@ export interface Task {
   createdAt: string;
   updatedAt: string;
   version: number;
+  durationMinutes?: number | null;
 }
 
 export interface TaskHierarchy {
   jobId: string;
   jobVersion: number;
   tasks: Task[];
+  dependencies?: FinishStartDependency[];
 }
+export interface FinishStartDependency { predecessorTaskId: string; successorTaskId: string; lagMinutes: number; }
 
 export interface CreateTaskRequest {
   jobId: string;
@@ -57,3 +65,7 @@ export interface TaskMutation {
   task: Task;
   jobVersion: number;
 }
+export interface UpdateScheduleRequest { jobId: string; scheduleStart: string | null; calendar: WorkingCalendar; expectedJobVersion: number; }
+export interface UpdateTaskDurationRequest { taskId: string; durationMinutes: number | null; expectedVersion: number; expectedJobVersion: number; }
+export interface AddDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; lagMinutes: number; expectedJobVersion: number; }
+export interface RemoveDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; expectedJobVersion: number; }

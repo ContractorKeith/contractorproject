@@ -5,8 +5,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::JobStatus;
-pub use crate::domain::{Job, Task};
+pub use crate::domain::{FinishStartDependency, Job, Task};
 pub use crate::error::ApplicationError;
+use crate::scheduling::{CalendarWeekday, WorkingCalendar};
 use crate::storage::SqliteStore;
 
 pub struct ApplicationService {
@@ -82,6 +83,44 @@ pub struct TaskHierarchy {
     pub job_id: String,
     pub job_version: i64,
     pub tasks: Vec<Task>,
+    pub dependencies: Vec<FinishStartDependency>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateScheduleRequest {
+    pub job_id: String,
+    pub schedule_start: Option<String>,
+    pub calendar: WorkingCalendar,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTaskDurationRequest {
+    pub task_id: String,
+    pub duration_minutes: Option<i64>,
+    pub expected_version: i64,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddDependencyRequest {
+    pub job_id: String,
+    pub predecessor_task_id: String,
+    pub successor_task_id: String,
+    pub lag_minutes: i64,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoveDependencyRequest {
+    pub job_id: String,
+    pub predecessor_task_id: String,
+    pub successor_task_id: String,
+    pub expected_job_version: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -123,6 +162,8 @@ impl ApplicationService {
             name,
             status: JobStatus::Draft,
             timezone,
+            schedule_start: None,
+            calendar: default_calendar(),
             created_at: now.clone(),
             updated_at: now,
             version: 1,
@@ -152,6 +193,7 @@ impl ApplicationService {
             job_id: request.job_id,
             parent_task_id: request.parent_task_id,
             name,
+            duration_minutes: None,
             created_at: now.clone(),
             updated_at: now,
             version: 1,
@@ -163,11 +205,12 @@ impl ApplicationService {
     }
 
     pub fn list_tasks(&self, job_id: &str) -> Result<TaskHierarchy, ApplicationError> {
-        let (job_version, tasks) = self.store.list_tasks(job_id)?;
+        let (job_version, tasks, dependencies) = self.store.list_tasks(job_id)?;
         Ok(TaskHierarchy {
             job_id: job_id.into(),
             job_version,
             tasks,
+            dependencies,
         })
     }
 
@@ -204,7 +247,7 @@ impl ApplicationService {
                 message: "must be zero or greater".into(),
             });
         }
-        let (job_id, job_version, tasks) = self.store.reorder_task(
+        let (job_id, job_version, tasks, dependencies) = self.store.reorder_task(
             &request,
             &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             &context,
@@ -213,8 +256,135 @@ impl ApplicationService {
             job_id,
             job_version,
             tasks,
+            dependencies,
         })
     }
+
+    pub fn update_schedule(
+        &self,
+        context: CommandContext,
+        request: UpdateScheduleRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        validate_calendar(&request.calendar)?;
+        if let Some(start) = &request.schedule_start {
+            validate_schedule_start(start)?;
+        }
+        self.store.update_schedule(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    pub fn update_task_duration(
+        &self,
+        context: CommandContext,
+        request: UpdateTaskDurationRequest,
+    ) -> Result<TaskMutation, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedVersion", request.expected_version)?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        if matches!(request.duration_minutes, Some(value) if value < 0) {
+            return Err(ApplicationError::InvalidInput {
+                field: "durationMinutes",
+                message: "must be zero or greater".into(),
+            });
+        }
+        let (task, job_version) = self.store.update_task_duration(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )?;
+        Ok(TaskMutation { task, job_version })
+    }
+
+    pub fn add_dependency(
+        &self,
+        context: CommandContext,
+        request: AddDependencyRequest,
+    ) -> Result<TaskHierarchy, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        if request.lag_minutes < 0 {
+            return Err(ApplicationError::InvalidInput {
+                field: "lagMinutes",
+                message: "must be zero or greater".into(),
+            });
+        }
+        let (job_version, tasks, dependencies) = self.store.add_dependency(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )?;
+        Ok(TaskHierarchy {
+            job_id: request.job_id,
+            job_version,
+            tasks,
+            dependencies,
+        })
+    }
+
+    pub fn remove_dependency(
+        &self,
+        context: CommandContext,
+        request: RemoveDependencyRequest,
+    ) -> Result<TaskHierarchy, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        let (job_version, tasks, dependencies) = self.store.remove_dependency(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )?;
+        Ok(TaskHierarchy {
+            job_id: request.job_id,
+            job_version,
+            tasks,
+            dependencies,
+        })
+    }
+}
+
+pub fn default_calendar() -> WorkingCalendar {
+    WorkingCalendar {
+        working_weekdays: vec![
+            CalendarWeekday::Monday,
+            CalendarWeekday::Tuesday,
+            CalendarWeekday::Wednesday,
+            CalendarWeekday::Thursday,
+            CalendarWeekday::Friday,
+        ],
+        workday_start_minute: 8 * 60,
+        workday_duration_minutes: 480,
+    }
+}
+
+fn validate_calendar(calendar: &WorkingCalendar) -> Result<(), ApplicationError> {
+    if calendar.working_weekdays.is_empty()
+        || calendar.workday_start_minute >= 24 * 60
+        || calendar.workday_duration_minutes == 0
+        || u32::from(calendar.workday_start_minute) + u32::from(calendar.workday_duration_minutes)
+            > 24 * 60
+    {
+        return Err(ApplicationError::ValidationFailed {
+            code: "invalid_calendar",
+            field: "calendar",
+            message: "select at least one weekday and a working interval within one day".into(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_schedule_start(value: &str) -> Result<(), ApplicationError> {
+    chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidInput {
+            field: "scheduleStart",
+            message: "must be an ISO date".into(),
+        }
+    })?;
+    Ok(())
 }
 
 fn required_version(field: &'static str, version: i64) -> Result<(), ApplicationError> {

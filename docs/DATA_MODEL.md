@@ -27,6 +27,8 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 - `status` (`draft`, `active`, `on_hold`, `complete`, `archived`)
 - `timezone`
 - `start_constraint`
+ - `schedule_start` nullable ISO date; incomplete setup remains valid
+ - default working calendar: Monday-Friday, 08:00, 480 continuous working minutes
 - `data_date`
 - `currency_code`
 - `created_at`, `updated_at`, `version`
@@ -46,6 +48,10 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 - `created_at`, `updated_at`, `version`
 
 Summary tasks are ordinary tasks with children. Their calculated dates, duration, progress, and critical state are derived and cannot be edited directly.
+
+Persisted input rules: leaf duration is either zero (milestone) or positive
+(normal work); `NULL` is used by summaries and permitted while schedule setup
+is incomplete. Finish-to-start dependency endpoints must be scheduled leaves.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in
