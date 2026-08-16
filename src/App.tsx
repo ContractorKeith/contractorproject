@@ -206,6 +206,13 @@ export function App({ client = tauriJobClient }: AppProps) {
                         id={`task-panel-${job.id}`}
                         job={job}
                         state={taskLoads[job.id] ?? { status: "loading" }}
+                        client={client}
+                        onHierarchyChange={(hierarchy) =>
+                          setTaskLoads((current) => ({
+                            ...current,
+                            [job.id]: { status: "loaded", hierarchy },
+                          }))
+                        }
                       />
                     ) : null}
                   </div>
@@ -220,7 +227,19 @@ export function App({ client = tauriJobClient }: AppProps) {
   );
 }
 
-function TaskPanel({ id, job, state }: { id: string; job: Job; state: TaskLoadState }) {
+function TaskPanel({
+  id,
+  job,
+  state,
+  client,
+  onHierarchyChange,
+}: {
+  id: string;
+  job: Job;
+  state: TaskLoadState;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
+}) {
   if (state.status === "loading") {
     return (
       <div id={id} className="task-panel">
@@ -235,21 +254,23 @@ function TaskPanel({ id, job, state }: { id: string; job: Job; state: TaskLoadSt
       </div>
     );
   }
-  if (state.hierarchy.tasks.length === 0) {
-    return (
-      <div id={id} className="task-panel">
-        <p>No tasks yet.</p>
-      </div>
-    );
-  }
-
   const children = groupTasksByParent(state.hierarchy.tasks);
   return (
     <div id={id} className="task-panel">
+      <TaskEditor
+        job={job}
+        hierarchy={state.hierarchy}
+        client={client}
+        onHierarchyChange={onHierarchyChange}
+      />
+      {state.hierarchy.tasks.length === 0 ? <p>No tasks yet.</p> : null}
       <TaskList
         children={children}
         parentTaskId={null}
         label={`Tasks for ${job.name}`}
+        hierarchy={state.hierarchy}
+        client={client}
+        onHierarchyChange={onHierarchyChange}
       />
     </div>
   );
@@ -259,24 +280,291 @@ function TaskList({
   children,
   parentTaskId,
   label,
+  hierarchy,
+  client,
+  onHierarchyChange,
 }: {
   children: Map<string | null, Task[]>;
   parentTaskId: string | null;
   label?: string;
+  hierarchy: TaskHierarchy;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
 }) {
   const tasks = children.get(parentTaskId) ?? [];
   return (
     <ol className="task-tree" aria-label={label}>
       {tasks.map((task) => (
         <li key={task.id}>
-          <span>{task.name}</span>
+          <TaskEditor
+            task={task}
+            hierarchy={hierarchy}
+            client={client}
+            onHierarchyChange={onHierarchyChange}
+          />
           {children.has(task.id) ? (
-            <TaskList children={children} parentTaskId={task.id} />
+            <TaskList
+              children={children}
+              parentTaskId={task.id}
+              hierarchy={hierarchy}
+              client={client}
+              onHierarchyChange={onHierarchyChange}
+            />
           ) : null}
         </li>
       ))}
     </ol>
   );
+}
+
+function TaskEditor({
+  job,
+  task,
+  hierarchy,
+  client,
+  onHierarchyChange,
+}: {
+  job?: Job;
+  task?: Task;
+  hierarchy: TaskHierarchy;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
+}) {
+  const [name, setName] = useState(task?.name ?? "");
+  const [draftBaseVersion, setDraftBaseVersion] = useState<number | null>(null);
+  const [newChildName, setNewChildName] = useState("");
+  const [newParentTaskId, setNewParentTaskId] = useState<string | null>(null);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+  const isRootCreator = Boolean(job);
+  const label = isRootCreator ? "New root task" : `Task name for ${task!.name}`;
+  const siblings = hierarchy.tasks.filter((candidate) => candidate.parentTaskId === task?.parentTaskId);
+  const taskIndex = task ? siblings.findIndex((candidate) => candidate.id === task.id) : -1;
+  const parents = task ? eligibleParents(task, hierarchy.tasks) : [];
+
+  useEffect(() => {
+    if (!task) return;
+    if (draftBaseVersion === null) setName(task.name);
+    else if (task.version !== draftBaseVersion) setConflict(true);
+  }, [draftBaseVersion, task]);
+
+  async function run(action: () => Promise<TaskHierarchy>, onSuccess?: () => void) {
+    setPending(true);
+    setError(null);
+    try {
+      onHierarchyChange(await action());
+      onSuccess?.();
+      setConflict(false);
+      if (isRootCreator) setName("");
+      setNewChildName("");
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setConflict(true);
+      else setError(errorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function refresh() {
+    setPending(true);
+    try {
+      const refreshed = await client.listTasks(hierarchy.jobId);
+      if (task && draftBaseVersion !== null) {
+        const refreshedTask = refreshed.tasks.find((candidate) => candidate.id === task.id);
+        if (refreshedTask) setDraftBaseVersion(refreshedTask.version);
+      }
+      onHierarchyChange(refreshed);
+      setConflict(false);
+    } catch (reason: unknown) {
+      setError(errorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  function submitName(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!name.trim() || pending) return;
+    if (!isRootCreator && name.trim() === task!.name) return;
+    if (isRootCreator) {
+      void run(() =>
+        client.createTask({
+          jobId: hierarchy.jobId,
+          parentTaskId: null,
+          name: name.trim(),
+          expectedJobVersion: hierarchy.jobVersion,
+        }),
+      );
+    } else {
+      void run(
+        () =>
+          client.updateTask({
+            taskId: task!.id,
+            name: name.trim(),
+            expectedVersion: draftBaseVersion ?? task!.version,
+          }),
+        () => setDraftBaseVersion(null),
+      );
+    }
+  }
+
+  return (
+    <div className="task-editor">
+      <form className="task-editor__form" onSubmit={submitName}>
+        <label>
+          <span className="visually-hidden">{label}</span>
+          <input
+            aria-label={label}
+            value={name}
+            onChange={(event) => {
+              const nextName = event.target.value;
+              setName(nextName);
+              if (task) {
+                if (nextName === task.name) {
+                  setDraftBaseVersion(null);
+                  setConflict(false);
+                } else {
+                  setDraftBaseVersion((current) => current ?? task.version);
+                }
+              }
+            }}
+            maxLength={200}
+            autoComplete="off"
+            placeholder={isRootCreator ? "e.g. Site work" : undefined}
+          />
+        </label>
+        <button type="submit" disabled={pending || !name.trim() || (!isRootCreator && name.trim() === task!.name)}>
+          {isRootCreator ? "Add task" : "Save"}
+        </button>
+      </form>
+      {task ? (
+        <div className="task-editor__actions" aria-label={`Actions for ${task.name}`}>
+          <button
+            type="button"
+            disabled={pending || taskIndex <= 0}
+            onClick={() =>
+              void run(() =>
+                client.reorderTask({
+                  taskId: task.id,
+                  newParentTaskId: task.parentTaskId,
+                  newSiblingIndex: taskIndex - 1,
+                  expectedVersion: task.version,
+                  expectedJobVersion: hierarchy.jobVersion,
+                }),
+              )
+            }
+          >
+            Move up
+          </button>
+          <button
+            type="button"
+            disabled={pending || taskIndex === siblings.length - 1}
+            onClick={() =>
+              void run(() =>
+                client.reorderTask({
+                  taskId: task.id,
+                  newParentTaskId: task.parentTaskId,
+                  newSiblingIndex: taskIndex + 1,
+                  expectedVersion: task.version,
+                  expectedJobVersion: hierarchy.jobVersion,
+                }),
+              )
+            }
+          >
+            Move down
+          </button>
+          <label>
+            <span className="visually-hidden">New parent for {task.name}</span>
+            <select
+              aria-label={`New parent for ${task.name}`}
+              value={newParentTaskId ?? ""}
+              onChange={(event) => setNewParentTaskId(event.target.value || null)}
+              disabled={pending}
+            >
+              <option value="">Top level</option>
+              {parents.map((parent) => (
+                <option key={parent.id} value={parent.id}>
+                  Under {parent.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <button
+            type="button"
+            disabled={pending || newParentTaskId === task.parentTaskId}
+            onClick={() =>
+              void run(() =>
+                client.reorderTask({
+                  taskId: task.id,
+                  newParentTaskId,
+                  newSiblingIndex: hierarchy.tasks.filter(
+                    (candidate) => candidate.parentTaskId === newParentTaskId && candidate.id !== task.id,
+                  ).length,
+                  expectedVersion: task.version,
+                  expectedJobVersion: hierarchy.jobVersion,
+                }),
+              )
+            }
+          >
+            Move to parent
+          </button>
+          <form
+            className="task-editor__child-form"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (!newChildName.trim() || pending) return;
+              void run(() =>
+                client.createTask({
+                  jobId: hierarchy.jobId,
+                  parentTaskId: task.id,
+                  name: newChildName.trim(),
+                  expectedJobVersion: hierarchy.jobVersion,
+                }),
+              );
+            }}
+          >
+            <label>
+              <span className="visually-hidden">New child task for {task.name}</span>
+              <input
+                aria-label={`New child task for ${task.name}`}
+                value={newChildName}
+                onChange={(event) => setNewChildName(event.target.value)}
+                maxLength={200}
+                placeholder="Add subtask"
+              />
+            </label>
+            <button type="submit" disabled={pending || !newChildName.trim()}>
+              Add subtask
+            </button>
+          </form>
+        </div>
+      ) : null}
+      {conflict ? (
+        <div className="task-editor__conflict" role="alert">
+          <span>Tasks changed elsewhere. Your pending change is still here.</span>
+          <button type="button" onClick={() => void refresh()} disabled={pending}>
+            Refresh tasks
+          </button>
+        </div>
+      ) : null}
+      {error ? <p className="task-editor__error" role="alert">{error}</p> : null}
+    </div>
+  );
+}
+
+function eligibleParents(task: Task, tasks: Task[]): Task[] {
+  const descendants = new Set<string>([task.id]);
+  for (let found = true; found; ) {
+    found = false;
+    for (const candidate of tasks) {
+      if (candidate.parentTaskId && descendants.has(candidate.parentTaskId) && !descendants.has(candidate.id)) {
+        descendants.add(candidate.id);
+        found = true;
+      }
+    }
+  }
+  return tasks.filter((candidate) => !descendants.has(candidate.id));
 }
 
 function groupTasksByParent(tasks: Task[]): Map<string | null, Task[]> {
@@ -296,4 +584,14 @@ function errorMessage(reason: unknown): string {
     if (typeof message === "string") return message;
   }
   return "Please try again.";
+}
+
+function isVersionConflict(reason: unknown): boolean {
+  if (reason && typeof reason === "object" && "kind" in reason) {
+    return reason.kind === "version_conflict";
+  }
+  if (typeof reason === "string") {
+    return reason.includes("version_conflict");
+  }
+  return false;
 }
