@@ -7,8 +7,8 @@ mod storage;
 mod work_breakdown;
 
 use application::{
-    ApplicationError, ApplicationService, CreateJobRequest, CreateTaskRequest, Job,
-    ReorderTaskRequest, TaskHierarchy, TaskMutation, UpdateTaskRequest,
+    ApplicationError, ApplicationService, CommandActor, CommandContext, CreateJobRequest,
+    CreateTaskRequest, Job, ReorderTaskRequest, TaskHierarchy, TaskMutation, UpdateTaskRequest,
 };
 use serde::Serialize;
 use tauri::{Manager, State};
@@ -42,6 +42,9 @@ enum CommandErrorDetails {
         expected_version: i64,
         current_version: i64,
     },
+    DuplicateCommand {
+        command_id: String,
+    },
     None {},
 }
 
@@ -69,6 +72,11 @@ impl From<ApplicationError> for CommandError {
                 expected_version: *expected,
                 current_version: *current,
             },
+            ApplicationError::DuplicateCommand { command_id } => {
+                CommandErrorDetails::DuplicateCommand {
+                    command_id: command_id.clone(),
+                }
+            }
             ApplicationError::InvalidStoredData(_)
             | ApplicationError::Database(_)
             | ApplicationError::Io(_) => CommandErrorDetails::None {},
@@ -86,7 +94,9 @@ fn create_job(
     service: State<'_, ApplicationService>,
     request: CreateJobRequest,
 ) -> Result<Job, CommandError> {
-    service.create_job(request).map_err(Into::into)
+    service
+        .create_job(tauri_command_context(), request)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -99,7 +109,9 @@ fn create_task(
     service: State<'_, ApplicationService>,
     request: CreateTaskRequest,
 ) -> Result<TaskMutation, CommandError> {
-    service.create_task(request).map_err(Into::into)
+    service
+        .create_task(tauri_command_context(), request)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -115,7 +127,9 @@ fn update_task(
     service: State<'_, ApplicationService>,
     request: UpdateTaskRequest,
 ) -> Result<TaskMutation, CommandError> {
-    service.update_task(request).map_err(Into::into)
+    service
+        .update_task(tauri_command_context(), request)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -123,7 +137,17 @@ fn reorder_task(
     service: State<'_, ApplicationService>,
     request: ReorderTaskRequest,
 ) -> Result<TaskHierarchy, CommandError> {
-    service.reorder_task(request).map_err(Into::into)
+    service
+        .reorder_task(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+fn tauri_command_context() -> CommandContext {
+    CommandContext {
+        command_id: uuid::Uuid::now_v7().to_string(),
+        actor: CommandActor::User,
+        client_name: "desktop-ui".into(),
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

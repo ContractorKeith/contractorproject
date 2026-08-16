@@ -39,6 +39,20 @@ Proposal tools return a typed diff, warnings, affected versions, and an opaque p
 
 Write tools are available only in read-write mode. The default agent onboarding experience should make the selected mode visible and reversible.
 
+Every write carries a required `commandContext` through the shared Rust
+application interface:
+
+- `commandId`: a non-empty, client-stable ID of at most 128 characters.
+- `actor`: one of `user`, `agent`, or `import`.
+- `clientName`: a non-empty caller label of at most 120 characters.
+
+The application stores one `command_log` row atomically with a successful
+write: command ID, actor, client name, UTC timestamp, and a server-generated
+non-secret summary of at most 240 characters. Summaries never include request
+bodies, credentials, or user-entered job/task text. Reusing a successfully
+applied command ID returns `duplicate_command` and does not repeat the domain
+mutation; callers generate a new ID only for a deliberate new command.
+
 ## Error contract
 
 Return stable machine-readable error kinds:
@@ -51,6 +65,7 @@ Return stable machine-readable error kinds:
 - `read_only`
 - `proposal_expired`
 - `provider_unavailable`
+- `duplicate_command`
 
 Validation failures include field paths and safe remediation details. Version conflicts return the current version and require an intentional refresh; they never silently overwrite newer work.
 
