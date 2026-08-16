@@ -118,6 +118,9 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
 - Deletes are recoverable archives inside the app unless the user explicitly purges data.
 - A baseline is immutable.
 - Calculated schedule fields are reproducible from canonical inputs.
+- The schedule read projection is rebuilt from one SQLite snapshot of the job,
+  weekly calendar, ordered hierarchy, leaf durations, and FS dependencies; it
+  is not persisted and reads never mutate the canonical inputs.
 - Imports use stable external IDs or an explicit mapping table so retries do not duplicate records.
 
 ## Archive contract

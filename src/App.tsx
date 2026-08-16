@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useState } from "react";
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
+import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
   CalendarWeekday,
@@ -10,6 +11,7 @@ import type {
   TaskHierarchy,
   WorkingCalendar,
 } from "./types/jobs";
+import type { GanttReadModel } from "./types/gantt";
 
 interface AppProps {
   client?: JobClient;
@@ -18,6 +20,11 @@ interface AppProps {
 type TaskLoadState =
   | { status: "loading" }
   | { status: "loaded"; hierarchy: TaskHierarchy }
+  | { status: "error"; message: string };
+
+type ScheduleLoadState =
+  | { status: "loading" }
+  | { status: "loaded"; readModel: GanttReadModel }
   | { status: "error"; message: string };
 
 export function App({ client = tauriJobClient }: AppProps) {
@@ -279,6 +286,17 @@ function TaskPanel({
   onHierarchyChange: (hierarchy: TaskHierarchy) => void;
   onJobChange: (job: Job) => void;
 }) {
+  const [schedule, setSchedule] = useState<ScheduleLoadState>({ status: "loading" });
+
+  useEffect(() => {
+    if (!client.getSchedule) return;
+    let active = true;
+    setSchedule({ status: "loading" });
+    client.getSchedule(job.id)
+      .then((readModel) => active && setSchedule({ status: "loaded", readModel }))
+      .catch((reason: unknown) => active && setSchedule({ status: "error", message: errorMessage(reason) }));
+    return () => { active = false; };
+  }, [client, hierarchyVersion(state), job.id, job.version]);
   if (state.status === "loading") {
     return (
       <div id={id} className="task-panel">
@@ -316,6 +334,7 @@ function TaskPanel({
         onHierarchyChange={onHierarchyChange}
         onJobChange={onJobChange}
       />
+      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} /> : null}
       {state.hierarchy.tasks.length === 0 ? <p>No tasks yet.</p> : null}
       <TaskList
         children={children}
@@ -328,6 +347,23 @@ function TaskPanel({
       />
     </div>
   );
+}
+
+function hierarchyVersion(state: TaskLoadState): number {
+  return state.status === "loaded" ? state.hierarchy.jobVersion : 0;
+}
+
+function ScheduleProjection({ schedule, jobName }: { schedule: ScheduleLoadState; jobName: string }) {
+  if (schedule.status === "loading") {
+    return <p className="gantt-state" aria-live="polite">Loading schedule…</p>;
+  }
+  if (schedule.status === "error") {
+    return <div className="gantt-state gantt-state--error" role="alert">Couldn&apos;t build schedule for {jobName}. {schedule.message}</div>;
+  }
+  if (schedule.readModel.rowCount === 0) {
+    return <p className="gantt-state">No scheduled tasks yet.</p>;
+  }
+  return <GanttTreegrid readModel={schedule.readModel} ariaLabel={`Schedule for ${jobName}`} />;
 }
 
 function TaskList({

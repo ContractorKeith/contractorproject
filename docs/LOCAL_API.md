@@ -83,6 +83,11 @@ UI, optionally bounded to the requested window. The contract is defined in
 [`GANTT_READ_MODEL.md`](GANTT_READ_MODEL.md); adapters do not expose SQLite
 rows or calculate schedule facts independently.
 
+The desktop command has the same `get_schedule(jobId)` shape. It reads the
+job's persisted start, weekly calendar, durations, hierarchy, and FS links in
+one SQLite snapshot, then invokes the pure Rust scheduler and Gantt projection.
+Invalid or incomplete inputs return a validation error and never mutate state.
+
 ## Context and privacy
 
 - Read tools return bounded projections selected by job and requested fields.

@@ -254,6 +254,145 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
 }
 
 #[test]
+fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Read schedule".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let summary = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Site work".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("summary")
+        .task;
+    let activity = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(summary.id.clone()),
+                name: "Excavate".into(),
+                expected_job_version: 2,
+            },
+        )
+        .expect("activity")
+        .task;
+    let milestone = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Inspection".into(),
+                expected_job_version: 3,
+            },
+        )
+        .expect("milestone")
+        .task;
+    let activity = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: activity.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: activity.version,
+                expected_job_version: 4,
+            },
+        )
+        .expect("activity duration")
+        .task;
+    let milestone = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: milestone.id.clone(),
+                duration_minutes: Some(0),
+                expected_version: milestone.version,
+                expected_job_version: 5,
+            },
+        )
+        .expect("milestone duration")
+        .task;
+    let scheduled = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: 6,
+            },
+        )
+        .expect("schedule settings");
+    service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: activity.id,
+                successor_task_id: milestone.id,
+                lag_minutes: 0,
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("dependency");
+
+    let before = service.get_schedule(&job.id).expect("schedule read model");
+    assert_eq!(before.rows.len(), 3);
+    assert_eq!(before.schedule_start.to_string(), "2026-08-17 08:00:00");
+    assert_eq!(before.schedule_finish.to_string(), "2026-08-17 16:00:00");
+    assert_eq!(before.rows[0].task_id, summary.id);
+    assert!(before.rows[0].summary);
+    assert_eq!(before.rows[0].wbs, "1");
+    assert_eq!(before.rows[0].depth, 0);
+    assert_eq!(before.rows[0].total_float_minutes, 0);
+    assert!(before.rows[0].critical);
+    assert_eq!(before.rows[1].wbs, "1.1");
+    assert_eq!(before.rows[1].depth, 1);
+    assert_eq!(before.rows[1].start.to_string(), "2026-08-17 08:00:00");
+    assert_eq!(before.rows[1].finish.to_string(), "2026-08-17 16:00:00");
+    assert_eq!(before.rows[1].total_float_minutes, 0);
+    assert!(before.rows[1].critical);
+    assert!(before.rows[2].milestone);
+    assert_eq!(before.rows[2].start, before.rows[2].finish);
+    assert_eq!(before.rows[2].start.to_string(), "2026-08-17 16:00:00");
+    assert_eq!(before.rows[2].total_float_minutes, 0);
+    assert!(before.rows[2].critical);
+    assert_eq!(
+        before.rows[2].predecessor_ids,
+        vec![before.rows[1].task_id.clone()]
+    );
+    assert_eq!(
+        before.critical_path,
+        vec![
+            before.rows[1].task_id.clone(),
+            before.rows[2].task_id.clone()
+        ]
+    );
+    drop(service);
+
+    let after = ApplicationService::open(&path)
+        .expect("reopen")
+        .get_schedule(&job.id)
+        .expect("reopened schedule read model");
+    assert_eq!(after, before);
+}
+
+#[test]
 fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
     let temp = tempfile::tempdir().expect("temp");
     let path = temp.path().join("contractorproject.sqlite3");

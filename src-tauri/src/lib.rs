@@ -12,6 +12,7 @@ use application::{
     TaskHierarchy, TaskMutation, UpdateScheduleRequest, UpdateTaskDurationRequest,
     UpdateTaskRequest,
 };
+use gantt::GanttReadModel;
 use serde::Serialize;
 use tauri::{Manager, State};
 
@@ -125,6 +126,14 @@ fn list_tasks(
 }
 
 #[tauri::command]
+fn get_schedule(
+    service: State<'_, ApplicationService>,
+    job_id: String,
+) -> Result<GanttReadModel, CommandError> {
+    service.get_schedule(&job_id).map_err(Into::into)
+}
+
+#[tauri::command]
 fn update_task(
     service: State<'_, ApplicationService>,
     request: UpdateTaskRequest,
@@ -206,6 +215,7 @@ pub fn run() {
             list_jobs,
             create_task,
             list_tasks,
+            get_schedule,
             update_task,
             reorder_task,
             update_schedule,

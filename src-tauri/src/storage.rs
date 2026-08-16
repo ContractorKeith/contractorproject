@@ -216,6 +216,18 @@ impl SqliteStore {
         Ok(hierarchy)
     }
 
+    pub(crate) fn schedule_inputs(
+        &self,
+        job_id: &str,
+    ) -> Result<(Job, Vec<Task>, Vec<FinishStartDependency>), ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let job = read_job(&transaction, job_id)?;
+        let (_, tasks, dependencies) = read_task_hierarchy(&transaction, job_id)?;
+        transaction.commit()?;
+        Ok((job, tasks, dependencies))
+    }
+
     pub(crate) fn update_task(
         &self,
         task_id: &str,

@@ -1,13 +1,19 @@
 use std::path::Path;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::domain::JobStatus;
 pub use crate::domain::{FinishStartDependency, Job, Task};
 pub use crate::error::ApplicationError;
-use crate::scheduling::{CalendarWeekday, WorkingCalendar};
+use crate::gantt::{
+    build_gantt_read_model, GanttPredecessorSource, GanttReadModel, GanttReadModelSource,
+    GanttTaskSource,
+};
+use crate::scheduling::{
+    calculate_schedule, CalendarWeekday, ScheduleInput, ScheduleTask, WorkingCalendar,
+};
 use crate::storage::SqliteStore;
 
 pub struct ApplicationService {
@@ -211,6 +217,80 @@ impl ApplicationService {
             job_version,
             tasks,
             dependencies,
+        })
+    }
+
+    /// Builds the read-only schedule projection from canonical SQLite inputs.
+    pub fn get_schedule(&self, job_id: &str) -> Result<GanttReadModel, ApplicationError> {
+        let (job, tasks, dependencies) = self.store.schedule_inputs(job_id)?;
+        let schedule_start =
+            job.schedule_start
+                .as_deref()
+                .ok_or(ApplicationError::ValidationFailed {
+                    code: "schedule_start_required",
+                    field: "scheduleStart",
+                    message: "set a schedule start before viewing the schedule".into(),
+                })?;
+        let schedule_start =
+            NaiveDate::parse_from_str(schedule_start, "%Y-%m-%d").map_err(|_| {
+                ApplicationError::InvalidStoredData(format!(
+                    "job {} has an invalid schedule start",
+                    job.id
+                ))
+            })?;
+        let schedule = calculate_schedule(&ScheduleInput {
+            schedule_start,
+            calendar: job.calendar.clone(),
+            tasks: tasks
+                .iter()
+                .map(|task| ScheduleTask {
+                    id: task.id.clone(),
+                    parent_task_id: task.parent_task_id.clone(),
+                    duration_minutes: task.duration_minutes,
+                })
+                .collect(),
+            dependencies: dependencies
+                .iter()
+                .map(|dependency| crate::scheduling::FinishStartDependency {
+                    predecessor_task_id: dependency.predecessor_task_id.clone(),
+                    successor_task_id: dependency.successor_task_id.clone(),
+                    lag_minutes: dependency.lag_minutes,
+                })
+                .collect(),
+        })
+        .map_err(|error| ApplicationError::ValidationFailed {
+            code: error.code(),
+            field: "schedule",
+            message: error.to_string(),
+        })?;
+        build_gantt_read_model(GanttReadModelSource {
+            job_id: job.id,
+            job_version: job.version,
+            tasks: tasks
+                .iter()
+                .map(|task| GanttTaskSource {
+                    id: task.id.clone(),
+                    parent_task_id: task.parent_task_id.clone(),
+                    sort_key: task.sort_key,
+                    name: task.name.clone(),
+                })
+                .collect(),
+            schedule,
+            baseline: None,
+            predecessors: tasks
+                .iter()
+                .map(|task| GanttPredecessorSource {
+                    task_id: task.id.clone(),
+                    predecessor_ids: dependencies
+                        .iter()
+                        .filter(|dependency| dependency.successor_task_id == task.id)
+                        .map(|dependency| dependency.predecessor_task_id.clone())
+                        .collect(),
+                })
+                .collect(),
+        })
+        .map_err(|error| {
+            ApplicationError::InvalidStoredData(format!("schedule read model {}", error.code()))
         })
     }
 

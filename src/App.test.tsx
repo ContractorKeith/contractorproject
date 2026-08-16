@@ -132,6 +132,70 @@ describe("job workspace", () => {
     expect(openTasks).toHaveAttribute("aria-expanded", "true");
   });
 
+  it("loads the persisted schedule projection for the selected job", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
+      getSchedule: vi.fn().mockResolvedValue(ganttReadModel(job.id)),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(await screen.findByRole("treegrid", { name: `Schedule for ${job.name}` })).toBeVisible();
+    expect(client.getSchedule).toHaveBeenCalledWith(job.id);
+  });
+
+  it("shows schedule loading and empty states", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const getSchedule = vi.fn().mockImplementation(() => new Promise(() => undefined));
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
+      getSchedule,
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    const { unmount } = render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(await screen.findByText("Loading schedule…")).toBeVisible();
+    unmount();
+
+    getSchedule.mockResolvedValue({
+      ...ganttReadModel(job.id),
+      rowCount: 0,
+      criticalTaskIds: [],
+      criticalPath: [],
+      rows: [],
+    });
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(await screen.findByText("No scheduled tasks yet.")).toBeVisible();
+  });
+
+  it("surfaces schedule validation errors in the selected job", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
+      getSchedule: vi.fn().mockRejectedValue(new Error("set a schedule start before viewing the schedule")),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      `Couldn't build schedule for ${job.name}. set a schedule start before viewing the schedule`,
+    );
+  });
+
   it("creates nested tasks, edits a task, and reorders it with keyboard-accessible controls", async () => {
     const user = userEvent.setup();
     const job = { ...fixtureJob(), version: 3 };
@@ -600,5 +664,14 @@ function fixtureTask(
     version,
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
+  };
+}
+
+function ganttReadModel(jobId: string) {
+  return {
+    contractVersion: 1 as const, jobId, jobVersion: 1,
+    scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
+    baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
+    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, critical: true, milestone: false, summary: false, predecessorIds: [], baseline: null }],
   };
 }
