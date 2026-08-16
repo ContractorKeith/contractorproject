@@ -9,7 +9,9 @@ ContractorProject is a local-first, AI-native project and job management tool fo
 
 ## Status
 
-v0.1 foundation implementation — last touched 2026-08-14
+v0.1 scheduled-job tracer — persisted work breakdown and schedule inputs now
+flow through the pure Rust scheduler into the production Gantt in the normal
+desktop workflow. Last touched 2026-08-16.
 
 ## Commands
 
