@@ -362,12 +362,14 @@ impl SqliteStore {
         }
         let (snapshot_version, tasks) = read_task_hierarchy(&transaction, &task.job_id)?;
         debug_assert_eq!(snapshot_version, job_version);
-        write_audit_record(
-            &transaction,
-            context,
-            updated_at,
-            "reordered task hierarchy",
-        )?;
+        if has_changes {
+            write_audit_record(
+                &transaction,
+                context,
+                updated_at,
+                "reordered task hierarchy",
+            )?;
+        }
         transaction.commit()?;
         Ok((task.job_id, snapshot_version, tasks))
     }

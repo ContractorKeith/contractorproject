@@ -687,6 +687,118 @@ fn command_audit_is_atomic_bounded_and_does_not_include_request_content() {
 }
 
 #[test]
+fn task_mutations_write_one_audit_record_but_noop_and_failed_reorders_write_none() {
+    let temp = tempfile::tempdir().expect("create temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open application service");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Ridgeline Fence — Phase 2".into(),
+                timezone: "America/New_York".into(),
+            },
+        )
+        .expect("create job");
+    let root = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Site work".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("create task")
+        .task;
+    let updated = service
+        .update_task(
+            command_context(),
+            UpdateTaskRequest {
+                task_id: root.id.clone(),
+                name: "Site preparation".into(),
+                expected_version: 1,
+            },
+        )
+        .expect("update task")
+        .task;
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Closeout".into(),
+                expected_job_version: 3,
+            },
+        )
+        .expect("create second task")
+        .task;
+    let reordered = service
+        .reorder_task(
+            command_context(),
+            ReorderTaskRequest {
+                task_id: second.id.clone(),
+                new_parent_task_id: None,
+                new_sibling_index: 0,
+                expected_version: second.version,
+                expected_job_version: 4,
+            },
+        )
+        .expect("reorder task");
+    let before_noop = reordered.clone();
+    let updated_after_reorder = reordered
+        .tasks
+        .iter()
+        .find(|task| task.id == updated.id)
+        .expect("updated task remains in hierarchy")
+        .version;
+    let noop = service
+        .reorder_task(
+            command_context(),
+            ReorderTaskRequest {
+                task_id: second.id.clone(),
+                new_parent_task_id: None,
+                new_sibling_index: 0,
+                expected_version: 2,
+                expected_job_version: 5,
+            },
+        )
+        .expect("accept noop reorder");
+    assert_eq!(noop, before_noop, "no-op must not change the hierarchy");
+    let failed = service.reorder_task(
+        command_context(),
+        ReorderTaskRequest {
+            task_id: updated.id,
+            new_parent_task_id: None,
+            new_sibling_index: 2,
+            expected_version: updated_after_reorder,
+            expected_job_version: 5,
+        },
+    );
+    assert_eq!(
+        failed.expect_err("reject invalid index").kind(),
+        "invalid_input"
+    );
+    drop(service);
+
+    let connection = Connection::open(database_path).expect("open database for audit inspection");
+    let (audit_rows, tasks): (i64, i64) = connection
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM command_log), (SELECT COUNT(*) FROM tasks)",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read audit and task counts");
+    assert_eq!(tasks, 2);
+    assert_eq!(
+        audit_rows, 5,
+        "job plus four successful task mutations only"
+    );
+}
+
+#[test]
 fn command_log_schema_rejects_missing_or_empty_identity_fields() {
     let temp = tempfile::tempdir().expect("create temporary app data");
     let database_path = temp.path().join("contractorproject.sqlite3");
