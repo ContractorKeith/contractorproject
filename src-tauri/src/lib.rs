@@ -7,10 +7,10 @@ mod storage;
 mod work_breakdown;
 
 use application::{
-    AddDependencyRequest, ApplicationError, ApplicationService, CommandActor, CommandContext,
-    CreateJobRequest, CreateTaskRequest, Job, RemoveDependencyRequest, ReorderTaskRequest,
-    TaskHierarchy, TaskMutation, UpdateScheduleRequest, UpdateTaskDurationRequest,
-    UpdateTaskRequest,
+    AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, CommandActor,
+    CommandContext, CreateJobRequest, CreateTaskRequest, Job, JobStatus, RemoveDependencyRequest,
+    ReorderTaskRequest, RestoreJobRequest, TaskHierarchy, TaskMutation, UpdateScheduleRequest,
+    UpdateTaskDurationRequest, UpdateTaskRequest,
 };
 use gantt::GanttReadModel;
 use serde::Serialize;
@@ -103,8 +103,35 @@ fn create_job(
 }
 
 #[tauri::command]
-fn list_jobs(service: State<'_, ApplicationService>) -> Result<Vec<Job>, CommandError> {
-    service.list_jobs().map_err(Into::into)
+fn list_jobs(
+    service: State<'_, ApplicationService>,
+    status: Option<JobStatus>,
+) -> Result<Vec<Job>, CommandError> {
+    match status {
+        Some(status) => service.list_jobs_by_status(status),
+        None => service.list_jobs(),
+    }
+    .map_err(Into::into)
+}
+
+#[tauri::command]
+fn archive_job(
+    service: State<'_, ApplicationService>,
+    request: ArchiveJobRequest,
+) -> Result<Job, CommandError> {
+    service
+        .archive_job(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn restore_job(
+    service: State<'_, ApplicationService>,
+    request: RestoreJobRequest,
+) -> Result<Job, CommandError> {
+    service
+        .restore_job(tauri_command_context(), request)
+        .map_err(Into::into)
 }
 
 #[tauri::command]
@@ -213,6 +240,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             create_job,
             list_jobs,
+            archive_job,
+            restore_job,
             create_task,
             list_tasks,
             get_schedule,

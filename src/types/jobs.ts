@@ -1,4 +1,4 @@
-export type JobStatus = "draft";
+export type JobStatus = "draft" | "archived";
 
 export interface Job {
   id: string;
@@ -18,6 +18,11 @@ export interface WorkingCalendar { workingWeekdays: CalendarWeekday[]; workdaySt
 export interface CreateJobRequest {
   name: string;
   timezone: string;
+}
+
+export interface JobStatusRequest {
+  jobId: string;
+  expectedJobVersion: number;
 }
 
 export interface Task {

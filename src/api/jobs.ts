@@ -4,6 +4,8 @@ import type {
   CreateJobRequest,
   CreateTaskRequest,
   Job,
+  JobStatus,
+  JobStatusRequest,
   ReorderTaskRequest,
   TaskHierarchy,
   TaskMutation,
@@ -16,8 +18,10 @@ import type {
 import type { GanttReadModel } from "../types/gantt";
 
 export interface JobClient {
-  listJobs(): Promise<Job[]>;
+  listJobs(status?: JobStatus): Promise<Job[]>;
   createJob(request: CreateJobRequest): Promise<Job>;
+  archiveJob?(request: JobStatusRequest): Promise<Job>;
+  restoreJob?(request: JobStatusRequest): Promise<Job>;
   listTasks(jobId: string): Promise<TaskHierarchy>;
   getSchedule?(jobId: string): Promise<GanttReadModel>;
   createTask(request: CreateTaskRequest): Promise<TaskHierarchy>;
@@ -30,8 +34,13 @@ export interface JobClient {
 }
 
 export const tauriJobClient: JobClient = {
-  listJobs: () => invoke<Job[]>("list_jobs"),
+  listJobs: (status) =>
+    status === undefined
+      ? invoke<Job[]>("list_jobs")
+      : invoke<Job[]>("list_jobs", { status }),
   createJob: (request) => invoke<Job>("create_job", { request }),
+  archiveJob: (request) => invoke<Job>("archive_job", { request }),
+  restoreJob: (request) => invoke<Job>("restore_job", { request }),
   listTasks: (jobId) => invoke<TaskHierarchy>("list_tasks", { jobId }),
   getSchedule: (jobId) => invoke<GanttReadModel>("get_schedule", { jobId }),
   async createTask(request) {

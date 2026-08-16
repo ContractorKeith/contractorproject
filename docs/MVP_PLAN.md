@@ -29,7 +29,7 @@ The next recovery boundary is specified in
 - [x] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
 - [x] Add SQLite initialization, forward migrations, and application-data path handling.
 - [x] Implement create/list/open job commands.
-- [ ] Implement recoverable archive and recovery commands.
+- [x] Implement recoverable archive and recovery commands.
 - [x] Implement task hierarchy create/edit/reorder with record-version conflicts.
 - [x] Render the job list and editable work breakdown through the real application interface.
 - [ ] Add a consistent backup command and restore verification test.

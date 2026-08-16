@@ -625,6 +625,112 @@ describe("job workspace", () => {
     expect(client.listTasks).toHaveBeenCalledTimes(2);
     expect(start).toHaveValue("2026-08-17");
   });
+
+  it("archives the active job with its displayed version and clears its selected task state", async () => {
+    const user = userEvent.setup();
+    const job = { ...fixtureJob(), version: 7 };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      archiveJob: vi.fn().mockResolvedValue({ ...job, status: "archived", version: 8 }),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: job.version, tasks: [] }),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(await screen.findByText("No tasks yet.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Archive job" }));
+
+    expect(client.archiveJob).toHaveBeenCalledWith({ jobId: job.id, expectedJobVersion: 7 });
+    expect(screen.queryByRole("heading", { name: job.name })).not.toBeInTheDocument();
+    expect(screen.queryByText("No tasks yet.")).not.toBeInTheDocument();
+  });
+
+  it("opens archived jobs with the keyboard, shows their count, and restores with the archived version", async () => {
+    const user = userEvent.setup();
+    const archived = { ...fixtureJob(), name: "Completed patio", status: "archived" as const, version: 4 };
+    const restored = { ...archived, status: "draft" as const, version: 5 };
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation((status?: string) => Promise.resolve(status === "archived" ? [archived] : [])),
+      createJob: vi.fn(),
+      restoreJob: vi.fn().mockResolvedValue(restored),
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    const disclosure = await screen.findByRole("button", { name: "View archived jobs" });
+    disclosure.focus();
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("1 archived job")).toBeVisible();
+    expect(screen.getByRole("list", { name: "Archived jobs" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: `Restore ${archived.name}` }));
+    expect(client.restoreJob).toHaveBeenCalledWith({ jobId: archived.id, expectedJobVersion: 4 });
+    expect(await screen.findByRole("heading", { name: archived.name })).toBeVisible();
+  });
+
+  it("requires an explicit refresh after an archive version conflict", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const refreshed = { ...job, version: 2 };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValueOnce([job]).mockResolvedValueOnce([refreshed]),
+      createJob: vi.fn(),
+      archiveJob: vi.fn().mockRejectedValue({ kind: "version_conflict", message: "stale" }),
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Archive job" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Job changed elsewhere");
+    expect(client.listJobs).toHaveBeenCalledTimes(1);
+    await user.click(screen.getByRole("button", { name: "Refresh jobs" }));
+    expect(client.listJobs).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps an archived job visible until an explicit refresh after a restore conflict", async () => {
+    const user = userEvent.setup();
+    const archived = { ...fixtureJob(), status: "archived" as const, version: 4 };
+    const refreshed = { ...archived, version: 5 };
+    let archivedLoads = 0;
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation((status?: string) => {
+        if (status !== "archived") return Promise.resolve([]);
+        archivedLoads += 1;
+        return Promise.resolve([archivedLoads === 1 ? archived : refreshed]);
+      }),
+      createJob: vi.fn(),
+      restoreJob: vi.fn().mockRejectedValue({ kind: "version_conflict", message: "stale" }),
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "View archived jobs" }));
+    await user.click(await screen.findByRole("button", { name: `Restore ${archived.name}` }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Job changed elsewhere");
+    expect(screen.getByRole("button", { name: `Restore ${archived.name}` })).toBeVisible();
+
+    await user.click(screen.getByRole("button", { name: "Refresh jobs" }));
+    expect(await screen.findByRole("button", { name: `Restore ${refreshed.name}` })).toBeVisible();
+    expect(client.restoreJob).toHaveBeenCalledTimes(1);
+  });
+
+  it("surfaces generic archive failures without removing the active job", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      archiveJob: vi.fn().mockRejectedValue(new Error("disk unavailable")),
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Archive job" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("disk unavailable");
+    expect(screen.getByRole("heading", { name: job.name })).toBeVisible();
+  });
 });
 
 function defaultCalendar(): WorkingCalendar {

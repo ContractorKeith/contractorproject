@@ -4,8 +4,7 @@ use chrono::{NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::domain::JobStatus;
-pub use crate::domain::{FinishStartDependency, Job, Task};
+pub use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 pub use crate::error::ApplicationError;
 use crate::gantt::{
     build_gantt_read_model, GanttPredecessorSource, GanttReadModel, GanttReadModelSource,
@@ -65,6 +64,20 @@ impl CommandContext {
 pub struct CreateJobRequest {
     pub name: String,
     pub timezone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchiveJobRequest {
+    pub job_id: String,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreJobRequest {
+    pub job_id: String,
+    pub expected_job_version: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -181,6 +194,40 @@ impl ApplicationService {
 
     pub fn list_jobs(&self) -> Result<Vec<Job>, ApplicationError> {
         self.store.list_jobs()
+    }
+
+    pub fn list_jobs_by_status(&self, status: JobStatus) -> Result<Vec<Job>, ApplicationError> {
+        self.store.list_jobs_by_status(status)
+    }
+
+    pub fn archive_job(
+        &self,
+        context: CommandContext,
+        request: ArchiveJobRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        self.store.archive_job(
+            &request.job_id,
+            request.expected_job_version,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    pub fn restore_job(
+        &self,
+        context: CommandContext,
+        request: RestoreJobRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        self.store.restore_job(
+            &request.job_id,
+            request.expected_job_version,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
     }
 
     pub fn create_task(

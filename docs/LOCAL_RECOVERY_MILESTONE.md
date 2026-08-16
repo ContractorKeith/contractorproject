@@ -1,6 +1,6 @@
 # Local recovery milestone
 
-Status: ready for issue creation
+Status: in progress — archive/restore slice implemented
 Updated: 2026-08-16
 
 This milestone follows the persisted scheduled-job tracer. It proves local

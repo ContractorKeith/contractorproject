@@ -29,10 +29,16 @@ type ScheduleLoadState =
 
 export function App({ client = tauriJobClient }: AppProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
+  const [archivedJobs, setArchivedJobs] = useState<Job[]>([]);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [archiveError, setArchiveError] = useState<string | null>(null);
+  const [archiveConflict, setArchiveConflict] = useState(false);
+  const [pendingJobId, setPendingJobId] = useState<string | null>(null);
+  const [archivedOpen, setArchivedOpen] = useState(false);
+  const [archivedLoading, setArchivedLoading] = useState(false);
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [taskLoads, setTaskLoads] = useState<Record<string, TaskLoadState>>({});
   const [theme, setTheme] = useState<ThemePreference>(loadThemePreference);
@@ -81,6 +87,78 @@ export function App({ client = tauriJobClient }: AppProps) {
       setError(errorMessage(reason));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function loadArchivedJobs() {
+    setArchivedLoading(true);
+    setArchiveError(null);
+    try {
+      setArchivedJobs(await client.listJobs("archived"));
+    } catch (reason: unknown) {
+      setArchiveError(errorMessage(reason));
+    } finally {
+      setArchivedLoading(false);
+    }
+  }
+
+  function handleToggleArchivedJobs() {
+    const nextOpen = !archivedOpen;
+    setArchivedOpen(nextOpen);
+    if (nextOpen) void loadArchivedJobs();
+  }
+
+  async function refreshJobs() {
+    setArchiveConflict(false);
+    setArchiveError(null);
+    setLoading(true);
+    try {
+      setJobs(await client.listJobs());
+      if (archivedOpen) await loadArchivedJobs();
+    } catch (reason: unknown) {
+      setArchiveError(errorMessage(reason));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleArchive(job: Job) {
+    if (!client.archiveJob || pendingJobId) return;
+    setPendingJobId(job.id);
+    setArchiveError(null);
+    setArchiveConflict(false);
+    try {
+      await client.archiveJob({ jobId: job.id, expectedJobVersion: job.version });
+      setJobs((current) => current.filter((candidate) => candidate.id !== job.id));
+      setTaskLoads((current) => {
+        const next = { ...current };
+        delete next[job.id];
+        return next;
+      });
+      if (openJobId === job.id) setOpenJobId(null);
+      if (archivedOpen) await loadArchivedJobs();
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setArchiveConflict(true);
+      else setArchiveError(errorMessage(reason));
+    } finally {
+      setPendingJobId(null);
+    }
+  }
+
+  async function handleRestore(job: Job) {
+    if (!client.restoreJob || pendingJobId) return;
+    setPendingJobId(job.id);
+    setArchiveError(null);
+    setArchiveConflict(false);
+    try {
+      const restored = await client.restoreJob({ jobId: job.id, expectedJobVersion: job.version });
+      setArchivedJobs((current) => current.filter((candidate) => candidate.id !== job.id));
+      setJobs((current) => [restored, ...current]);
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setArchiveConflict(true);
+      else setArchiveError(errorMessage(reason));
+    } finally {
+      setPendingJobId(null);
     }
   }
 
@@ -204,6 +282,21 @@ export function App({ client = tauriJobClient }: AppProps) {
           </div>
         ) : null}
 
+        {archiveConflict ? (
+          <div className="inline-error" role="alert">
+            <strong>Job changed elsewhere.</strong>
+            <span>Refresh before archiving or restoring so newer local work is not overwritten.</span>
+            <button type="button" onClick={() => void refreshJobs()} disabled={loading}>
+              Refresh jobs
+            </button>
+          </div>
+        ) : archiveError ? (
+          <div className="inline-error" role="alert">
+            <strong>Couldn&apos;t update job archive.</strong>
+            <span>{archiveError}</span>
+          </div>
+        ) : null}
+
         <section className="job-section" aria-label="Saved jobs">
           <div className="section-rule">
             <h2>Local jobs</h2>
@@ -238,6 +331,14 @@ export function App({ client = tauriJobClient }: AppProps) {
                     </div>
                     <h3>{job.name}</h3>
                     <button
+                      className="archive-action"
+                      type="button"
+                      onClick={() => void handleArchive(job)}
+                      disabled={!client.archiveJob || pendingJobId !== null}
+                    >
+                      {pendingJobId === job.id ? "Archiving…" : "Archive job"}
+                    </button>
+                    <button
                       className="task-disclosure"
                       type="button"
                       aria-label={`${openJobId === job.id ? "Hide" : "View"} tasks for ${job.name}`}
@@ -265,6 +366,38 @@ export function App({ client = tauriJobClient }: AppProps) {
               ))}
             </div>
           )}
+        </section>
+
+        <section className="archived-section" aria-labelledby="archived-jobs-heading">
+          <button
+            className="archived-disclosure"
+            type="button"
+            id="archived-jobs-heading"
+            aria-expanded={archivedOpen}
+            aria-controls="archived-jobs-panel"
+            onClick={handleToggleArchivedJobs}
+          >
+            {archivedOpen ? "Hide archived jobs" : "View archived jobs"}
+          </button>
+          {archivedOpen ? (
+            <div id="archived-jobs-panel" className="archived-panel" aria-live="polite">
+              {archivedLoading ? <p>Loading archived jobs…</p> : archivedJobs.length === 0 ? <p>No archived jobs.</p> : (
+                <>
+                  <p className="archived-count">{archivedJobs.length} archived {archivedJobs.length === 1 ? "job" : "jobs"}</p>
+                  <ul className="archived-list" aria-label="Archived jobs">
+                    {archivedJobs.map((job) => (
+                      <li key={job.id}>
+                        <span>{job.name}</span>
+                        <button type="button" onClick={() => void handleRestore(job)} disabled={!client.restoreJob || pendingJobId !== null}>
+                          {pendingJobId === job.id ? "Restoring…" : `Restore ${job.name}`}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                </>
+              )}
+            </div>
+          ) : null}
         </section>
       </main>
     </div>

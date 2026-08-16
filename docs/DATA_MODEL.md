@@ -123,6 +123,18 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
   is not persisted and reads never mutate the canonical inputs.
 - Imports use stable external IDs or an explicit mapping table so retries do not duplicate records.
 
+### Recoverable job archive
+
+Archiving is a reversible job status transition, not deletion. The normal job
+list includes only `draft` jobs; archived jobs are available through a separate
+recovery query. Archive changes `draft` to `archived`, while restore always
+changes `archived` to `draft`. Each transition checks the job version and
+commits one bounded command-log row in the same transaction.
+
+Archived jobs are immutable through normal task, hierarchy, scheduling-input,
+and dependency commands. Their child rows, audit history, and derived schedule
+inputs remain untouched, so restore reconstructs the same schedule projection.
+
 ## Archive contract
 
 The portable job archive is a versioned ZIP containing:
