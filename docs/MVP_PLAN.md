@@ -1,7 +1,7 @@
 # MVP delivery plan
 
-Status: proposed
-Updated: 2026-08-14
+Status: active
+Updated: 2026-08-16
 
 The work is sequenced as tracer slices. Each slice leaves a usable path through the real desktop app and keeps scheduling, persistence, UI, and agent interfaces aligned.
 
@@ -25,9 +25,10 @@ Exit: the team can build, test, and package the shell on both platforms, and the
 
 - [x] Scaffold Tauri, React, Rust workspace structure, linting, tests, and CI.
 - [x] Add SQLite initialization, forward migrations, and application-data path handling.
-- [ ] Implement create/list/open/archive job commands.
+- [x] Implement create/list/open job commands.
+- [ ] Implement recoverable archive and recovery commands.
 - [x] Implement task hierarchy create/edit/reorder with record-version conflicts.
-- [ ] Render the job list and work breakdown table through the real application interface.
+- [x] Render the job list and editable work breakdown through the real application interface.
 - [ ] Add a consistent backup command and restore verification test.
 
 Exit: a packaged development app can create a job and nested tasks, restart without data loss, archive a job recoverably, and restore a verified backup.
@@ -38,10 +39,12 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 - [ ] Specify constraints and data-date/progress rules with examples.
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
 - [ ] Add SS, FF, and SF dependency types plus negative lag.
-- [ ] Add default working calendar and dated exceptions.
+- [x] Persist the default weekly working calendar.
+- [ ] Add dated calendar exceptions.
 - [x] Define the versioned Rust schedule read-model query with fixture-based tests.
-- [ ] Wire persisted schedule inputs through the read-model query.
-- [ ] Show validation failures and schedule explanations in the work breakdown table.
+- [x] Wire persisted schedule inputs through the read-model query.
+- [x] Show schedule validation failures in the normal job workflow.
+- [ ] Add schedule explanations.
 
 Exit: known schedule fixtures reproduce expected dates, float, and critical tasks; invalid graphs cannot be committed.
 
@@ -50,7 +53,8 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
 - [x] Build the production work-breakdown/timeline split view from the accepted spike.
   - [x] Ship the virtualized semantic work-breakdown treegrid.
   - [x] Add the viewport-cropped SVG timeline in the shared scroll view.
-- [ ] Add zoom, pan, today/data-date markers, hierarchy collapse, and dependency rendering.
+- [x] Add zoom, hierarchy collapse, and dependency rendering.
+- [ ] Add pan and today/data-date markers.
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
 - [ ] Create immutable named baselines.
 - [ ] Display baseline bars and start/finish/duration variance.

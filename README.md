@@ -2,7 +2,7 @@
 
 Local-first, AI-native project and job management for contractors. ContractorProject is the first standalone module in a planned suite of offline business tools.
 
-Status: v0.1 foundation implementation
+Status: v0.1 persisted scheduled-job tracer
 
 ## Planning baseline
 
@@ -18,7 +18,10 @@ Status: v0.1 foundation implementation
 - [Gantt timeline contract](docs/GANTT_TIMELINE.md)
 - [Packaged Gantt platform verification](docs/GANTT_PLATFORM_VERIFICATION.md)
 
-The application foundation is a Tauri 2 desktop app with a React/TypeScript UI, a Rust application core, and SQLite storage. The first vertical slice creates a job through the Rust application interface, persists it locally, and lists it in the desktop UI.
+The Tauri desktop app now creates and edits a persisted work breakdown, stores
+weekly-calendar and finish-to-start schedule inputs, computes the deterministic
+schedule in Rust, and renders the production Gantt in the normal job workflow.
+The same projection is reproduced after reopening the SQLite database.
 
 ## Development
 

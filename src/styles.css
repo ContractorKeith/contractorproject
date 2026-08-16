@@ -521,6 +521,16 @@ h1 {
   color: var(--color-accent-text);
 }
 
+.gantt-state {
+  margin: var(--space-4) 0;
+}
+
+.gantt-state--error {
+  padding: var(--space-3);
+  border-left: var(--border-alert) solid var(--color-accent);
+  background: var(--color-accent-100);
+}
+
 .task-editor {
   display: grid;
   gap: var(--space-2);
