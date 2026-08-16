@@ -30,6 +30,8 @@ Proposal tools return a typed diff, warnings, affected versions, and an opaque p
 
 ### Write
 
+- `archive_job(jobId, expectedJobVersion)`
+- `restore_job(jobId, expectedJobVersion)`
 - `apply_proposal(proposalId, expectedVersions)`
 - `create_task(jobId, task, expectedJobVersion)`
 - `update_task(taskId, patch, expectedVersion)`
@@ -87,6 +89,13 @@ The desktop command has the same `get_schedule(jobId)` shape. It reads the
 job's persisted start, weekly calendar, durations, hierarchy, and FS links in
 one SQLite snapshot, then invokes the pure Rust scheduler and Gantt projection.
 Invalid or incomplete inputs return a validation error and never mutate state.
+
+The normal desktop `list_jobs` call returns draft jobs by default; callers may
+request `archived` explicitly for the recovery view. `archive_job` changes a
+draft job to `archived`, and `restore_job` returns it to `draft`. Both commands
+check the expected job version and commit exactly one audit row atomically.
+Archived jobs are immutable through the current task, hierarchy, schedule,
+duration, and dependency mutation commands.
 
 ## Context and privacy
 

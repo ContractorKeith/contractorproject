@@ -16,6 +16,35 @@ pub(crate) struct SqliteStore {
     database_path: PathBuf,
 }
 
+#[derive(Clone, Copy)]
+enum JobStatusTransition {
+    Archive,
+    Restore,
+}
+
+impl JobStatusTransition {
+    fn expected_status(self) -> JobStatus {
+        match self {
+            Self::Archive => JobStatus::Draft,
+            Self::Restore => JobStatus::Archived,
+        }
+    }
+
+    fn next_status(self) -> JobStatus {
+        match self {
+            Self::Archive => JobStatus::Archived,
+            Self::Restore => JobStatus::Draft,
+        }
+    }
+
+    fn audit_summary(self) -> &'static str {
+        match self {
+            Self::Archive => "archived job",
+            Self::Restore => "restored job",
+        }
+    }
+}
+
 impl SqliteStore {
     pub(crate) fn open(database_path: impl AsRef<Path>) -> Result<Self, ApplicationError> {
         let database_path = database_path.as_ref().to_path_buf();
@@ -59,14 +88,32 @@ impl SqliteStore {
     }
 
     pub(crate) fn list_jobs(&self) -> Result<Vec<Job>, ApplicationError> {
+        self.list_jobs_matching("WHERE status != 'archived'", [])
+    }
+
+    pub(crate) fn list_jobs_by_status(
+        &self,
+        status: JobStatus,
+    ) -> Result<Vec<Job>, ApplicationError> {
+        self.list_jobs_matching("WHERE status = ?1", [status.as_database_value()])
+    }
+
+    fn list_jobs_matching<P>(
+        &self,
+        predicate: &str,
+        params: P,
+    ) -> Result<Vec<Job>, ApplicationError>
+    where
+        P: rusqlite::Params,
+    {
         let connection = self.connection()?;
-        let mut statement = connection.prepare(
+        let mut statement = connection.prepare(&format!(
             "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version
-             FROM jobs
-             ORDER BY created_at DESC, id DESC",
-        )?;
+             FROM jobs {predicate}
+             ORDER BY created_at DESC, id DESC"
+        ))?;
         let rows = statement
-            .query_map([], |row| {
+            .query_map(params, |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
@@ -119,6 +166,90 @@ impl SqliteStore {
             .collect()
     }
 
+    pub(crate) fn archive_job(
+        &self,
+        job_id: &str,
+        expected_job_version: i64,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        self.transition_job_status(
+            job_id,
+            expected_job_version,
+            JobStatusTransition::Archive,
+            updated_at,
+            context,
+        )
+    }
+
+    pub(crate) fn restore_job(
+        &self,
+        job_id: &str,
+        expected_job_version: i64,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        self.transition_job_status(
+            job_id,
+            expected_job_version,
+            JobStatusTransition::Restore,
+            updated_at,
+            context,
+        )
+    }
+
+    fn transition_job_status(
+        &self,
+        job_id: &str,
+        expected_job_version: i64,
+        transition_kind: JobStatusTransition,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job = read_job(&transaction, job_id)?;
+        if job.version != expected_job_version {
+            return Err(ApplicationError::VersionConflict {
+                resource: "job",
+                id: job_id.into(),
+                expected: expected_job_version,
+                current: job.version,
+            });
+        }
+        if job.status != transition_kind.expected_status() {
+            return Err(ApplicationError::ValidationFailed {
+                code: "job_status_transition",
+                field: "status",
+                message: "job is not in a state that supports this action".into(),
+            });
+        }
+        let version = job.version + 1;
+        transaction.execute(
+            "UPDATE jobs SET status = ?1, updated_at = ?2, version = ?3 WHERE id = ?4",
+            params![
+                transition_kind.next_status().as_database_value(),
+                updated_at,
+                version,
+                job_id
+            ],
+        )?;
+        write_audit_record(
+            &transaction,
+            context,
+            updated_at,
+            transition_kind.audit_summary(),
+        )?;
+        transaction.commit()?;
+        Ok(Job {
+            status: transition_kind.next_status(),
+            updated_at: updated_at.into(),
+            version,
+            ..job
+        })
+    }
+
     pub(crate) fn create_task(
         &self,
         task: &mut Task,
@@ -128,25 +259,8 @@ impl SqliteStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_command_is_new(&transaction, context)?;
-        let current_job_version = transaction
-            .query_row(
-                "SELECT version FROM jobs WHERE id = ?1",
-                [&task.job_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| ApplicationError::NotFound {
-                resource: "job",
-                id: task.job_id.clone(),
-            })?;
-        if current_job_version != expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: task.job_id.clone(),
-                expected: expected_job_version,
-                current: current_job_version,
-            });
-        }
+        let current_job_version =
+            require_draft_job(&transaction, &task.job_id, Some(expected_job_version))?;
 
         if let Some(parent_id) = task.parent_task_id.as_deref() {
             let parent_job_id = transaction
@@ -259,6 +373,7 @@ impl SqliteStore {
                 current: task.version,
             });
         }
+        let current_job_version = require_draft_job(&transaction, &task.job_id, None)?;
 
         task.name = name.into();
         task.updated_at = updated_at.into();
@@ -268,17 +383,12 @@ impl SqliteStore {
             params![task.name, task.updated_at, task.version, task.id],
         )?;
         transaction.execute(
-            "UPDATE jobs SET updated_at = ?1, version = version + 1 WHERE id = ?2",
-            params![updated_at, task.job_id],
-        )?;
-        let job_version = transaction.query_row(
-            "SELECT version FROM jobs WHERE id = ?1",
-            [&task.job_id],
-            |row| row.get(0),
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![updated_at, current_job_version + 1, task.job_id],
         )?;
         write_audit_record(&transaction, context, updated_at, "updated task")?;
         transaction.commit()?;
-        Ok((task, job_version))
+        Ok((task, current_job_version + 1))
     }
 
     pub(crate) fn reorder_task(
@@ -304,19 +414,11 @@ impl SqliteStore {
                 current: task.version,
             });
         }
-        let current_job_version = transaction.query_row(
-            "SELECT version FROM jobs WHERE id = ?1",
-            [&task.job_id],
-            |row| row.get::<_, i64>(0),
+        let current_job_version = require_draft_job(
+            &transaction,
+            &task.job_id,
+            Some(request.expected_job_version),
         )?;
-        if current_job_version != request.expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: task.job_id.clone(),
-                expected: request.expected_job_version,
-                current: current_job_version,
-            });
-        }
 
         let ancestors = load_ancestor_chain(&transaction, request.new_parent_task_id.as_deref())?;
         validate_parent_chain(&task, &ancestors)?;
@@ -441,25 +543,11 @@ impl SqliteStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_command_is_new(&transaction, context)?;
-        let current = transaction
-            .query_row(
-                "SELECT version FROM jobs WHERE id = ?1",
-                [&request.job_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| ApplicationError::NotFound {
-                resource: "job",
-                id: request.job_id.clone(),
-            })?;
-        if current != request.expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: request.job_id.clone(),
-                expected: request.expected_job_version,
-                current,
-            });
-        }
+        let current = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
         let calendar = serde_json::to_string(&request.calendar)
             .map_err(|error| ApplicationError::InvalidStoredData(error.to_string()))?;
         transaction.execute("UPDATE jobs SET schedule_start = ?1, calendar_json = ?2, updated_at = ?3, version = ?4 WHERE id = ?5", params![request.schedule_start, calendar, updated_at, current + 1, request.job_id])?;
@@ -497,19 +585,11 @@ impl SqliteStore {
                 current: task.version,
             });
         }
-        let job_version = transaction.query_row(
-            "SELECT version FROM jobs WHERE id = ?1",
-            [&task.job_id],
-            |row| row.get::<_, i64>(0),
+        let job_version = require_draft_job(
+            &transaction,
+            &task.job_id,
+            Some(request.expected_job_version),
         )?;
-        if job_version != request.expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: task.job_id.clone(),
-                expected: request.expected_job_version,
-                current: job_version,
-            });
-        }
         let children: bool = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id = ?1)",
             [&task.id],
@@ -560,25 +640,11 @@ impl SqliteStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_command_is_new(&transaction, context)?;
-        let current = transaction
-            .query_row(
-                "SELECT version FROM jobs WHERE id = ?1",
-                [&request.job_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| ApplicationError::NotFound {
-                resource: "job",
-                id: request.job_id.clone(),
-            })?;
-        if current != request.expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: request.job_id.clone(),
-                expected: request.expected_job_version,
-                current,
-            });
-        }
+        let current = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
         if request.predecessor_task_id == request.successor_task_id {
             return Err(ApplicationError::ValidationFailed {
                 code: "dependency_self",
@@ -664,25 +730,11 @@ impl SqliteStore {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         ensure_command_is_new(&transaction, context)?;
-        let current = transaction
-            .query_row(
-                "SELECT version FROM jobs WHERE id = ?1",
-                [&request.job_id],
-                |row| row.get::<_, i64>(0),
-            )
-            .optional()?
-            .ok_or_else(|| ApplicationError::NotFound {
-                resource: "job",
-                id: request.job_id.clone(),
-            })?;
-        if current != request.expected_job_version {
-            return Err(ApplicationError::VersionConflict {
-                resource: "job",
-                id: request.job_id.clone(),
-                expected: request.expected_job_version,
-                current,
-            });
-        }
+        let current = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
         let deleted = transaction.execute("DELETE FROM task_dependencies WHERE job_id = ?1 AND predecessor_task_id = ?2 AND successor_task_id = ?3", params![request.job_id, request.predecessor_task_id, request.successor_task_id])?;
         if deleted == 0 {
             return Err(ApplicationError::NotFound {
@@ -884,6 +936,46 @@ fn ensure_command_is_new(
         });
     }
     Ok(())
+}
+
+/// Guards every ordinary job write; archive and restore use their dedicated transition path.
+fn require_draft_job(
+    transaction: &Transaction<'_>,
+    job_id: &str,
+    expected_version: Option<i64>,
+) -> Result<i64, ApplicationError> {
+    let (status, version) = transaction
+        .query_row(
+            "SELECT status, version FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )
+        .optional()?
+        .ok_or_else(|| ApplicationError::NotFound {
+            resource: "job",
+            id: job_id.into(),
+        })?;
+    if let Some(expected) = expected_version {
+        if version != expected {
+            return Err(ApplicationError::VersionConflict {
+                resource: "job",
+                id: job_id.into(),
+                expected,
+                current: version,
+            });
+        }
+    }
+    match JobStatus::from_database_value(&status) {
+        Some(JobStatus::Draft) => Ok(version),
+        Some(JobStatus::Archived) => Err(ApplicationError::ValidationFailed {
+            code: "job_archived",
+            field: "jobId",
+            message: "restore the job before changing its tasks or schedule".into(),
+        }),
+        None => Err(ApplicationError::InvalidStoredData(format!(
+            "job {job_id} has unsupported status {status}"
+        ))),
+    }
 }
 
 fn write_audit_record(

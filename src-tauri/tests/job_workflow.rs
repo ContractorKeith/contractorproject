@@ -2,7 +2,8 @@ use contractorproject_lib::application::{
     AddDependencyRequest, RemoveDependencyRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
 };
 use contractorproject_lib::application::{
-    ApplicationService, CommandActor, CommandContext, CreateJobRequest, CreateTaskRequest,
+    ApplicationService, ArchiveJobRequest, CommandActor, CommandContext, CreateJobRequest,
+    CreateTaskRequest, JobStatus, RestoreJobRequest,
 };
 use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
@@ -1653,6 +1654,584 @@ fn audit_insert_failure_rolls_back_the_domain_mutation() {
         .expect("count audit rows");
     assert_eq!(job_count, 0, "domain insert must roll back");
     assert_eq!(audit_count, 0, "audit insert must leave no partial row");
+}
+
+#[test]
+fn archive_and_restore_are_atomic_recoverable_and_preserve_schedule_inputs() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Recoverable schedule".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let summary = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Site work".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("summary");
+    let activity = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(summary.task.id.clone()),
+                name: "Excavate".into(),
+                expected_job_version: summary.job_version,
+            },
+        )
+        .expect("activity");
+    let milestone = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Inspect".into(),
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("milestone");
+    let activity = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: activity.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: activity.task.version,
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("activity duration");
+    let milestone = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: milestone.task.id.clone(),
+                duration_minutes: Some(0),
+                expected_version: milestone.task.version,
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("milestone duration");
+    let scheduled = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("schedule");
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: activity.task.id.clone(),
+                successor_task_id: milestone.task.id.clone(),
+                lag_minutes: 0,
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("dependency");
+    let hierarchy_before = service.list_tasks(&job.id).expect("hierarchy");
+    let schedule_before = service.get_schedule(&job.id).expect("schedule projection");
+    let active_jobs_before = service.list_jobs().expect("active jobs");
+    let audit_before = command_log_count(&database_path);
+
+    let unknown = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: "missing-job".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect_err("unknown job");
+    assert_eq!(unknown.kind(), "not_found");
+    let stale = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: linked.job_version - 1,
+            },
+        )
+        .expect_err("stale version");
+    assert_eq!(stale.kind(), "version_conflict");
+    let invalid_restore = service
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: linked.job_version,
+            },
+        )
+        .expect_err("draft job cannot be restored");
+    assert_eq!(invalid_restore.kind(), "validation_failed");
+    let unknown_restore = service
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: "missing-job".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect_err("unknown restore job");
+    assert_eq!(unknown_restore.kind(), "not_found");
+    assert_eq!(
+        service.list_jobs().expect("unchanged active jobs"),
+        active_jobs_before
+    );
+    assert_eq!(
+        service.list_tasks(&job.id).expect("unchanged hierarchy"),
+        hierarchy_before
+    );
+    assert_eq!(
+        service.get_schedule(&job.id).expect("unchanged schedule"),
+        schedule_before
+    );
+    assert_eq!(command_log_count(&database_path), audit_before);
+
+    let archive_context = command_context();
+    let archived = service
+        .archive_job(
+            archive_context.clone(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: linked.job_version,
+            },
+        )
+        .expect("archive");
+    assert_eq!(archived.status, JobStatus::Archived);
+    let stale_restore = service
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: archived.version - 1,
+            },
+        )
+        .expect_err("stale restore version");
+    assert_eq!(stale_restore.kind(), "version_conflict");
+    let duplicate_archive = service
+        .archive_job(
+            archive_context,
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect_err("duplicate archive command");
+    assert_eq!(duplicate_archive.kind(), "duplicate_command");
+    assert!(service.list_jobs().expect("active jobs").is_empty());
+    assert_eq!(
+        service
+            .list_jobs_by_status(JobStatus::Archived)
+            .expect("archived jobs"),
+        vec![archived.clone()]
+    );
+    let repeated = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect_err("already archived");
+    assert_eq!(repeated.kind(), "validation_failed");
+    let archived_hierarchy_before_reopen = service.list_tasks(&job.id).expect("archived hierarchy");
+    let archived_schedule_before_reopen = service.get_schedule(&job.id).expect("archived schedule");
+    assert_eq!(
+        service
+            .list_jobs_by_status(JobStatus::Archived)
+            .expect("unchanged archived jobs"),
+        vec![archived.clone()]
+    );
+    assert_eq!(command_log_count(&database_path), audit_before + 1);
+    drop(service);
+
+    let reopened = ApplicationService::open(&database_path).expect("reopen");
+    let archived_hierarchy = reopened.list_tasks(&job.id).expect("preserved hierarchy");
+    assert_eq!(archived_hierarchy, archived_hierarchy_before_reopen);
+    assert_eq!(archived_hierarchy.tasks, hierarchy_before.tasks);
+    assert_eq!(
+        archived_hierarchy.dependencies,
+        hierarchy_before.dependencies
+    );
+    let archived_schedule = reopened.get_schedule(&job.id).expect("preserved schedule");
+    assert_eq!(archived_schedule, archived_schedule_before_reopen);
+    assert_eq!(archived_schedule.rows, schedule_before.rows);
+    assert_eq!(
+        archived_schedule.schedule_start,
+        schedule_before.schedule_start
+    );
+    assert_eq!(
+        archived_schedule.schedule_finish,
+        schedule_before.schedule_finish
+    );
+    assert_eq!(
+        archived_schedule.critical_path,
+        schedule_before.critical_path
+    );
+    let restore_context = command_context();
+    let restored = reopened
+        .restore_job(
+            restore_context.clone(),
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect("restore");
+    assert_eq!(restored.status, JobStatus::Draft);
+    let restored_hierarchy_before_duplicate =
+        reopened.list_tasks(&job.id).expect("restored hierarchy");
+    let restored_schedule_before_duplicate =
+        reopened.get_schedule(&job.id).expect("restored schedule");
+    let duplicate_restore = reopened
+        .restore_job(
+            restore_context,
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: restored.version,
+            },
+        )
+        .expect_err("duplicate restore command");
+    assert_eq!(duplicate_restore.kind(), "duplicate_command");
+    let repeated_restore = reopened
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: restored.version,
+            },
+        )
+        .expect_err("already restored");
+    assert_eq!(repeated_restore.kind(), "validation_failed");
+    assert_eq!(reopened.list_jobs().expect("active jobs"), vec![restored]);
+    assert!(reopened
+        .list_jobs_by_status(JobStatus::Archived)
+        .expect("archived jobs")
+        .is_empty());
+    let restored_hierarchy = reopened.list_tasks(&job.id).expect("restored hierarchy");
+    assert_eq!(restored_hierarchy, restored_hierarchy_before_duplicate);
+    assert_eq!(restored_hierarchy.tasks, hierarchy_before.tasks);
+    assert_eq!(
+        restored_hierarchy.dependencies,
+        hierarchy_before.dependencies
+    );
+    let restored_schedule = reopened.get_schedule(&job.id).expect("restored schedule");
+    assert_eq!(restored_schedule, restored_schedule_before_duplicate);
+    assert_eq!(restored_schedule.rows, schedule_before.rows);
+    assert_eq!(
+        restored_schedule.schedule_start,
+        schedule_before.schedule_start
+    );
+    assert_eq!(
+        restored_schedule.schedule_finish,
+        schedule_before.schedule_finish
+    );
+    assert_eq!(
+        restored_schedule.critical_path,
+        schedule_before.critical_path
+    );
+}
+
+#[test]
+fn archive_audit_failure_rolls_back_status_and_version() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Atomic archive".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let audit_before = command_log_count(&database_path);
+    Connection::open(&database_path)
+        .expect("trigger connection")
+        .execute_batch(
+            "CREATE TRIGGER reject_archive_audit
+             BEFORE INSERT ON command_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced audit failure');
+             END;",
+        )
+        .expect("install trigger");
+
+    let failure = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect_err("audit failure");
+    assert_eq!(failure.kind(), "storage_unavailable");
+    assert_eq!(service.list_jobs().expect("unchanged jobs"), vec![job]);
+    assert_eq!(command_log_count(&database_path), audit_before);
+}
+
+#[test]
+fn archived_jobs_reject_every_normal_mutation_without_drift() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Immutable archive".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "First".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("first");
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Second".into(),
+                expected_job_version: first.job_version,
+            },
+        )
+        .expect("second");
+    let first = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: first.task.version,
+                expected_job_version: second.job_version,
+            },
+        )
+        .expect("first duration");
+    let second = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: second.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: second.task.version,
+                expected_job_version: first.job_version,
+            },
+        )
+        .expect("second duration");
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: 0,
+                expected_job_version: second.job_version,
+            },
+        )
+        .expect("dependency");
+    let archived = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: linked.job_version,
+            },
+        )
+        .expect("archive");
+    let hierarchy_before = service.list_tasks(&job.id).expect("hierarchy");
+    let archived_jobs_before = service
+        .list_jobs_by_status(JobStatus::Archived)
+        .expect("archived jobs");
+    let audit_before = command_log_count(&database_path);
+
+    let failures = [
+        service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: None,
+                    name: "Blocked".into(),
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .update_task(
+                command_context(),
+                UpdateTaskRequest {
+                    task_id: first.task.id.clone(),
+                    name: "Blocked".into(),
+                    expected_version: first.task.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .reorder_task(
+                command_context(),
+                ReorderTaskRequest {
+                    task_id: first.task.id.clone(),
+                    new_parent_task_id: None,
+                    new_sibling_index: 1,
+                    expected_version: first.task.version,
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .update_schedule(
+                command_context(),
+                UpdateScheduleRequest {
+                    job_id: job.id.clone(),
+                    schedule_start: Some("2026-08-17".into()),
+                    calendar: working_calendar(),
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: first.task.id.clone(),
+                    duration_minutes: Some(600),
+                    expected_version: first.task.version,
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: second.task.id.clone(),
+                    successor_task_id: first.task.id.clone(),
+                    lag_minutes: 0,
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .remove_dependency(
+                command_context(),
+                RemoveDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: first.task.id.clone(),
+                    successor_task_id: second.task.id.clone(),
+                    expected_job_version: archived.version,
+                },
+            )
+            .map(|_| ()),
+    ];
+    for failure in failures {
+        let error = failure.expect_err("archived job must be immutable");
+        assert_eq!(error.kind(), "validation_failed");
+        assert_eq!(
+            error.to_string(),
+            "restore the job before changing its tasks or schedule"
+        );
+        assert_eq!(
+            service.list_tasks(&job.id).expect("unchanged hierarchy"),
+            hierarchy_before
+        );
+        assert_eq!(
+            service
+                .list_jobs_by_status(JobStatus::Archived)
+                .expect("unchanged archive"),
+            archived_jobs_before
+        );
+        assert_eq!(command_log_count(&database_path), audit_before);
+    }
+}
+
+#[test]
+fn restore_audit_failure_rolls_back_status_and_version() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Atomic restore".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let archived = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("archive");
+    let audit_before = command_log_count(&database_path);
+    Connection::open(&database_path)
+        .expect("trigger connection")
+        .execute_batch(
+            "CREATE TRIGGER reject_restore_audit
+             BEFORE INSERT ON command_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced audit failure');
+             END;",
+        )
+        .expect("install trigger");
+
+    let failure = service
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect_err("audit failure");
+    assert_eq!(failure.kind(), "storage_unavailable");
+    assert!(service.list_jobs().expect("active jobs").is_empty());
+    assert_eq!(
+        service
+            .list_jobs_by_status(JobStatus::Archived)
+            .expect("unchanged archived jobs"),
+        vec![archived]
+    );
+    assert_eq!(command_log_count(&database_path), audit_before);
 }
 
 #[test]

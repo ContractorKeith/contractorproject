@@ -43,18 +43,21 @@ pub struct FinishStartDependency {
 #[serde(rename_all = "snake_case")]
 pub enum JobStatus {
     Draft,
+    Archived,
 }
 
 impl JobStatus {
     pub(crate) fn as_database_value(self) -> &'static str {
         match self {
             Self::Draft => "draft",
+            Self::Archived => "archived",
         }
     }
 
     pub(crate) fn from_database_value(value: &str) -> Option<Self> {
         match value {
             "draft" => Some(Self::Draft),
+            "archived" => Some(Self::Archived),
             _ => None,
         }
     }

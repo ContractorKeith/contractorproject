@@ -511,6 +511,60 @@ h1 {
   border-color: var(--color-action-hover);
 }
 
+.archive-action,
+.archived-disclosure,
+.archived-list button,
+.inline-error button {
+  margin-top: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-action);
+  background: transparent;
+  border: var(--border-hairline) solid var(--color-divider);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.archive-action:hover:not(:disabled),
+.archived-disclosure:hover,
+.archived-list button:hover:not(:disabled),
+.inline-error button:hover:not(:disabled) {
+  color: var(--color-action-hover);
+  border-color: var(--color-action-hover);
+}
+
+.archived-section {
+  margin-top: var(--space-6);
+}
+
+.archived-panel {
+  padding: var(--space-4);
+  border: var(--border-hairline) solid var(--color-divider);
+}
+
+.archived-count {
+  margin: 0 0 var(--space-3);
+  color: var(--color-neutral-700);
+}
+
+.archived-list {
+  display: grid;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.archived-list li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-4);
+}
+
+.archived-list button {
+  margin-top: 0;
+}
+
 .task-panel {
   margin-top: var(--space-4);
   padding-top: var(--space-4);
