@@ -1,5 +1,10 @@
 # ContractorProject
 
+## Runtime routing
+
+- Claude Code main sessions read `../dotfiles/claude/ORCHESTRATION.md`.
+- Other runtimes must not apply Claude's model assignments.
+
 ContractorProject is a local-first, AI-native project and job management tool for contractors. It is the first standalone module in a planned suite of offline business applications.
 
 ## Status
