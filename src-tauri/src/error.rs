@@ -26,6 +26,9 @@ pub enum ApplicationError {
         current: i64,
     },
 
+    #[error("command {command_id} was already applied")]
+    DuplicateCommand { command_id: String },
+
     #[error("stored job data is invalid: {0}")]
     InvalidStoredData(String),
 
@@ -43,6 +46,7 @@ impl ApplicationError {
             Self::NotFound { .. } => "not_found",
             Self::ValidationFailed { .. } => "validation_failed",
             Self::VersionConflict { .. } => "version_conflict",
+            Self::DuplicateCommand { .. } => "duplicate_command",
             Self::InvalidStoredData(_) => "invalid_stored_data",
             Self::Database(_) | Self::Io(_) => "storage_unavailable",
         }

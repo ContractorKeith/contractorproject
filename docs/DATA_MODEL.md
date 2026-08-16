@@ -95,7 +95,11 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
 ## Persistence support
 
 - `schema_migrations` records forward-only migrations.
-- `command_log` records command ID, actor (`user`, `agent`, `import`), timestamp, and a bounded summary for undo/audit.
+- `command_log` records a unique command ID (at most 128 characters), actor
+  (`user`, `agent`, `import`), client name (at most 120 characters), UTC
+  timestamp, and a server-generated non-secret summary (at most 240
+  characters). The row is committed atomically with its domain mutation;
+  duplicate IDs are rejected without rerunning that mutation.
 - `app_settings` stores non-secret preferences.
 - Provider credentials are never stored in these tables.
 

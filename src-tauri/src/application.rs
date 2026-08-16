@@ -13,6 +13,46 @@ pub struct ApplicationService {
     store: SqliteStore,
 }
 
+pub const MAX_COMMAND_ID_CHARACTERS: usize = 128;
+pub const MAX_CLIENT_NAME_CHARACTERS: usize = 120;
+pub const MAX_AUDIT_SUMMARY_CHARACTERS: usize = 240;
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CommandActor {
+    User,
+    Agent,
+    Import,
+}
+
+impl CommandActor {
+    pub(crate) fn as_database_value(&self) -> &'static str {
+        match self {
+            Self::User => "user",
+            Self::Agent => "agent",
+            Self::Import => "import",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandContext {
+    pub command_id: String,
+    pub actor: CommandActor,
+    pub client_name: String,
+}
+
+impl CommandContext {
+    pub fn validate(self) -> Result<Self, ApplicationError> {
+        Ok(Self {
+            command_id: required_text("commandId", self.command_id, MAX_COMMAND_ID_CHARACTERS)?,
+            actor: self.actor,
+            client_name: required_text("clientName", self.client_name, MAX_CLIENT_NAME_CHARACTERS)?,
+        })
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateJobRequest {
@@ -69,7 +109,12 @@ impl ApplicationService {
         })
     }
 
-    pub fn create_job(&self, request: CreateJobRequest) -> Result<Job, ApplicationError> {
+    pub fn create_job(
+        &self,
+        context: CommandContext,
+        request: CreateJobRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
         let name = required_text("name", request.name, 120)?;
         let timezone = required_text("timezone", request.timezone, 80)?;
         let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -83,7 +128,7 @@ impl ApplicationService {
             version: 1,
         };
 
-        self.store.insert_job(&job)?;
+        self.store.insert_job(&job, &context)?;
         Ok(job)
     }
 
@@ -93,8 +138,10 @@ impl ApplicationService {
 
     pub fn create_task(
         &self,
+        context: CommandContext,
         request: CreateTaskRequest,
     ) -> Result<TaskMutation, ApplicationError> {
+        let context = context.validate()?;
         let name = required_text("name", request.name, 200)?;
         required_version("expectedJobVersion", request.expected_job_version)?;
 
@@ -109,9 +156,9 @@ impl ApplicationService {
             updated_at: now,
             version: 1,
         };
-        let job_version = self
-            .store
-            .create_task(&mut task, request.expected_job_version)?;
+        let job_version =
+            self.store
+                .create_task(&mut task, request.expected_job_version, &context)?;
         Ok(TaskMutation { task, job_version })
     }
 
@@ -126,8 +173,10 @@ impl ApplicationService {
 
     pub fn update_task(
         &self,
+        context: CommandContext,
         request: UpdateTaskRequest,
     ) -> Result<TaskMutation, ApplicationError> {
+        let context = context.validate()?;
         let name = required_text("name", request.name, 200)?;
         required_version("expectedVersion", request.expected_version)?;
         let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
@@ -136,14 +185,17 @@ impl ApplicationService {
             &name,
             request.expected_version,
             &updated_at,
+            &context,
         )?;
         Ok(TaskMutation { task, job_version })
     }
 
     pub fn reorder_task(
         &self,
+        context: CommandContext,
         request: ReorderTaskRequest,
     ) -> Result<TaskHierarchy, ApplicationError> {
+        let context = context.validate()?;
         required_version("expectedVersion", request.expected_version)?;
         required_version("expectedJobVersion", request.expected_job_version)?;
         if request.new_sibling_index < 0 {
@@ -153,12 +205,9 @@ impl ApplicationService {
             });
         }
         let (job_id, job_version, tasks) = self.store.reorder_task(
-            &request.task_id,
-            request.new_parent_task_id.as_deref(),
-            request.new_sibling_index,
-            request.expected_version,
-            request.expected_job_version,
+            &request,
             &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
         )?;
         Ok(TaskHierarchy {
             job_id,

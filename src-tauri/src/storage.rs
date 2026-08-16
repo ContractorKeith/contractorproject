@@ -3,6 +3,10 @@ use std::path::{Path, PathBuf};
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
+use crate::application::{
+    CommandContext, ReorderTaskRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
+    MAX_COMMAND_ID_CHARACTERS,
+};
 use crate::domain::{Job, JobStatus, Task};
 use crate::error::ApplicationError;
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
@@ -24,9 +28,15 @@ impl SqliteStore {
         Ok(store)
     }
 
-    pub(crate) fn insert_job(&self, job: &Job) -> Result<(), ApplicationError> {
-        let connection = self.connection()?;
-        connection.execute(
+    pub(crate) fn insert_job(
+        &self,
+        job: &Job,
+        context: &CommandContext,
+    ) -> Result<(), ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        transaction.execute(
             "INSERT INTO jobs (
                 id, name, status, timezone, created_at, updated_at, version
              ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -40,6 +50,8 @@ impl SqliteStore {
                 job.version,
             ],
         )?;
+        write_audit_record(&transaction, context, &job.created_at, "created job")?;
+        transaction.commit()?;
         Ok(())
     }
 
@@ -90,9 +102,11 @@ impl SqliteStore {
         &self,
         task: &mut Task,
         expected_job_version: i64,
+        context: &CommandContext,
     ) -> Result<i64, ApplicationError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
         let current_job_version = transaction
             .query_row(
                 "SELECT version FROM jobs WHERE id = ?1",
@@ -155,6 +169,7 @@ impl SqliteStore {
             "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
             params![task.updated_at, job_version, task.job_id],
         )?;
+        write_audit_record(&transaction, context, &task.created_at, "created task")?;
         transaction.commit()?;
         Ok(job_version)
     }
@@ -173,9 +188,11 @@ impl SqliteStore {
         name: &str,
         expected_version: i64,
         updated_at: &str,
+        context: &CommandContext,
     ) -> Result<(Task, i64), ApplicationError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
         let mut task = transaction
             .query_row(
                 "SELECT id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version
@@ -213,30 +230,31 @@ impl SqliteStore {
             [&task.job_id],
             |row| row.get(0),
         )?;
+        write_audit_record(&transaction, context, updated_at, "updated task")?;
         transaction.commit()?;
         Ok((task, job_version))
     }
 
     pub(crate) fn reorder_task(
         &self,
-        task_id: &str,
-        new_parent_task_id: Option<&str>,
-        new_sibling_index: i64,
-        expected_version: i64,
-        expected_job_version: i64,
+        request: &ReorderTaskRequest,
         updated_at: &str,
+        context: &CommandContext,
     ) -> Result<(String, i64, Vec<Task>), ApplicationError> {
         let mut connection = self.connection()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task = find_task(&transaction, task_id)?.ok_or_else(|| ApplicationError::NotFound {
-            resource: "task",
-            id: task_id.into(),
+        ensure_command_is_new(&transaction, context)?;
+        let task = find_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            ApplicationError::NotFound {
+                resource: "task",
+                id: request.task_id.clone(),
+            }
         })?;
-        if task.version != expected_version {
+        if task.version != request.expected_version {
             return Err(ApplicationError::VersionConflict {
                 resource: "task",
-                id: task_id.into(),
-                expected: expected_version,
+                id: request.task_id.clone(),
+                expected: request.expected_version,
                 current: task.version,
             });
         }
@@ -245,34 +263,39 @@ impl SqliteStore {
             [&task.job_id],
             |row| row.get::<_, i64>(0),
         )?;
-        if current_job_version != expected_job_version {
+        if current_job_version != request.expected_job_version {
             return Err(ApplicationError::VersionConflict {
                 resource: "job",
                 id: task.job_id.clone(),
-                expected: expected_job_version,
+                expected: request.expected_job_version,
                 current: current_job_version,
             });
         }
 
-        let ancestors = load_ancestor_chain(&transaction, new_parent_task_id)?;
+        let ancestors = load_ancestor_chain(&transaction, request.new_parent_task_id.as_deref())?;
         validate_parent_chain(&task, &ancestors)?;
-        let destination_index =
-            usize::try_from(new_sibling_index).map_err(|_| ApplicationError::InvalidInput {
+        let destination_index = usize::try_from(request.new_sibling_index).map_err(|_| {
+            ApplicationError::InvalidInput {
                 field: "newSiblingIndex",
                 message: "is too large".into(),
-            })?;
+            }
+        })?;
         let source_siblings =
             load_siblings(&transaction, &task.job_id, task.parent_task_id.as_deref())?;
-        let destination_siblings = if task.parent_task_id.as_deref() == new_parent_task_id {
+        let destination_siblings = if task.parent_task_id == request.new_parent_task_id {
             Vec::new()
         } else {
-            load_siblings(&transaction, &task.job_id, new_parent_task_id)?
+            load_siblings(
+                &transaction,
+                &task.job_id,
+                request.new_parent_task_id.as_deref(),
+            )?
         };
         let desired = plan_reorder(
             task.clone(),
             source_siblings,
             destination_siblings,
-            new_parent_task_id.map(str::to_owned),
+            request.new_parent_task_id.clone(),
             destination_index,
         )?;
 
@@ -339,6 +362,12 @@ impl SqliteStore {
         }
         let (snapshot_version, tasks) = read_task_hierarchy(&transaction, &task.job_id)?;
         debug_assert_eq!(snapshot_version, job_version);
+        write_audit_record(
+            &transaction,
+            context,
+            updated_at,
+            "reordered task hierarchy",
+        )?;
         transaction.commit()?;
         Ok((task.job_id, snapshot_version, tasks))
     }
@@ -425,6 +454,27 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 3)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 3)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE command_log (
+                    command_id TEXT NOT NULL PRIMARY KEY
+                        CHECK (length(command_id) BETWEEN 1 AND 128),
+                    actor TEXT NOT NULL CHECK (actor IN ('user', 'agent', 'import')),
+                    client_name TEXT NOT NULL
+                        CHECK (length(client_name) BETWEEN 1 AND 120),
+                    created_at TEXT NOT NULL,
+                    summary TEXT NOT NULL CHECK (length(summary) <= 240)
+                 );
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (3, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -448,6 +498,46 @@ impl SqliteStore {
         }
         Ok(())
     }
+}
+
+fn ensure_command_is_new(
+    transaction: &Transaction<'_>,
+    context: &CommandContext,
+) -> Result<(), ApplicationError> {
+    let already_applied: bool = transaction.query_row(
+        "SELECT EXISTS(SELECT 1 FROM command_log WHERE command_id = ?1)",
+        [&context.command_id],
+        |row| row.get(0),
+    )?;
+    if already_applied {
+        return Err(ApplicationError::DuplicateCommand {
+            command_id: context.command_id.clone(),
+        });
+    }
+    Ok(())
+}
+
+fn write_audit_record(
+    transaction: &Transaction<'_>,
+    context: &CommandContext,
+    created_at: &str,
+    summary: &str,
+) -> Result<(), ApplicationError> {
+    debug_assert!(context.command_id.chars().count() <= MAX_COMMAND_ID_CHARACTERS);
+    debug_assert!(context.client_name.chars().count() <= MAX_CLIENT_NAME_CHARACTERS);
+    debug_assert!(summary.chars().count() <= MAX_AUDIT_SUMMARY_CHARACTERS);
+    transaction.execute(
+        "INSERT INTO command_log (command_id, actor, client_name, created_at, summary)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            context.command_id,
+            context.actor.as_database_value(),
+            context.client_name,
+            created_at,
+            summary,
+        ],
+    )?;
+    Ok(())
 }
 
 fn migration_applied(connection: &Connection, version: i64) -> Result<bool, ApplicationError> {
