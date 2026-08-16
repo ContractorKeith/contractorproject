@@ -8,6 +8,10 @@ import type {
   TaskHierarchy,
   TaskMutation,
   UpdateTaskRequest,
+  AddDependencyRequest,
+  UpdateScheduleRequest,
+  UpdateTaskDurationRequest,
+  RemoveDependencyRequest,
 } from "../types/jobs";
 
 export interface JobClient {
@@ -17,6 +21,10 @@ export interface JobClient {
   createTask(request: CreateTaskRequest): Promise<TaskHierarchy>;
   updateTask(request: UpdateTaskRequest): Promise<TaskHierarchy>;
   reorderTask(request: ReorderTaskRequest): Promise<TaskHierarchy>;
+  updateSchedule?(request: UpdateScheduleRequest): Promise<Job>;
+  updateTaskDuration?(request: UpdateTaskDurationRequest): Promise<TaskHierarchy>;
+  addDependency?(request: AddDependencyRequest): Promise<TaskHierarchy>;
+  removeDependency?(request: RemoveDependencyRequest): Promise<TaskHierarchy>;
 }
 
 export const tauriJobClient: JobClient = {
@@ -32,4 +40,11 @@ export const tauriJobClient: JobClient = {
     return invoke<TaskHierarchy>("list_tasks", { jobId: mutation.task.jobId });
   },
   reorderTask: (request) => invoke<TaskHierarchy>("reorder_task", { request }),
+  updateSchedule: (request) => invoke<Job>("update_schedule", { request }),
+  async updateTaskDuration(request) {
+    const mutation = await invoke<TaskMutation>("update_task_duration", { request });
+    return invoke<TaskHierarchy>("list_tasks", { jobId: mutation.task.jobId });
+  },
+  addDependency: (request) => invoke<TaskHierarchy>("add_dependency", { request }),
+  removeDependency: (request) => invoke<TaskHierarchy>("remove_dependency", { request }),
 };

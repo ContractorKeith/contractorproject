@@ -1,7 +1,11 @@
 use contractorproject_lib::application::{
+    AddDependencyRequest, RemoveDependencyRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
+};
+use contractorproject_lib::application::{
     ApplicationService, CommandActor, CommandContext, CreateJobRequest, CreateTaskRequest,
 };
 use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
+use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -16,6 +20,482 @@ fn command_context() -> CommandContext {
         actor: CommandActor::Agent,
         client_name: "integration-test".into(),
     }
+}
+
+fn command_log_count(path: &std::path::Path) -> i64 {
+    Connection::open(path)
+        .expect("open audit database")
+        .query_row("SELECT COUNT(*) FROM command_log", [], |row| row.get(0))
+        .expect("count command log")
+}
+
+fn working_calendar() -> WorkingCalendar {
+    WorkingCalendar {
+        working_weekdays: vec![
+            CalendarWeekday::Monday,
+            CalendarWeekday::Tuesday,
+            CalendarWeekday::Wednesday,
+            CalendarWeekday::Thursday,
+            CalendarWeekday::Friday,
+        ],
+        workday_start_minute: 480,
+        workday_duration_minutes: 480,
+    }
+}
+
+#[test]
+fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Schedule".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "First".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("first")
+        .task;
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Second".into(),
+                expected_job_version: 2,
+            },
+        )
+        .expect("second")
+        .task;
+    let audit_before_invalid = command_log_count(&path);
+    let invalid = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: WorkingCalendar {
+                    working_weekdays: vec![],
+                    workday_start_minute: 480,
+                    workday_duration_minutes: 480,
+                },
+                expected_job_version: 3,
+            },
+        )
+        .expect_err("invalid calendar");
+    assert_eq!(invalid.kind(), "validation_failed");
+    let invalid_date = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("not-a-date".into()),
+                calendar: working_calendar(),
+                expected_job_version: 3,
+            },
+        )
+        .expect_err("invalid date");
+    assert_eq!(invalid_date.kind(), "invalid_input");
+    let invalid_interval = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: WorkingCalendar {
+                    working_weekdays: vec![CalendarWeekday::Monday],
+                    workday_start_minute: 1_400,
+                    workday_duration_minutes: 60,
+                },
+                expected_job_version: 3,
+            },
+        )
+        .expect_err("invalid work interval");
+    assert_eq!(invalid_interval.kind(), "validation_failed");
+    assert_eq!(
+        service.list_tasks(&job.id).expect("unchanged").job_version,
+        3
+    );
+    assert_eq!(command_log_count(&path), audit_before_invalid);
+    let first = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: 1,
+                expected_job_version: 3,
+            },
+        )
+        .expect("duration")
+        .task;
+    let second = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: second.id.clone(),
+                duration_minutes: Some(0),
+                expected_version: 1,
+                expected_job_version: 4,
+            },
+        )
+        .expect("milestone")
+        .task;
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.id.clone(),
+                successor_task_id: second.id.clone(),
+                lag_minutes: 0,
+                expected_job_version: 5,
+            },
+        )
+        .expect("dependency");
+    assert_eq!(linked.dependencies.len(), 1);
+    let stale = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: second.id.clone(),
+                successor_task_id: first.id.clone(),
+                lag_minutes: 0,
+                expected_job_version: 5,
+            },
+        )
+        .expect_err("stale");
+    assert_eq!(stale.kind(), "version_conflict");
+    let blocked = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.id.clone(),
+                duration_minutes: None,
+                expected_version: first.version,
+                expected_job_version: 6,
+            },
+        )
+        .expect_err("endpoint duration");
+    assert_eq!(blocked.kind(), "validation_failed");
+    let schedule = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: 6,
+            },
+        )
+        .expect("schedule");
+    let duplicate_context = command_context();
+    let schedule = service
+        .update_schedule(
+            duplicate_context.clone(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-18".into()),
+                calendar: working_calendar(),
+                expected_job_version: schedule.version,
+            },
+        )
+        .expect("second schedule update");
+    let duplicate = service
+        .update_schedule(
+            duplicate_context,
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-19".into()),
+                calendar: working_calendar(),
+                expected_job_version: schedule.version,
+            },
+        )
+        .expect_err("duplicate command ID");
+    assert_eq!(duplicate.kind(), "duplicate_command");
+    drop(service);
+    let reopened = ApplicationService::open(&path).expect("reopen");
+    assert_eq!(reopened.list_jobs().expect("jobs"), vec![schedule.clone()]);
+    assert_eq!(
+        reopened
+            .list_tasks(&job.id)
+            .expect("links")
+            .dependencies
+            .len(),
+        1
+    );
+    let removed = reopened
+        .remove_dependency(
+            command_context(),
+            RemoveDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.id,
+                successor_task_id: second.id,
+                expected_job_version: schedule.version,
+            },
+        )
+        .expect("remove");
+    assert!(removed.dependencies.is_empty());
+}
+
+#[test]
+fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Graph".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let mut job_version = job.version;
+    let mut tasks = Vec::new();
+    for name in ["First", "Second", "Third", "Unscheduled"] {
+        let mutation = service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: None,
+                    name: name.into(),
+                    expected_job_version: job_version,
+                },
+            )
+            .expect("task");
+        job_version = mutation.job_version;
+        tasks.push(mutation.task);
+    }
+    for (index, task) in tasks.iter_mut().take(3).enumerate() {
+        let mutation = service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: task.id.clone(),
+                    duration_minutes: Some(if index == 2 { 0 } else { 480 }),
+                    expected_version: task.version,
+                    expected_job_version: job_version,
+                },
+            )
+            .expect("duration");
+        job_version = mutation.job_version;
+        *task = mutation.task;
+    }
+
+    let before = service.list_tasks(&job.id).expect("before failures");
+    let audit_before = command_log_count(&path);
+    let cases = [
+        (
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[0].id.clone(),
+                successor_task_id: tasks[0].id.clone(),
+                lag_minutes: 0,
+                expected_job_version: job_version,
+            },
+            "validation_failed",
+        ),
+        (
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[0].id.clone(),
+                successor_task_id: tasks[1].id.clone(),
+                lag_minutes: -1,
+                expected_job_version: job_version,
+            },
+            "invalid_input",
+        ),
+        (
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[0].id.clone(),
+                successor_task_id: tasks[3].id.clone(),
+                lag_minutes: 0,
+                expected_job_version: job_version,
+            },
+            "validation_failed",
+        ),
+    ];
+    for (request, expected_kind) in cases {
+        assert_eq!(
+            service
+                .add_dependency(command_context(), request)
+                .expect_err("invalid edge")
+                .kind(),
+            expected_kind
+        );
+        assert_eq!(service.list_tasks(&job.id).expect("unchanged"), before);
+        assert_eq!(command_log_count(&path), audit_before);
+    }
+
+    let other = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Other".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("other job");
+    let other_task = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: other.id.clone(),
+                parent_task_id: None,
+                name: "Other task".into(),
+                expected_job_version: other.version,
+            },
+        )
+        .expect("other task")
+        .task;
+    let cross_job_audit = command_log_count(&path);
+    assert_eq!(
+        service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: tasks[0].id.clone(),
+                    successor_task_id: other_task.id,
+                    lag_minutes: 0,
+                    expected_job_version: job_version,
+                },
+            )
+            .expect_err("cross-job endpoint")
+            .kind(),
+        "validation_failed"
+    );
+    assert_eq!(
+        service.list_tasks(&job.id).expect("cross-job unchanged"),
+        before
+    );
+    assert_eq!(command_log_count(&path), cross_job_audit);
+
+    let first_edge = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[0].id.clone(),
+                successor_task_id: tasks[1].id.clone(),
+                lag_minutes: 60,
+                expected_job_version: job_version,
+            },
+        )
+        .expect("first edge");
+    job_version = first_edge.job_version;
+    let duplicate_before = first_edge.clone();
+    let duplicate_audit = command_log_count(&path);
+    assert_eq!(
+        service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: tasks[0].id.clone(),
+                    successor_task_id: tasks[1].id.clone(),
+                    lag_minutes: 60,
+                    expected_job_version: job_version,
+                },
+            )
+            .expect_err("duplicate edge")
+            .kind(),
+        "validation_failed"
+    );
+    assert_eq!(
+        service.list_tasks(&job.id).expect("duplicate unchanged"),
+        duplicate_before
+    );
+    assert_eq!(command_log_count(&path), duplicate_audit);
+
+    let chain = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[1].id.clone(),
+                successor_task_id: tasks[2].id.clone(),
+                lag_minutes: 0,
+                expected_job_version: job_version,
+            },
+        )
+        .expect("second edge");
+    let cycle_audit = command_log_count(&path);
+    assert_eq!(
+        service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: tasks[2].id.clone(),
+                    successor_task_id: tasks[0].id.clone(),
+                    lag_minutes: 0,
+                    expected_job_version: chain.job_version,
+                },
+            )
+            .expect_err("cycle")
+            .kind(),
+        "validation_failed"
+    );
+    assert_eq!(service.list_tasks(&job.id).expect("cycle unchanged"), chain);
+    assert_eq!(command_log_count(&path), cycle_audit);
+
+    let hierarchy_audit = command_log_count(&path);
+    assert_eq!(
+        service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: Some(tasks[0].id.clone()),
+                    name: "Invalid child".into(),
+                    expected_job_version: chain.job_version,
+                },
+            )
+            .expect_err("scheduled leaf cannot become summary")
+            .kind(),
+        "validation_failed"
+    );
+    assert_eq!(
+        service
+            .reorder_task(
+                command_context(),
+                ReorderTaskRequest {
+                    task_id: tasks[3].id.clone(),
+                    new_parent_task_id: Some(tasks[0].id.clone()),
+                    new_sibling_index: 0,
+                    expected_version: tasks[3].version,
+                    expected_job_version: chain.job_version,
+                },
+            )
+            .expect_err("scheduled leaf cannot receive moved child")
+            .kind(),
+        "validation_failed"
+    );
+    assert_eq!(
+        service.list_tasks(&job.id).expect("hierarchy unchanged"),
+        chain
+    );
+    assert_eq!(command_log_count(&path), hierarchy_audit);
 }
 
 #[test]
@@ -592,7 +1072,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 3);
+    assert_eq!(migrated_version, 4);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -613,6 +1093,90 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
         .expect("inspect backup schema");
     assert_eq!(migration, 1);
     assert_eq!(task_tables, 0);
+}
+
+#[test]
+fn version_three_database_is_backed_up_and_migrates_schedule_inputs() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let connection = Connection::open(&database_path).expect("create v3 database");
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                version INTEGER PRIMARY KEY,
+                applied_at TEXT NOT NULL
+             );
+             INSERT INTO schema_migrations (version, applied_at) VALUES
+                (1, '2026-08-14T00:00:00.000Z'),
+                (2, '2026-08-14T00:00:00.000Z'),
+                (3, '2026-08-14T00:00:00.000Z');
+             CREATE TABLE jobs (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                status TEXT NOT NULL,
+                timezone TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0)
+             );
+             CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                job_id TEXT NOT NULL,
+                parent_task_id TEXT,
+                sort_key INTEGER NOT NULL CHECK (sort_key >= 0),
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK (version > 0),
+                UNIQUE (job_id, id),
+                FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+                FOREIGN KEY (job_id, parent_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT
+             );
+             CREATE TABLE command_log (
+                command_id TEXT NOT NULL PRIMARY KEY CHECK (length(command_id) BETWEEN 1 AND 128),
+                actor TEXT NOT NULL CHECK (actor IN ('user', 'agent', 'import')),
+                client_name TEXT NOT NULL CHECK (length(client_name) BETWEEN 1 AND 120),
+                created_at TEXT NOT NULL,
+                summary TEXT NOT NULL CHECK (length(summary) <= 240)
+             );
+             INSERT INTO jobs (id, name, status, timezone, created_at, updated_at, version)
+             VALUES ('job-v3', 'Existing schedule', 'draft', 'UTC', '2026-08-14T00:00:00.000Z', '2026-08-14T00:00:00.000Z', 2);
+             INSERT INTO tasks (id, job_id, parent_task_id, sort_key, name, created_at, updated_at, version)
+             VALUES ('task-v3', 'job-v3', NULL, 0, 'Existing task', '2026-08-14T00:00:00.000Z', '2026-08-14T00:00:00.000Z', 1);",
+        )
+        .expect("write v3 schema");
+    drop(connection);
+
+    let service = ApplicationService::open(&database_path).expect("migrate v3");
+    let migrated_job = service.list_jobs().expect("jobs").pop().expect("job");
+    assert_eq!(migrated_job.schedule_start, None);
+    assert_eq!(migrated_job.calendar, working_calendar());
+    let hierarchy = service.list_tasks(&migrated_job.id).expect("tasks");
+    assert_eq!(hierarchy.tasks[0].duration_minutes, None);
+    assert!(hierarchy.dependencies.is_empty());
+
+    let backup_path = temp
+        .path()
+        .join("contractorproject.sqlite3.pre-migration-v4.bak");
+    assert!(
+        backup_path.is_file(),
+        "v4 pre-migration backup should exist"
+    );
+    let backup = Connection::open(backup_path).expect("open v3 backup");
+    let migration: i64 = backup
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("backup version");
+    let schedule_columns: i64 = backup
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'schedule_start'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("backup columns");
+    assert_eq!(migration, 3);
+    assert_eq!(schedule_columns, 0);
 }
 
 #[test]
@@ -822,6 +1386,97 @@ fn command_log_schema_rejects_missing_or_empty_identity_fields() {
 }
 
 #[test]
+fn schedule_input_schema_rejects_negative_and_cross_job_rows() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let first_job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "First".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("first job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: first_job.id.clone(),
+                parent_task_id: None,
+                name: "First task".into(),
+                expected_job_version: first_job.version,
+            },
+        )
+        .expect("first task")
+        .task;
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: first_job.id.clone(),
+                parent_task_id: None,
+                name: "Second task".into(),
+                expected_job_version: 2,
+            },
+        )
+        .expect("second task")
+        .task;
+    let other_job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Other".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("other job");
+    let other = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: other_job.id.clone(),
+                parent_task_id: None,
+                name: "Other task".into(),
+                expected_job_version: other_job.version,
+            },
+        )
+        .expect("other task")
+        .task;
+    drop(service);
+
+    let connection = Connection::open(database_path).expect("open schema database");
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("foreign keys");
+    assert!(connection
+        .execute(
+            "UPDATE tasks SET duration_minutes = -1 WHERE id = ?1",
+            [&first.id]
+        )
+        .is_err());
+    assert!(connection
+        .execute(
+            "INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, lag_minutes) VALUES (?1, ?2, ?2, 0)",
+            rusqlite::params![first_job.id, first.id],
+        )
+        .is_err());
+    assert!(connection
+        .execute(
+            "INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, lag_minutes) VALUES (?1, ?2, ?3, -1)",
+            rusqlite::params![first_job.id, first.id, second.id],
+        )
+        .is_err());
+    assert!(connection
+        .execute(
+            "INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, lag_minutes) VALUES (?1, ?2, ?3, 0)",
+            rusqlite::params![first_job.id, first.id, other.id],
+        )
+        .is_err());
+}
+
+#[test]
 fn audit_insert_failure_rolls_back_the_domain_mutation() {
     let temp = tempfile::tempdir().expect("create temporary app data");
     let database_path = temp.path().join("contractorproject.sqlite3");
@@ -859,6 +1514,141 @@ fn audit_insert_failure_rolls_back_the_domain_mutation() {
         .expect("count audit rows");
     assert_eq!(job_count, 0, "domain insert must roll back");
     assert_eq!(audit_count, 0, "audit insert must leave no partial row");
+}
+
+#[test]
+fn audit_failure_rolls_back_every_schedule_input_mutation() {
+    let temp = tempfile::tempdir().expect("temp");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Atomic schedule".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let mut job_version = job.version;
+    let mut tasks = Vec::new();
+    for name in ["First", "Second", "Third"] {
+        let mutation = service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: None,
+                    name: name.into(),
+                    expected_job_version: job_version,
+                },
+            )
+            .expect("task");
+        job_version = mutation.job_version;
+        tasks.push(mutation.task);
+    }
+    for task in &mut tasks {
+        let mutation = service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: task.id.clone(),
+                    duration_minutes: Some(480),
+                    expected_version: task.version,
+                    expected_job_version: job_version,
+                },
+            )
+            .expect("duration");
+        job_version = mutation.job_version;
+        *task = mutation.task;
+    }
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: tasks[0].id.clone(),
+                successor_task_id: tasks[1].id.clone(),
+                lag_minutes: 0,
+                expected_job_version: job_version,
+            },
+        )
+        .expect("existing dependency");
+    job_version = linked.job_version;
+    let jobs_before = service.list_jobs().expect("jobs before");
+    let hierarchy_before = service.list_tasks(&job.id).expect("hierarchy before");
+    let audit_before = command_log_count(&database_path);
+
+    Connection::open(&database_path)
+        .expect("open trigger connection")
+        .execute_batch(
+            "CREATE TRIGGER reject_schedule_audit
+             BEFORE INSERT ON command_log
+             BEGIN
+                 SELECT RAISE(ABORT, 'forced audit failure');
+             END;",
+        )
+        .expect("install trigger");
+
+    let failures = [
+        service
+            .update_schedule(
+                command_context(),
+                UpdateScheduleRequest {
+                    job_id: job.id.clone(),
+                    schedule_start: Some("2026-08-17".into()),
+                    calendar: working_calendar(),
+                    expected_job_version: job_version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: tasks[0].id.clone(),
+                    duration_minutes: Some(600),
+                    expected_version: tasks[0].version,
+                    expected_job_version: job_version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: tasks[1].id.clone(),
+                    successor_task_id: tasks[2].id.clone(),
+                    lag_minutes: 0,
+                    expected_job_version: job_version,
+                },
+            )
+            .map(|_| ()),
+        service
+            .remove_dependency(
+                command_context(),
+                RemoveDependencyRequest {
+                    job_id: job.id.clone(),
+                    predecessor_task_id: tasks[0].id.clone(),
+                    successor_task_id: tasks[1].id.clone(),
+                    expected_job_version: job_version,
+                },
+            )
+            .map(|_| ()),
+    ];
+    for failure in failures {
+        assert_eq!(
+            failure.expect_err("audit failure").kind(),
+            "storage_unavailable"
+        );
+        assert_eq!(service.list_jobs().expect("jobs unchanged"), jobs_before);
+        assert_eq!(
+            service.list_tasks(&job.id).expect("hierarchy unchanged"),
+            hierarchy_before
+        );
+        assert_eq!(command_log_count(&database_path), audit_before);
+    }
 }
 
 #[test]
