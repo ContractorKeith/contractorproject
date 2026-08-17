@@ -8,6 +8,7 @@ import type {
   CalendarWeekday,
   Job,
   Task,
+  TaskConstraintKind,
   TaskHierarchy,
   WorkingCalendar,
 } from "./types/jobs";
@@ -628,6 +629,15 @@ function TaskEditor({
   const [durationBaseVersion, setDurationBaseVersion] = useState<number | null>(
     null,
   );
+  const [startNoEarlierThan, setStartNoEarlierThan] = useState(
+    task?.startNoEarlierThan ?? "",
+  );
+  const [finishNoLaterThan, setFinishNoLaterThan] = useState(
+    task?.finishNoLaterThan ?? "",
+  );
+  const [constraintBaseVersion, setConstraintBaseVersion] = useState<number | null>(
+    null,
+  );
   const isRootCreator = Boolean(job);
   const label = isRootCreator ? "New root task" : `Task name for ${task!.name}`;
   const siblings = hierarchy.tasks.filter(
@@ -649,7 +659,13 @@ function TaskEditor({
     } else if (task.version !== durationBaseVersion) {
       setConflict(true);
     }
-  }, [draftBaseVersion, durationBaseVersion, task]);
+    if (constraintBaseVersion === null) {
+      setStartNoEarlierThan(task.startNoEarlierThan ?? "");
+      setFinishNoLaterThan(task.finishNoLaterThan ?? "");
+    } else if (task.version !== constraintBaseVersion) {
+      setConflict(true);
+    }
+  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, task]);
 
   async function run(
     action: () => Promise<TaskHierarchy>,
@@ -689,10 +705,45 @@ function TaskEditor({
         );
         if (refreshedTask) setDurationBaseVersion(refreshedTask.version);
       }
+      if (task && constraintBaseVersion !== null) {
+        const refreshedTask = refreshed.tasks.find(
+          (candidate) => candidate.id === task.id,
+        );
+        if (refreshedTask) setConstraintBaseVersion(refreshedTask.version);
+      }
       onHierarchyChange(refreshed);
       setConflict(false);
     } catch (reason: unknown) {
       setError(errorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  const isSummary = task
+    ? hierarchy.tasks.some((candidate) => candidate.parentTaskId === task.id)
+    : false;
+
+  async function saveConstraint(kind: TaskConstraintKind, value: string | null) {
+    if (!task || !client.updateTaskConstraint || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await client.updateTaskConstraint({
+        taskId: task.id,
+        kind,
+        value,
+        expectedVersion: constraintBaseVersion ?? task.version,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+      const snapshot = await loadJobSnapshot(client, hierarchy.jobId);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      setConstraintBaseVersion(null);
+      setConflict(false);
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setConflict(true);
+      else setError(errorMessage(reason));
     } finally {
       setPending(false);
     }
@@ -812,6 +863,73 @@ function TaskEditor({
           >
             Save duration
           </button>
+          {!isSummary ? (
+            <fieldset className="task-editor__constraints">
+              <legend>Schedule constraints</legend>
+              <label>
+                Start no earlier than
+                <input
+                  aria-label={`Start no earlier than for ${task.name}`}
+                  type="date"
+                  value={startNoEarlierThan}
+                  disabled={pending || !client.updateTaskConstraint}
+                  onChange={(event) => {
+                    setStartNoEarlierThan(event.target.value);
+                    setConstraintBaseVersion((current) => current ?? task.version);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={
+                  pending ||
+                  !client.updateTaskConstraint ||
+                  startNoEarlierThan === (task.startNoEarlierThan ?? "")
+                }
+                onClick={() => void saveConstraint("start_no_earlier_than", startNoEarlierThan || null)}
+              >
+                Save start constraint
+              </button>
+              <button
+                type="button"
+                disabled={pending || !client.updateTaskConstraint || !task.startNoEarlierThan}
+                onClick={() => void saveConstraint("start_no_earlier_than", null)}
+              >
+                Clear start constraint
+              </button>
+              <label>
+                Finish no later than
+                <input
+                  aria-label={`Finish no later than for ${task.name}`}
+                  type="date"
+                  value={finishNoLaterThan}
+                  disabled={pending || !client.updateTaskConstraint}
+                  onChange={(event) => {
+                    setFinishNoLaterThan(event.target.value);
+                    setConstraintBaseVersion((current) => current ?? task.version);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={
+                  pending ||
+                  !client.updateTaskConstraint ||
+                  finishNoLaterThan === (task.finishNoLaterThan ?? "")
+                }
+                onClick={() => void saveConstraint("finish_no_later_than", finishNoLaterThan || null)}
+              >
+                Save finish constraint
+              </button>
+              <button
+                type="button"
+                disabled={pending || !client.updateTaskConstraint || !task.finishNoLaterThan}
+                onClick={() => void saveConstraint("finish_no_later_than", null)}
+              >
+                Clear finish constraint
+              </button>
+            </fieldset>
+          ) : null}
           <button
             type="button"
             disabled={pending || taskIndex <= 0}

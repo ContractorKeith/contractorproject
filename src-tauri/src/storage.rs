@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
+use chrono::{NaiveDate, SecondsFormat, Utc};
 use rusqlite::backup::Backup;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -12,12 +12,16 @@ use uuid::Uuid;
 
 use crate::application::{
     AddDependencyRequest, BackupResult, CommandContext, RemoveDependencyRequest,
-    ReorderTaskRequest, RestoreVerificationResult, UpdateScheduleRequest,
-    UpdateTaskDurationRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
-    MAX_COMMAND_ID_CHARACTERS,
+    ReorderTaskRequest, RestoreVerificationResult, TaskConstraintKind, UpdateScheduleRequest,
+    UpdateTaskConstraintRequest, UpdateTaskDurationRequest, MAX_AUDIT_SUMMARY_CHARACTERS,
+    MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
 };
 use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
+use crate::scheduling::{
+    calculate_schedule_with_constraints, FinishStartDependency as ScheduleDependency,
+    ScheduleInput, ScheduleTask, TaskConstraint,
+};
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
 pub(crate) struct SqliteStore {
@@ -289,12 +293,15 @@ impl SqliteStore {
                 })?;
             validate_parent_job(&task.job_id, &parent_job_id, "parentTaskId")?;
             let parent = find_task(&transaction, parent_id)?.expect("parent was found above");
-            if parent.duration_minutes.is_some() || task_has_dependencies(&transaction, parent_id)?
+            if parent.duration_minutes.is_some()
+                || parent.start_no_earlier_than.is_some()
+                || parent.finish_no_later_than.is_some()
+                || task_has_dependencies(&transaction, parent_id)?
             {
                 return Err(ApplicationError::ValidationFailed {
                     code: "summary_conversion_requires_cleanup",
                     field: "parentTaskId",
-                    message: "clear the parent duration and remove its dependencies before adding a child".into(),
+                    message: "clear the parent duration, constraints, and dependencies before adding a child".into(),
                 });
             }
         }
@@ -308,8 +315,8 @@ impl SqliteStore {
         )?;
         transaction.execute(
             "INSERT INTO tasks (
-                id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 task.id,
                 task.job_id,
@@ -317,6 +324,8 @@ impl SqliteStore {
                 task.sort_key,
                 task.name,
                 task.duration_minutes,
+                task.start_no_earlier_than,
+                task.finish_no_later_than,
                 task.created_at,
                 task.updated_at,
                 task.version,
@@ -518,7 +527,7 @@ impl SqliteStore {
         ensure_command_is_new(&transaction, context)?;
         let mut task = transaction
             .query_row(
-                "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version
+                "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
                  FROM tasks WHERE id = ?1",
                 [task_id],
                 task_from_row,
@@ -587,12 +596,15 @@ impl SqliteStore {
         validate_parent_chain(&task, &ancestors)?;
         if let Some(parent_id) = request.new_parent_task_id.as_deref() {
             let parent = find_task(&transaction, parent_id)?.expect("ancestor was found");
-            if parent.duration_minutes.is_some() || task_has_dependencies(&transaction, parent_id)?
+            if parent.duration_minutes.is_some()
+                || parent.start_no_earlier_than.is_some()
+                || parent.finish_no_later_than.is_some()
+                || task_has_dependencies(&transaction, parent_id)?
             {
                 return Err(ApplicationError::ValidationFailed {
                     code: "summary_conversion_requires_cleanup",
                     field: "newParentTaskId",
-                    message: "clear the parent duration and remove its dependencies before moving a child under it".into(),
+                    message: "clear the parent duration, constraints, and dependencies before moving a child under it".into(),
                 });
             }
         }
@@ -773,6 +785,15 @@ impl SqliteStore {
                 message: "remove dependencies before clearing a leaf duration".into(),
             });
         }
+        if request.duration_minutes.is_none()
+            && (task.start_no_earlier_than.is_some() || task.finish_no_later_than.is_some())
+        {
+            return Err(ApplicationError::ValidationFailed {
+                code: "summary_constraint",
+                field: "durationMinutes",
+                message: "clear task constraints before clearing a leaf duration".into(),
+            });
+        }
         task.duration_minutes = request.duration_minutes;
         task.updated_at = updated_at.into();
         task.version += 1;
@@ -790,6 +811,70 @@ impl SqliteStore {
             params![updated_at, job_version + 1, task.job_id],
         )?;
         write_audit_record(&transaction, context, updated_at, "updated task duration")?;
+        transaction.commit()?;
+        Ok((task, job_version + 1))
+    }
+
+    pub(crate) fn update_task_constraint(
+        &self,
+        request: &UpdateTaskConstraintRequest,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<(Task, i64), ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let mut task = find_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            ApplicationError::NotFound {
+                resource: "task",
+                id: request.task_id.clone(),
+            }
+        })?;
+        if task.version != request.expected_version {
+            return Err(ApplicationError::VersionConflict {
+                resource: "task",
+                id: task.id.clone(),
+                expected: request.expected_version,
+                current: task.version,
+            });
+        }
+        let job_version = require_draft_job(
+            &transaction,
+            &task.job_id,
+            Some(request.expected_job_version),
+        )?;
+        let is_summary: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id = ?1)",
+            [&task.id],
+            |row| row.get(0),
+        )?;
+        if is_summary {
+            return Err(ApplicationError::ValidationFailed {
+                code: "summary_constraint",
+                field: "taskId",
+                message: "constraints apply only to leaf tasks".into(),
+            });
+        }
+        match request.kind {
+            TaskConstraintKind::StartNoEarlierThan => {
+                task.start_no_earlier_than = request.value.clone()
+            }
+            TaskConstraintKind::FinishNoLaterThan => {
+                task.finish_no_later_than = request.value.clone()
+            }
+        }
+        validate_proposed_schedule(&transaction, &task)?;
+        task.updated_at = updated_at.into();
+        task.version += 1;
+        transaction.execute(
+            "UPDATE tasks SET start_no_earlier_than = ?1, finish_no_later_than = ?2, updated_at = ?3, version = ?4 WHERE id = ?5",
+            params![task.start_no_earlier_than, task.finish_no_later_than, task.updated_at, task.version, task.id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![updated_at, job_version + 1, task.job_id],
+        )?;
+        write_audit_record(&transaction, context, updated_at, "updated task constraint")?;
         transaction.commit()?;
         Ok((task, job_version + 1))
     }
@@ -1059,6 +1144,20 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 5)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 5)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN start_no_earlier_than TEXT;
+                 ALTER TABLE tasks ADD COLUMN finish_no_later_than TEXT;
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (5, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1222,6 +1321,74 @@ const TASK_COLUMNS: [ColumnSpec; 9] = [
     ColumnSpec {
         name: "duration_minutes",
         data_type: "INTEGER",
+        not_null: false,
+        primary_key_position: 0,
+    },
+];
+const TASK_V5_COLUMNS: [ColumnSpec; 11] = [
+    ColumnSpec {
+        name: "id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "parent_task_id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "sort_key",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "name",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "created_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "updated_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "version",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "duration_minutes",
+        data_type: "INTEGER",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "start_no_earlier_than",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "finish_no_later_than",
+        data_type: "TEXT",
         not_null: false,
         primary_key_position: 0,
     },
@@ -1519,7 +1686,7 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if schema_version != 4 {
+    if !matches!(schema_version, 4 | 5) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
     let required_table_count: i64 = connection
@@ -1539,7 +1706,10 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
     if required_table_count != REQUIRED_BACKUP_TABLES.len() as i64 {
         return Err(ApplicationError::BackupVerificationFailed);
     }
-    verify_supported_v4_schema(&connection)?;
+    verify_supported_schema(&connection, schema_version)?;
+    if schema_version == 5 {
+        verify_v5_constraint_domain(&connection)?;
+    }
 
     // These bounded counts prove the core domain tables are readable without
     // exposing any customer or job content in the result or error surface.
@@ -1555,7 +1725,10 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
     })
 }
 
-fn verify_supported_v4_schema(connection: &Connection) -> Result<(), ApplicationError> {
+fn verify_supported_schema(
+    connection: &Connection,
+    schema_version: i64,
+) -> Result<(), ApplicationError> {
     let migrations = connection
         .prepare("SELECT version FROM schema_migrations ORDER BY version")
         .and_then(|mut statement| {
@@ -1564,13 +1737,26 @@ fn verify_supported_v4_schema(connection: &Connection) -> Result<(), Application
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if migrations != [1, 2, 3, 4] {
+    let expected_migrations: &[i64] = if schema_version == 4 {
+        &[1, 2, 3, 4]
+    } else {
+        &[1, 2, 3, 4, 5]
+    };
+    if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
     }
 
     verify_table_columns(connection, "schema_migrations", &SCHEMA_MIGRATION_COLUMNS)?;
     verify_table_columns(connection, "jobs", &JOB_COLUMNS)?;
-    verify_table_columns(connection, "tasks", &TASK_COLUMNS)?;
+    verify_table_columns(
+        connection,
+        "tasks",
+        if schema_version == 4 {
+            &TASK_COLUMNS
+        } else {
+            &TASK_V5_COLUMNS
+        },
+    )?;
     verify_table_columns(connection, "command_log", &COMMAND_LOG_COLUMNS)?;
     verify_table_columns(connection, "task_dependencies", &DEPENDENCY_COLUMNS)?;
     verify_foreign_keys(
@@ -1633,7 +1819,11 @@ fn verify_supported_v4_schema(connection: &Connection) -> Result<(), Application
         ),
         (
             "tasks",
-            "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0uniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict",
+            if schema_version == 4 {
+                "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0uniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict"
+            } else {
+                "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0start_no_earlier_thantextfinish_no_later_thantextuniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict"
+            },
         ),
         (
             "command_log",
@@ -1655,9 +1845,14 @@ fn verify_supported_v4_schema(connection: &Connection) -> Result<(), Application
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
+    let task_query = if schema_version == 4 {
+        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1"
+    } else {
+        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1"
+    };
     for query in [
         "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1",
-        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
+        task_query,
         "SELECT job_id, predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id LIMIT 1",
         "SELECT command_id, actor, client_name, created_at, summary FROM command_log ORDER BY command_id LIMIT 1",
     ] {
@@ -1665,6 +1860,46 @@ fn verify_supported_v4_schema(connection: &Connection) -> Result<(), Application
             .prepare(query)
             .and_then(|mut statement| statement.query([]).map(|_| ()))
             .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
+    Ok(())
+}
+
+/// Backup preflight is deliberately read-only. For v5, schema shape alone is
+/// insufficient: constraints are canonical inputs and must be parseable leaf
+/// values before an untrusted snapshot can be copied into an owned target.
+fn verify_v5_constraint_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT task.id, task.duration_minutes, task.start_no_earlier_than,
+                    task.finish_no_later_than,
+                    EXISTS(SELECT 1 FROM tasks child WHERE child.parent_task_id = task.id)
+             FROM tasks task
+             WHERE task.start_no_earlier_than IS NOT NULL OR task.finish_no_later_than IS NOT NULL",
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    for row in rows {
+        let (duration, start_no_earlier_than, finish_no_later_than, has_children) =
+            row.map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if duration.is_none() || has_children {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+        for value in [start_no_earlier_than, finish_no_later_than]
+            .into_iter()
+            .flatten()
+        {
+            parse_canonical_constraint_date(&value)
+                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        }
     }
     Ok(())
 }
@@ -1857,9 +2092,11 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         sort_key: row.get(3)?,
         name: row.get(4)?,
         duration_minutes: row.get(5)?,
-        created_at: row.get(6)?,
-        updated_at: row.get(7)?,
-        version: row.get(8)?,
+        start_no_earlier_than: row.get(6)?,
+        finish_no_later_than: row.get(7)?,
+        created_at: row.get(8)?,
+        updated_at: row.get(9)?,
+        version: row.get(10)?,
     })
 }
 
@@ -1906,21 +2143,21 @@ fn read_task_hierarchy(
     )?;
     let mut statement = connection.prepare(
         "WITH RECURSIVE task_tree(
-            id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version, path
+            id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version, path
          ) AS (
-            SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version,
+            SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version,
                    printf('%020d:%s', sort_key, id)
             FROM tasks
             WHERE job_id = ?1 AND parent_task_id IS NULL
             UNION ALL
             SELECT child.id, child.job_id, child.parent_task_id, child.sort_key, child.name,
-                   child.duration_minutes, child.created_at, child.updated_at, child.version,
+                   child.duration_minutes, child.start_no_earlier_than, child.finish_no_later_than, child.created_at, child.updated_at, child.version,
                    parent.path || '/' || printf('%020d:%s', child.sort_key, child.id)
             FROM tasks child
             JOIN task_tree parent ON child.parent_task_id = parent.id
             WHERE child.job_id = ?1
          )
-         SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version
+         SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
          FROM task_tree
          ORDER BY path",
     )?;
@@ -1951,7 +2188,7 @@ fn find_task(
 ) -> Result<Option<Task>, ApplicationError> {
     transaction
         .query_row(
-            "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version
+            "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
              FROM tasks WHERE id = ?1",
             [task_id],
             task_from_row,
@@ -1973,13 +2210,109 @@ fn task_has_dependencies(
         .map_err(Into::into)
 }
 
+/// Validates the candidate task as if it were stored, before any canonical row
+/// is changed. This keeps constraint writes atomic with the complete schedule.
+fn validate_proposed_schedule(
+    transaction: &Transaction<'_>,
+    candidate: &Task,
+) -> Result<(), ApplicationError> {
+    let (schedule_start, calendar_json): (Option<String>, String) = transaction.query_row(
+        "SELECT schedule_start, calendar_json FROM jobs WHERE id = ?1",
+        [&candidate.job_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let schedule_start = schedule_start.ok_or(ApplicationError::ValidationFailed {
+        code: "schedule_start_required",
+        field: "scheduleStart",
+        message: "set a schedule start before changing task constraints".into(),
+    })?;
+    let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidStoredData("job has invalid schedule start".into())
+    })?;
+    let calendar = serde_json::from_str(&calendar_json)
+        .map_err(|_| ApplicationError::InvalidStoredData("job has invalid calendar".into()))?;
+    let mut tasks = Vec::new();
+    let mut constraints = Vec::new();
+    let mut statement = transaction.prepare(
+        "SELECT id, parent_task_id, duration_minutes, start_no_earlier_than, finish_no_later_than
+         FROM tasks WHERE job_id = ?1 ORDER BY id",
+    )?;
+    let rows = statement.query_map([&candidate.job_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+        ))
+    })?;
+    for row in rows {
+        let (id, parent_task_id, duration_minutes, mut snet, mut fnlt) = row?;
+        if id == candidate.id {
+            snet = candidate.start_no_earlier_than.clone();
+            fnlt = candidate.finish_no_later_than.clone();
+        }
+        tasks.push(ScheduleTask {
+            id: id.clone(),
+            parent_task_id,
+            duration_minutes,
+        });
+        if snet.is_some() || fnlt.is_some() {
+            constraints.push(TaskConstraint {
+                task_id: id,
+                start_no_earlier_than: snet.as_deref().map(parse_stored_constraint).transpose()?,
+                finish_no_later_than: fnlt.as_deref().map(parse_stored_constraint).transpose()?,
+            });
+        }
+    }
+    let mut statement = transaction.prepare(
+        "SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id",
+    )?;
+    let dependencies = statement
+        .query_map([&candidate.job_id], |row| {
+            Ok(ScheduleDependency {
+                predecessor_task_id: row.get(0)?,
+                successor_task_id: row.get(1)?,
+                lag_minutes: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start,
+            calendar,
+            tasks,
+            dependencies,
+        },
+        &constraints,
+    )
+    .map_err(|error| ApplicationError::ValidationFailed {
+        code: error.code(),
+        field: "schedule",
+        message: error.to_string(),
+    })?;
+    Ok(())
+}
+
+fn parse_stored_constraint(value: &str) -> Result<NaiveDate, ApplicationError> {
+    parse_canonical_constraint_date(value)
+        .map_err(|_| ApplicationError::InvalidStoredData("task has invalid constraint".into()))
+}
+
+fn parse_canonical_constraint_date(value: &str) -> Result<NaiveDate, ()> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| ())?;
+    (date.format("%Y-%m-%d").to_string() == value)
+        .then_some(date)
+        .ok_or(())
+}
+
 fn load_siblings(
     transaction: &Transaction<'_>,
     job_id: &str,
     parent_task_id: Option<&str>,
 ) -> Result<Vec<Task>, ApplicationError> {
     let mut statement = transaction.prepare(
-        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version
+        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
          FROM tasks
          WHERE job_id = ?1 AND parent_task_id IS ?2
          ORDER BY sort_key, id",

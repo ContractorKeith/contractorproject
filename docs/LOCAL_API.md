@@ -40,6 +40,7 @@ Proposal tools return a typed diff, warnings, affected versions, and an opaque p
  - `remove_dependency(jobId, predecessorTaskId, successorTaskId, expectedJobVersion)`
  - `update_schedule(jobId, scheduleStart?, calendar, expectedJobVersion)`
  - `update_task_duration(taskId, durationMinutes?, expectedVersion, expectedJobVersion)`
+ - `update_task_constraint(taskId, kind, value?, expectedVersion, expectedJobVersion)`
 - `record_actual_cost(jobId, taskId, costCodeId, amount, expectedVersion)`
 
 Write tools are available only in read-write mode. The default agent onboarding experience should make the selected mode visible and reversible.
@@ -79,6 +80,13 @@ Task hierarchy queries return the owning job version plus a deterministic flat p
 Schedule-input mutations also use the job version: changing a duration checks
 both the task and job versions; calendar, start, and dependency changes check
 the job version. A mutation and its non-secret audit summary commit together.
+
+`update_task_constraint` accepts exactly `start_no_earlier_than` or
+`finish_no_later_than` as `kind` and an ISO date-only `value`, or `null` to
+clear that kind. It checks task and job versions, changes only the named kind,
+validates the complete proposed schedule, and returns `TaskMutation`.
+Constraints are leaf-only; its fixed audit summary excludes task names, dates,
+and request bodies.
 
 `get_schedule` returns the same versioned Gantt read model used by the desktop
 UI, optionally bounded to the requested window. The contract is defined in

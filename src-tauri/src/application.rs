@@ -11,7 +11,8 @@ use crate::gantt::{
     GanttTaskSource,
 };
 use crate::scheduling::{
-    calculate_schedule, CalendarWeekday, ScheduleInput, ScheduleTask, WorkingCalendar,
+    calculate_schedule_with_constraints, CalendarWeekday, ScheduleInput, ScheduleTask,
+    TaskConstraint, WorkingCalendar,
 };
 use crate::storage::SqliteStore;
 
@@ -153,6 +154,23 @@ pub struct UpdateScheduleRequest {
 pub struct UpdateTaskDurationRequest {
     pub task_id: String,
     pub duration_minutes: Option<i64>,
+    pub expected_version: i64,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskConstraintKind {
+    StartNoEarlierThan,
+    FinishNoLaterThan,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTaskConstraintRequest {
+    pub task_id: String,
+    pub kind: TaskConstraintKind,
+    pub value: Option<String>,
     pub expected_version: i64,
     pub expected_job_version: i64,
 }
@@ -329,6 +347,8 @@ impl ApplicationService {
             parent_task_id: request.parent_task_id,
             name,
             duration_minutes: None,
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
             created_at: now.clone(),
             updated_at: now,
             version: 1,
@@ -367,26 +387,50 @@ impl ApplicationService {
                     job.id
                 ))
             })?;
-        let schedule = calculate_schedule(&ScheduleInput {
-            schedule_start,
-            calendar: job.calendar.clone(),
-            tasks: tasks
-                .iter()
-                .map(|task| ScheduleTask {
-                    id: task.id.clone(),
-                    parent_task_id: task.parent_task_id.clone(),
-                    duration_minutes: task.duration_minutes,
+        let constraints = tasks
+            .iter()
+            .filter(|task| {
+                task.start_no_earlier_than.is_some() || task.finish_no_later_than.is_some()
+            })
+            .map(|task| {
+                Ok(TaskConstraint {
+                    task_id: task.id.clone(),
+                    start_no_earlier_than: task
+                        .start_no_earlier_than
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()?,
+                    finish_no_later_than: task
+                        .finish_no_later_than
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()?,
                 })
-                .collect(),
-            dependencies: dependencies
-                .iter()
-                .map(|dependency| crate::scheduling::FinishStartDependency {
-                    predecessor_task_id: dependency.predecessor_task_id.clone(),
-                    successor_task_id: dependency.successor_task_id.clone(),
-                    lag_minutes: dependency.lag_minutes,
-                })
-                .collect(),
-        })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let schedule = calculate_schedule_with_constraints(
+            &ScheduleInput {
+                schedule_start,
+                calendar: job.calendar.clone(),
+                tasks: tasks
+                    .iter()
+                    .map(|task| ScheduleTask {
+                        id: task.id.clone(),
+                        parent_task_id: task.parent_task_id.clone(),
+                        duration_minutes: task.duration_minutes,
+                    })
+                    .collect(),
+                dependencies: dependencies
+                    .iter()
+                    .map(|dependency| crate::scheduling::FinishStartDependency {
+                        predecessor_task_id: dependency.predecessor_task_id.clone(),
+                        successor_task_id: dependency.successor_task_id.clone(),
+                        lag_minutes: dependency.lag_minutes,
+                    })
+                    .collect(),
+            },
+            &constraints,
+        )
         .map_err(|error| ApplicationError::ValidationFailed {
             code: error.code(),
             field: "schedule",
@@ -509,6 +553,25 @@ impl ApplicationService {
         Ok(TaskMutation { task, job_version })
     }
 
+    pub fn update_task_constraint(
+        &self,
+        context: CommandContext,
+        request: UpdateTaskConstraintRequest,
+    ) -> Result<TaskMutation, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedVersion", request.expected_version)?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        if let Some(value) = request.value.as_deref() {
+            parse_constraint_date(value)?;
+        }
+        let (task, job_version) = self.store.update_task_constraint(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )?;
+        Ok(TaskMutation { task, job_version })
+    }
+
     pub fn add_dependency(
         &self,
         context: CommandContext,
@@ -594,6 +657,22 @@ fn validate_schedule_start(value: &str) -> Result<(), ApplicationError> {
         }
     })?;
     Ok(())
+}
+
+fn parse_constraint_date(value: &str) -> Result<NaiveDate, ApplicationError> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidInput {
+            field: "value",
+            message: "must be an ISO date-only value".into(),
+        }
+    })?;
+    if date.format("%Y-%m-%d").to_string() != value {
+        return Err(ApplicationError::InvalidInput {
+            field: "value",
+            message: "must be an ISO date-only value".into(),
+        });
+    }
+    Ok(date)
 }
 
 fn required_version(field: &'static str, version: i64) -> Result<(), ApplicationError> {

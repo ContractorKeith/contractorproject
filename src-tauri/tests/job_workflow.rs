@@ -6,7 +6,9 @@ use contractorproject_lib::application::{
     CreateBackupRequest, CreateJobRequest, CreateTaskRequest, JobStatus, RestoreJobRequest,
     VerifyRestoreRequest,
 };
-use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
+use contractorproject_lib::application::{
+    ReorderTaskRequest, TaskConstraintKind, UpdateTaskConstraintRequest, UpdateTaskRequest,
+};
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
 use std::sync::{
@@ -39,7 +41,7 @@ fn canonical_snapshot(path: &std::path::Path) -> Vec<Vec<String>> {
         .expect("open snapshot read-only");
     [
         "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version) FROM jobs ORDER BY id",
-        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version) FROM tasks ORDER BY id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version) FROM tasks ORDER BY id",
         "SELECT printf('%Q|%Q|%Q|%Q', job_id, predecessor_task_id, successor_task_id, lag_minutes) FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id",
         "SELECT printf('%Q|%Q|%Q|%Q|%Q', command_id, actor, client_name, created_at, summary) FROM command_log ORDER BY command_id",
     ]
@@ -68,6 +70,444 @@ fn working_calendar() -> WorkingCalendar {
         workday_start_minute: 480,
         workday_duration_minutes: 480,
     }
+}
+
+#[test]
+fn task_constraints_are_versioned_audited_atomic_and_persisted() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Constraints".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("schedule");
+    let task = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Leaf".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("task")
+        .task;
+    let duration = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: task.version,
+                expected_job_version: job.version + 1,
+            },
+        )
+        .expect("duration");
+    let set = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-20".into()),
+                expected_version: duration.task.version,
+                expected_job_version: duration.job_version,
+            },
+        )
+        .expect("set constraint");
+    assert_eq!(
+        set.task.start_no_earlier_than.as_deref(),
+        Some("2026-08-20")
+    );
+    let both = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::FinishNoLaterThan,
+                value: Some("2026-08-21".into()),
+                expected_version: set.task.version,
+                expected_job_version: set.job_version,
+            },
+        )
+        .expect("set second constraint");
+    assert_eq!(
+        both.task.start_no_earlier_than.as_deref(),
+        Some("2026-08-20")
+    );
+    assert_eq!(
+        both.task.finish_no_later_than.as_deref(),
+        Some("2026-08-21")
+    );
+    let replaced = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-21".into()),
+                expected_version: both.task.version,
+                expected_job_version: both.job_version,
+            },
+        )
+        .expect("replace constraint");
+    assert_eq!(
+        replaced.task.start_no_earlier_than.as_deref(),
+        Some("2026-08-21")
+    );
+    assert_eq!(
+        replaced.task.finish_no_later_than.as_deref(),
+        Some("2026-08-21")
+    );
+    let cleared = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::FinishNoLaterThan,
+                value: None,
+                expected_version: replaced.task.version,
+                expected_job_version: replaced.job_version,
+            },
+        )
+        .expect("clear constraint");
+    assert_eq!(cleared.task.finish_no_later_than, None);
+    let summary: String = Connection::open(&path)
+        .expect("open audit database")
+        .query_row(
+            "SELECT summary FROM command_log ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("constraint audit summary");
+    assert_eq!(summary, "updated task constraint");
+    assert!(!summary.contains("2026-08-21"));
+    assert!(!summary.contains("Leaf"));
+    let before_version_failures = canonical_snapshot(&path);
+    assert!(matches!(
+        service.update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-22".into()),
+                expected_version: cleared.task.version - 1,
+                expected_job_version: cleared.job_version,
+            }
+        ),
+        Err(ApplicationError::VersionConflict {
+            resource: "task",
+            ..
+        })
+    ));
+    assert!(matches!(
+        service.update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-22".into()),
+                expected_version: cleared.task.version,
+                expected_job_version: cleared.job_version - 1,
+            }
+        ),
+        Err(ApplicationError::VersionConflict {
+            resource: "job",
+            ..
+        })
+    ));
+    assert!(matches!(
+        service.update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: "missing-task".into(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-22".into()),
+                expected_version: 1,
+                expected_job_version: cleared.job_version,
+            }
+        ),
+        Err(ApplicationError::NotFound {
+            resource: "task",
+            ..
+        })
+    ));
+    assert_eq!(canonical_snapshot(&path), before_version_failures);
+    let duplicate_context = CommandContext {
+        command_id: "constraint-duplicate".into(),
+        actor: CommandActor::Agent,
+        client_name: "integration-test".into(),
+    };
+    let duplicate_first = service
+        .update_task_constraint(
+            duplicate_context.clone(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-22".into()),
+                expected_version: cleared.task.version,
+                expected_job_version: cleared.job_version,
+            },
+        )
+        .expect("first command");
+    let before_duplicate = canonical_snapshot(&path);
+    assert!(matches!(
+        service.update_task_constraint(
+            duplicate_context,
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-23".into()),
+                expected_version: duplicate_first.task.version,
+                expected_job_version: duplicate_first.job_version,
+            }
+        ),
+        Err(ApplicationError::DuplicateCommand { .. })
+    ));
+    assert_eq!(canonical_snapshot(&path), before_duplicate);
+    let before_leaf_invariants = canonical_snapshot(&path);
+    assert!(matches!(
+        service.create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(task.id.clone()),
+                name: "Forbidden child".into(),
+                expected_job_version: duplicate_first.job_version,
+            }
+        ),
+        Err(ApplicationError::ValidationFailed {
+            code: "summary_conversion_requires_cleanup",
+            ..
+        })
+    ));
+    assert!(matches!(
+        service.update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: task.id.clone(),
+                duration_minutes: None,
+                expected_version: duplicate_first.task.version,
+                expected_job_version: duplicate_first.job_version,
+            }
+        ),
+        Err(ApplicationError::ValidationFailed {
+            code: "summary_constraint",
+            ..
+        })
+    ));
+    assert_eq!(canonical_snapshot(&path), before_leaf_invariants);
+    let other = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Other leaf".into(),
+                expected_job_version: duplicate_first.job_version,
+            },
+        )
+        .expect("other leaf")
+        .task;
+    let before_reparent = canonical_snapshot(&path);
+    assert!(matches!(
+        service.reorder_task(
+            command_context(),
+            ReorderTaskRequest {
+                task_id: other.id,
+                new_parent_task_id: Some(task.id.clone()),
+                new_sibling_index: 0,
+                expected_version: other.version,
+                expected_job_version: duplicate_first.job_version + 1,
+            }
+        ),
+        Err(ApplicationError::ValidationFailed {
+            code: "summary_conversion_requires_cleanup",
+            ..
+        })
+    ));
+    assert_eq!(canonical_snapshot(&path), before_reparent);
+    let incomplete = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Incomplete leaf".into(),
+                expected_job_version: duplicate_first.job_version + 1,
+            },
+        )
+        .expect("incomplete leaf");
+    let before_full_schedule_rejection = canonical_snapshot(&path);
+    assert!(matches!(
+        service.update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-23".into()),
+                expected_version: duplicate_first.task.version,
+                expected_job_version: incomplete.job_version,
+            }
+        ),
+        Err(ApplicationError::ValidationFailed {
+            field: "schedule",
+            ..
+        })
+    ));
+    assert_eq!(canonical_snapshot(&path), before_full_schedule_rejection);
+    let completed_incomplete = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: incomplete.task.id,
+                duration_minutes: Some(480),
+                expected_version: incomplete.task.version,
+                expected_job_version: incomplete.job_version,
+            },
+        )
+        .expect("complete second leaf");
+    let before = canonical_snapshot(&path);
+    let error = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("bad".into()),
+                expected_version: duplicate_first.task.version,
+                expected_job_version: completed_incomplete.job_version,
+            },
+        )
+        .expect_err("bad date");
+    assert!(matches!(
+        error,
+        ApplicationError::InvalidInput { field: "value", .. }
+    ));
+    assert_eq!(canonical_snapshot(&path), before);
+    let error = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-8-1".into()),
+                expected_version: duplicate_first.task.version,
+                expected_job_version: completed_incomplete.job_version,
+            },
+        )
+        .expect_err("reject noncanonical date");
+    assert!(matches!(
+        error,
+        ApplicationError::InvalidInput { field: "value", .. }
+    ));
+    assert_eq!(canonical_snapshot(&path), before);
+    let connection = Connection::open(&path).expect("open trigger database");
+    connection
+        .execute_batch(
+            "CREATE TRIGGER fail_constraint_audit BEFORE INSERT ON command_log
+             WHEN NEW.summary = 'updated task constraint'
+             BEGIN SELECT RAISE(ABORT, 'forced audit failure'); END;",
+        )
+        .expect("install trigger");
+    drop(connection);
+    let before_audit_failure = canonical_snapshot(&path);
+    assert!(service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: None,
+                expected_version: duplicate_first.task.version,
+                expected_job_version: completed_incomplete.job_version,
+            },
+        )
+        .is_err());
+    assert_eq!(canonical_snapshot(&path), before_audit_failure);
+    drop(service);
+    let reopened = ApplicationService::open(&path).expect("reopen");
+    let tasks = reopened.list_tasks(&job.id).expect("tasks");
+    assert_eq!(
+        tasks.tasks[0].start_no_earlier_than.as_deref(),
+        Some("2026-08-22")
+    );
+    assert_eq!(tasks.tasks[0].finish_no_later_than.as_deref(), None);
+}
+
+#[test]
+fn summary_task_constraints_are_rejected_without_drift() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Summary constraints".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let parent = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Summary".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("parent")
+        .task;
+    let child = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(parent.id.clone()),
+                name: "Leaf".into(),
+                expected_job_version: job.version + 1,
+            },
+        )
+        .expect("child");
+    let before = canonical_snapshot(&path);
+    assert!(matches!(
+        service.update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: parent.id,
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-20".into()),
+                expected_version: 1,
+                expected_job_version: child.job_version,
+            }
+        ),
+        Err(ApplicationError::ValidationFailed {
+            code: "summary_constraint",
+            field: "taskId",
+            ..
+        })
+    ));
+    assert_eq!(canonical_snapshot(&path), before);
 }
 
 #[test]
@@ -1238,7 +1678,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 4);
+    assert_eq!(migrated_version, 5);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -1343,6 +1783,103 @@ fn version_three_database_is_backed_up_and_migrates_schedule_inputs() {
         .expect("backup columns");
     assert_eq!(migration, 3);
     assert_eq!(schedule_columns, 0);
+}
+
+#[test]
+fn populated_exact_v4_backup_restores_read_only_then_owned_target_migrates_to_v5() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let target = temp.path().join("restored");
+    let connection = Connection::open(&path).expect("create v4");
+    connection.execute_batch(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+         INSERT INTO schema_migrations VALUES (1, '2026-08-16T00:00:00.000Z'), (2, '2026-08-16T00:00:00.000Z'), (3, '2026-08-16T00:00:00.000Z'), (4, '2026-08-16T00:00:00.000Z');
+         CREATE TABLE jobs (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, timezone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), schedule_start TEXT, calendar_json TEXT NOT NULL DEFAULT '[]');
+         CREATE TABLE tasks (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, parent_task_id TEXT, sort_key INTEGER NOT NULL CHECK (sort_key >= 0), name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), duration_minutes INTEGER CHECK (duration_minutes >= 0), UNIQUE (job_id, id), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT, FOREIGN KEY (job_id, parent_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT);
+         CREATE INDEX tasks_job_parent_order ON tasks(job_id, parent_task_id, sort_key, id);
+         CREATE UNIQUE INDEX tasks_root_sibling_order ON tasks(job_id, sort_key) WHERE parent_task_id IS NULL;
+         CREATE UNIQUE INDEX tasks_child_sibling_order ON tasks(job_id, parent_task_id, sort_key) WHERE parent_task_id IS NOT NULL;
+         CREATE TABLE command_log (command_id TEXT NOT NULL PRIMARY KEY CHECK (length(command_id) BETWEEN 1 AND 128), actor TEXT NOT NULL CHECK (actor IN ('user', 'agent', 'import')), client_name TEXT NOT NULL CHECK (length(client_name) BETWEEN 1 AND 120), created_at TEXT NOT NULL, summary TEXT NOT NULL CHECK (length(summary) <= 240));
+         CREATE TABLE task_dependencies (job_id TEXT NOT NULL, predecessor_task_id TEXT NOT NULL, successor_task_id TEXT NOT NULL, lag_minutes INTEGER NOT NULL CHECK (lag_minutes >= 0), PRIMARY KEY (predecessor_task_id, successor_task_id), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT, FOREIGN KEY (job_id, predecessor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT, FOREIGN KEY (job_id, successor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT, CHECK (predecessor_task_id <> successor_task_id));
+         CREATE INDEX task_dependencies_job_successor ON task_dependencies(job_id, successor_task_id);
+         INSERT INTO jobs VALUES ('job-v4', 'Existing v4', 'draft', 'UTC', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 4, '2026-08-17', '{\"workingWeekdays\":[\"monday\",\"tuesday\",\"wednesday\",\"thursday\",\"friday\"],\"workdayStartMinute\":480,\"workdayDurationMinutes\":480}');
+         INSERT INTO tasks VALUES ('summary', 'job-v4', NULL, 0, 'Summary', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, NULL), ('first', 'job-v4', 'summary', 0, 'First', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 2, 480), ('second', 'job-v4', NULL, 1, 'Second', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480);
+         INSERT INTO task_dependencies VALUES ('job-v4', 'first', 'second', 0);
+         INSERT INTO command_log VALUES ('v4-audit', 'agent', 'test', '2026-08-16T00:00:00.000Z', 'updated task duration');",
+    ).expect("write exact v4");
+    drop(connection);
+
+    let service = ApplicationService::open(&path).expect("migrate source");
+    let hierarchy = service.list_tasks("job-v4").expect("preserved tasks");
+    assert_eq!(hierarchy.tasks.len(), 3);
+    assert!(hierarchy
+        .tasks
+        .iter()
+        .all(|task| task.start_no_earlier_than.is_none() && task.finish_no_later_than.is_none()));
+    assert_eq!(hierarchy.dependencies.len(), 1);
+    let v4_backup = temp
+        .path()
+        .join("contractorproject.sqlite3.pre-migration-v5.bak");
+    let backup =
+        Connection::open_with_flags(&v4_backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open v4 backup read-only");
+    assert_eq!(
+        backup
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .expect("v4 version"),
+        4
+    );
+    assert_eq!(
+        backup
+            .query_row("SELECT COUNT(*) FROM command_log", [], |row| row
+                .get::<_, i64>(0))
+            .expect("v4 audit"),
+        1
+    );
+    drop(backup);
+    let result = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: v4_backup.to_string_lossy().into_owned(),
+            target_app_data_dir: target.to_string_lossy().into_owned(),
+        })
+        .expect("restore v4 backup");
+    assert_eq!(
+        (
+            result.job_count,
+            result.task_count,
+            result.dependency_count,
+            result.command_log_count
+        ),
+        (1, 3, 1, 1)
+    );
+    let backup_after_restore =
+        Connection::open_with_flags(&v4_backup, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("reopen v4 source backup");
+    assert_eq!(
+        backup_after_restore
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .expect("unchanged v4 source version"),
+        4
+    );
+    drop(backup_after_restore);
+    let restored =
+        Connection::open(target.join("contractorproject.sqlite3")).expect("open restored v5");
+    assert_eq!(
+        restored
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| row
+                .get::<_, i64>(
+                0
+            ))
+            .expect("v5 version"),
+        5
+    );
+    assert_eq!(restored.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name IN ('start_no_earlier_than', 'finish_no_later_than')", [], |row| row.get::<_, i64>(0)).expect("constraint fields"), 2);
 }
 
 #[test]
@@ -3085,6 +3622,94 @@ fn restore_verification_rejects_a_v4_named_lookalike_schema_before_target_reserv
         before
     );
     assert!(!target.exists(), "lookalike input never reserves a target");
+}
+
+#[test]
+fn restore_preflight_rejects_invalid_v5_constraint_domain_without_mutation() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    for (name, value, summary_constraint) in [
+        ("malformed", "not-a-date", false),
+        ("noncanonical", "2026-8-1", false),
+        ("summary", "2026-08-20", true),
+    ] {
+        let source_path = temp.path().join(format!("{name}.sqlite3"));
+        let target = temp.path().join(format!("{name}-target"));
+        let service = ApplicationService::open(&source_path).expect("open source");
+        let job = service
+            .create_job(
+                command_context(),
+                CreateJobRequest {
+                    name: "Constraint preflight".into(),
+                    timezone: "UTC".into(),
+                },
+            )
+            .expect("job");
+        let parent = service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: None,
+                    name: "Parent".into(),
+                    expected_job_version: job.version,
+                },
+            )
+            .expect("parent")
+            .task;
+        if summary_constraint {
+            service
+                .create_task(
+                    command_context(),
+                    CreateTaskRequest {
+                        job_id: job.id.clone(),
+                        parent_task_id: Some(parent.id.clone()),
+                        name: "Child".into(),
+                        expected_job_version: job.version + 1,
+                    },
+                )
+                .expect("child");
+            Connection::open(&source_path)
+                .expect("open source direct")
+                .execute(
+                    "UPDATE tasks SET start_no_earlier_than = ?1 WHERE id = ?2",
+                    rusqlite::params![value, parent.id],
+                )
+                .expect("write invalid summary constraint");
+        } else {
+            let updated = service
+                .update_task_duration(
+                    command_context(),
+                    UpdateTaskDurationRequest {
+                        task_id: parent.id.clone(),
+                        duration_minutes: Some(480),
+                        expected_version: parent.version,
+                        expected_job_version: job.version + 1,
+                    },
+                )
+                .expect("duration");
+            assert_eq!(updated.task.duration_minutes, Some(480));
+            Connection::open(&source_path)
+                .expect("open source direct")
+                .execute(
+                    "UPDATE tasks SET start_no_earlier_than = ?1 WHERE id = ?2",
+                    rusqlite::params![value, parent.id],
+                )
+                .expect("write malformed constraint");
+        }
+        let before = canonical_snapshot(&source_path);
+        let error = service
+            .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+                backup_path: source_path.to_string_lossy().into_owned(),
+                target_app_data_dir: target.to_string_lossy().into_owned(),
+            })
+            .expect_err("reject invalid v5 input");
+        assert_eq!(error.kind(), "restore_verification_failed");
+        assert_eq!(canonical_snapshot(&source_path), before);
+        assert!(
+            !target.exists(),
+            "invalid preflight never reserves a target"
+        );
+    }
 }
 
 #[test]
