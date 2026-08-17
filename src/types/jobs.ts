@@ -25,6 +25,13 @@ export interface JobStatusRequest {
   expectedJobVersion: number;
 }
 
+export interface BackupResult {
+  destination: string;
+  createdAtUtc: string;
+  byteSize: number;
+  verified: boolean;
+}
+
 export interface Task {
   id: string;
   jobId: string;

@@ -2,8 +2,8 @@ use contractorproject_lib::application::{
     AddDependencyRequest, RemoveDependencyRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
 };
 use contractorproject_lib::application::{
-    ApplicationService, ArchiveJobRequest, CommandActor, CommandContext, CreateJobRequest,
-    CreateTaskRequest, JobStatus, RestoreJobRequest,
+    ApplicationService, ArchiveJobRequest, CommandActor, CommandContext, CreateBackupRequest,
+    CreateJobRequest, CreateTaskRequest, JobStatus, RestoreJobRequest,
 };
 use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
@@ -2389,4 +2389,365 @@ fn command_context_rejects_oversized_identifiers_before_mutating() {
         .expect_err("reject oversized command ID");
     assert_eq!(error.kind(), "invalid_input");
     assert!(service.list_jobs().expect("list jobs").is_empty());
+}
+
+#[test]
+fn online_backup_preserves_a_consistent_populated_wal_snapshot_without_audit_writes() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let backup_path = temp.path().join("scheduled-job.backup.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open service");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Archived scheduled job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create job");
+    let summary = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Summary".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("create summary");
+    let activity = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(summary.task.id.clone()),
+                name: "Activity".into(),
+                expected_job_version: summary.job_version,
+            },
+        )
+        .expect("create nested activity");
+    let milestone = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Milestone".into(),
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("create milestone");
+    let activity = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: activity.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: activity.task.version,
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("set duration");
+    let milestone = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: milestone.task.id.clone(),
+                duration_minutes: Some(0),
+                expected_version: milestone.task.version,
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("set milestone");
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: activity.task.id.clone(),
+                successor_task_id: milestone.task.id.clone(),
+                lag_minutes: 30,
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("add dependency");
+    let scheduled = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: linked.job_version,
+            },
+        )
+        .expect("schedule job");
+    let projection = service.get_schedule(&job.id).expect("build schedule");
+    service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("archive job");
+    let active = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Active job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create active job");
+    assert_eq!(active.status, JobStatus::Draft);
+
+    let source_connection = Connection::open(&database_path).expect("open source");
+    let journal_mode: String = source_connection
+        .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+        .expect("read journal mode");
+    assert_eq!(journal_mode, "wal");
+    let audit_before_backup = command_log_count(&database_path);
+
+    let backup = service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create verified online backup");
+    assert_eq!(backup.destination, backup_path.to_string_lossy());
+    assert!(backup.created_at_utc.ends_with('Z'));
+    assert!(backup.byte_size > 0);
+    assert!(backup.verified);
+    assert_eq!(command_log_count(&database_path), audit_before_backup);
+    assert!(
+        std::fs::read_dir(temp.path())
+            .expect("list backup directory")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".scheduled-job.backup.sqlite3.")),
+        "published backup must not leave owned incomplete SQLite sidecars"
+    );
+
+    let backup_connection =
+        Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open backup read-only");
+    let archived_count: i64 = backup_connection
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'archived'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("archived job in backup");
+    let active_count: i64 = backup_connection
+        .query_row(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'draft'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("active job in backup");
+    let nested_task_count: i64 = backup_connection
+        .query_row(
+            "SELECT COUNT(*) FROM tasks WHERE parent_task_id IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )
+        .expect("nested task in backup");
+    let dependency_count: i64 = backup_connection
+        .query_row("SELECT COUNT(*) FROM task_dependencies", [], |row| {
+            row.get(0)
+        })
+        .expect("dependency in backup");
+    assert_eq!(
+        (
+            archived_count,
+            active_count,
+            nested_task_count,
+            dependency_count
+        ),
+        (1, 1, 1, 1)
+    );
+    assert_eq!(command_log_count(&backup_path), audit_before_backup);
+
+    let reopened = ApplicationService::open(&backup_path).expect("open backup after verification");
+    let backed_up_projection = reopened
+        .get_schedule(&job.id)
+        .expect("preserved projection");
+    assert_eq!(backed_up_projection.rows, projection.rows);
+    assert_eq!(
+        backed_up_projection.schedule_start,
+        projection.schedule_start
+    );
+    assert_eq!(
+        backed_up_projection.schedule_finish,
+        projection.schedule_finish
+    );
+    assert_eq!(backed_up_projection.critical_path, projection.critical_path);
+}
+
+#[test]
+fn backup_rejects_existing_destination_without_overwrite_or_live_mutation() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let backup_path = temp.path().join("existing.backup.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open service");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Live data".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create job");
+    std::fs::write(&backup_path, b"do not replace").expect("reserve existing file");
+    let before_destination = std::fs::read(&backup_path).expect("read destination");
+    let audit_before = command_log_count(&database_path);
+
+    let error = service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect_err("must not overwrite existing destination");
+    assert_eq!(error.kind(), "backup_destination_exists");
+    assert_eq!(error.to_string(), "backup destination already exists");
+    assert_eq!(
+        std::fs::read(&backup_path).expect("read destination"),
+        before_destination
+    );
+    assert_eq!(command_log_count(&database_path), audit_before);
+    assert_eq!(
+        service.list_jobs().expect("live database unchanged").len(),
+        1
+    );
+}
+
+#[test]
+fn online_backup_completes_while_a_wal_reader_holds_a_snapshot() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let backup_path = temp.path().join("concurrent.backup.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open service");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Concurrent reader".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create job");
+
+    let reader = Connection::open(&database_path).expect("open concurrent reader");
+    reader
+        .execute_batch("PRAGMA journal_mode = WAL; BEGIN;")
+        .expect("begin WAL read transaction");
+    let rows_visible_to_reader: i64 = reader
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .expect("read snapshot");
+
+    let backup = service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create backup with concurrent reader");
+    assert!(backup.verified);
+    assert_eq!(
+        reader
+            .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get::<_, i64>(0))
+            .expect("reader keeps its snapshot"),
+        rows_visible_to_reader
+    );
+    reader
+        .execute_batch("COMMIT")
+        .expect("close read transaction");
+}
+
+#[test]
+fn backup_failure_does_not_leave_a_destination_or_mutate_the_live_database() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let destination = temp.path().join("missing-parent").join("backup.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open service");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Live data".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create job");
+    let audit_before = command_log_count(&database_path);
+
+    let error = service
+        .create_verified_backup(CreateBackupRequest {
+            destination: destination.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject unavailable destination");
+    assert_eq!(error.kind(), "backup_failed");
+    assert_eq!(error.to_string(), "backup could not be created");
+    assert!(!destination.exists());
+    assert_eq!(command_log_count(&database_path), audit_before);
+    assert_eq!(
+        service.list_jobs().expect("live database unchanged").len(),
+        1
+    );
+}
+
+#[test]
+fn online_backup_is_a_complete_snapshot_before_a_concurrent_wal_writer_commits() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("contractorproject.sqlite3");
+    let backup_path = temp.path().join("writer-snapshot.backup.sqlite3");
+    let service = ApplicationService::open(&database_path).expect("open service");
+    let writer = Connection::open(&database_path).expect("open concurrent writer");
+    writer
+        .execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; BEGIN IMMEDIATE;")
+        .expect("begin WAL write transaction");
+    writer
+        .execute(
+            "INSERT INTO jobs (
+                id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version
+             ) VALUES (?1, ?2, 'draft', ?3, NULL, ?4, ?5, ?5, 1)",
+            rusqlite::params![
+                "writer-job",
+                "Uncommitted job",
+                "UTC",
+                serde_json::to_string(&working_calendar()).expect("serialize calendar"),
+                "2026-08-16T00:00:00.000Z",
+            ],
+        )
+        .expect("write uncommitted job");
+    writer
+        .execute(
+            "INSERT INTO command_log (command_id, actor, client_name, created_at, summary)
+             VALUES (?1, 'user', 'test', ?2, 'created job')",
+            rusqlite::params!["writer-command", "2026-08-16T00:00:00.000Z"],
+        )
+        .expect("write uncommitted audit row");
+
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("backup while WAL writer is open");
+    writer.execute_batch("COMMIT").expect("commit writer");
+
+    let backup =
+        Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open backup");
+    let backup_jobs: i64 = backup
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .expect("count backed up jobs");
+    let backup_audit: i64 = backup
+        .query_row("SELECT COUNT(*) FROM command_log", [], |row| row.get(0))
+        .expect("count backed up audit rows");
+    assert_eq!((backup_jobs, backup_audit), (0, 0));
+    assert_eq!(service.list_jobs().expect("live job after commit").len(), 1);
+    assert_eq!(command_log_count(&database_path), 1);
 }

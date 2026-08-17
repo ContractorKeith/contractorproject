@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
@@ -42,6 +42,10 @@ export function App({ client = tauriJobClient }: AppProps) {
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [taskLoads, setTaskLoads] = useState<Record<string, TaskLoadState>>({});
   const [theme, setTheme] = useState<ThemePreference>(loadThemePreference);
+  const [backupPending, setBackupPending] = useState(false);
+  const [backupResult, setBackupResult] = useState<"cancelled" | { destination: string; createdAtUtc: string; byteSize: number } | null>(null);
+  const [backupError, setBackupError] = useState<string | null>(null);
+  const backupButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(
     () =>
@@ -87,6 +91,30 @@ export function App({ client = tauriJobClient }: AppProps) {
       setError(errorMessage(reason));
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function handleCreateVerifiedBackup() {
+    if (!client.createVerifiedBackup || backupPending) return;
+    setBackupPending(true);
+    setBackupResult(null);
+    setBackupError(null);
+    try {
+      const result = await client.createVerifiedBackup();
+      if (result === null) {
+        setBackupResult("cancelled");
+      } else {
+        setBackupResult({
+          destination: result.destination,
+          createdAtUtc: result.createdAtUtc,
+          byteSize: result.byteSize,
+        });
+      }
+    } catch (reason: unknown) {
+      setBackupError(errorMessage(reason));
+    } finally {
+      setBackupPending(false);
+      backupButtonRef.current?.focus();
     }
   }
 
@@ -238,14 +266,42 @@ export function App({ client = tauriJobClient }: AppProps) {
               <option value="dark">Dark</option>
             </select>
           </label>
-          <div className="storage-state" aria-label="Local storage status">
-            <span className="storage-state__dot" />
-            Local SQLite · on this device
+          <div className="storage-actions">
+            <div className="storage-state" aria-label="Local storage status">
+              <span className="storage-state__dot" />
+              Local SQLite · on this device
+            </div>
+            {client.createVerifiedBackup ? (
+              <button
+                ref={backupButtonRef}
+                className="backup-action"
+                type="button"
+                onClick={() => void handleCreateVerifiedBackup()}
+                disabled={backupPending}
+                aria-describedby="backup-status"
+              >
+                {backupPending ? "Creating backup…" : "Create verified backup"}
+              </button>
+            ) : null}
           </div>
         </div>
       </header>
 
       <main id="main" className="workspace">
+        <div id="backup-status" className="backup-status" aria-live="polite">
+          {backupResult === "cancelled" ? "Backup cancelled. Your local data was not changed." : null}
+          {backupResult && backupResult !== "cancelled" ? (
+            <p>
+              Verified backup created: {backupResult.destination} · {backupResult.byteSize.toLocaleString()} bytes · {backupResult.createdAtUtc}
+            </p>
+          ) : null}
+        </div>
+        {backupError ? (
+          <div className="inline-error" role="alert">
+            <strong>Couldn&apos;t create verified backup.</strong>
+            <span>{backupError}</span>
+          </div>
+        ) : null}
         <section className="workspace-heading" aria-labelledby="jobs-heading">
           <div>
             <p className="eyebrow">Jobs</p>

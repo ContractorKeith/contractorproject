@@ -1,12 +1,19 @@
 use std::collections::HashSet;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use chrono::{SecondsFormat, Utc};
+use rusqlite::backup::Backup;
+use rusqlite::{
+    params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
+};
+use uuid::Uuid;
 
 use crate::application::{
-    AddDependencyRequest, CommandContext, RemoveDependencyRequest, ReorderTaskRequest,
-    UpdateScheduleRequest, UpdateTaskDurationRequest, MAX_AUDIT_SUMMARY_CHARACTERS,
-    MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
+    AddDependencyRequest, BackupResult, CommandContext, RemoveDependencyRequest,
+    ReorderTaskRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
+    MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
 };
 use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
@@ -340,6 +347,66 @@ impl SqliteStore {
         let (_, tasks, dependencies) = read_task_hierarchy(&transaction, job_id)?;
         transaction.commit()?;
         Ok((job, tasks, dependencies))
+    }
+
+    pub(crate) fn create_verified_backup(
+        &self,
+        destination: &str,
+    ) -> Result<BackupResult, ApplicationError> {
+        let destination = PathBuf::from(destination);
+        self.create_verified_backup_with(&destination, verify_backup)
+    }
+
+    fn create_verified_backup_with(
+        &self,
+        destination: &Path,
+        verify: impl FnOnce(&Path) -> Result<(), ApplicationError>,
+    ) -> Result<BackupResult, ApplicationError> {
+        let incomplete_destination = create_incomplete_backup_path(destination)?;
+        let backup_result = (|| {
+            let source = self.connection()?;
+            let mut target = Connection::open(&incomplete_destination)
+                .map_err(|_| ApplicationError::BackupFailed)?;
+            // This file is private, unverified, and never published in place.
+            // Avoid a rollback-journal sync in File Provider-managed folders;
+            // durability is established by sync_all after the backup completes.
+            target
+                .execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")
+                .map_err(|_| ApplicationError::BackupFailed)?;
+            {
+                let backup = Backup::new(&source, &mut target)
+                    .map_err(|_| ApplicationError::BackupFailed)?;
+                backup
+                    .run_to_completion(100, Duration::from_millis(1), None)
+                    .map_err(|_| ApplicationError::BackupFailed)?;
+            }
+            drop(target);
+            std::fs::File::open(&incomplete_destination)
+                .and_then(|file| file.sync_all())
+                .map_err(|_| ApplicationError::BackupFailed)?;
+            verify(&incomplete_destination)?;
+            publish_incomplete_backup(&incomplete_destination, destination)?;
+            let byte_size = std::fs::metadata(destination)
+                .map_err(|_| ApplicationError::BackupFailed)?
+                .len();
+            Ok(BackupResult {
+                destination: destination.to_string_lossy().into_owned(),
+                created_at_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+                byte_size,
+                verified: true,
+            })
+        })();
+
+        match backup_result {
+            Ok(result) => {
+                cleanup_owned_incomplete_backup(&incomplete_destination)?;
+                Ok(result)
+            }
+            Err(error) => {
+                let _ = cleanup_owned_incomplete_backup(&incomplete_destination);
+                Err(error)
+            }
+        }
     }
 
     pub(crate) fn update_task(
@@ -921,6 +988,151 @@ impl SqliteStore {
     }
 }
 
+const REQUIRED_BACKUP_TABLES: [&str; 5] = [
+    "schema_migrations",
+    "jobs",
+    "tasks",
+    "command_log",
+    "task_dependencies",
+];
+
+fn create_incomplete_backup_path(destination: &Path) -> Result<PathBuf, ApplicationError> {
+    let file_name = destination.file_name().and_then(|name| name.to_str());
+    let Some(file_name) = file_name.filter(|name| !name.is_empty()) else {
+        return Err(ApplicationError::InvalidInput {
+            field: "destination",
+            message: "must name a backup file".into(),
+        });
+    };
+    let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+
+    for _ in 0..3 {
+        let incomplete = parent.join(format!(".{file_name}.{}.incomplete", Uuid::now_v7()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&incomplete)
+        {
+            Ok(_) => return Ok(incomplete),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(ApplicationError::BackupFailed),
+        }
+    }
+    Err(ApplicationError::BackupFailed)
+}
+
+/// Publishes only after validation. A same-directory hard link is an atomic
+/// no-clobber create, so an independently created destination is never
+/// overwritten or removed by this operation.
+fn publish_incomplete_backup(
+    incomplete: &Path,
+    destination: &Path,
+) -> Result<(), ApplicationError> {
+    match std::fs::hard_link(incomplete, destination) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(ApplicationError::BackupDestinationExists)
+        }
+        Err(_) => Err(ApplicationError::BackupFailed),
+    }
+}
+
+fn cleanup_owned_incomplete_backup(incomplete: &Path) -> Result<(), ApplicationError> {
+    for path in owned_incomplete_paths(incomplete) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(ApplicationError::BackupFailed),
+        }
+    }
+    Ok(())
+}
+
+fn owned_incomplete_paths(incomplete: &Path) -> [PathBuf; 4] {
+    let file_name = incomplete.file_name().unwrap_or_default();
+    let sidecar = |suffix: &str| {
+        let mut name = file_name.to_os_string();
+        name.push(suffix);
+        incomplete.with_file_name(name)
+    };
+    [
+        incomplete.to_path_buf(),
+        sidecar("-journal"),
+        sidecar("-wal"),
+        sidecar("-shm"),
+    ]
+}
+
+/// Opens the completed snapshot read-only. It never runs the application's
+/// migration path, so verification cannot change a user-selected backup.
+fn verify_backup(destination: &Path) -> Result<(), ApplicationError> {
+    let connection = Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    connection
+        .execute_batch("PRAGMA foreign_keys = ON;")
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+
+    let integrity_rows = connection
+        .prepare("PRAGMA integrity_check")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if integrity_rows.as_slice() != ["ok"] {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+
+    let has_foreign_key_violation: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check)",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if has_foreign_key_violation {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+
+    let schema_version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if schema_version != 4 {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    let required_table_count: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master
+             WHERE type = 'table' AND name IN (?1, ?2, ?3, ?4, ?5)",
+            params![
+                REQUIRED_BACKUP_TABLES[0],
+                REQUIRED_BACKUP_TABLES[1],
+                REQUIRED_BACKUP_TABLES[2],
+                REQUIRED_BACKUP_TABLES[3],
+                REQUIRED_BACKUP_TABLES[4],
+            ],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if required_table_count != REQUIRED_BACKUP_TABLES.len() as i64 {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+
+    // These bounded counts prove the core domain tables are readable without
+    // exposing any customer or job content in the result or error surface.
+    for table in ["jobs", "tasks", "task_dependencies", "command_log"] {
+        connection
+            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
+    Ok(())
+}
+
 fn ensure_command_is_new(
     transaction: &Transaction<'_>,
     context: &CommandContext,
@@ -1172,4 +1384,95 @@ fn load_ancestor_chain(
         ancestors.push(candidate);
     }
     Ok(ancestors)
+}
+
+#[cfg(test)]
+mod backup_verification_tests {
+    use super::{owned_incomplete_paths, verify_backup, SqliteStore};
+    use crate::error::ApplicationError;
+    use rusqlite::Connection;
+
+    #[test]
+    fn malformed_schema_is_rejected_without_migrating_the_backup() {
+        let temp = tempfile::tempdir().expect("temporary backup directory");
+        let path = temp.path().join("old-schema.sqlite3");
+        let connection = Connection::open(&path).expect("create malformed backup");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_migrations VALUES (3, '2026-08-16T00:00:00.000Z');
+                 CREATE TABLE jobs (id TEXT PRIMARY KEY);
+                 CREATE TABLE tasks (id TEXT PRIMARY KEY);
+                 CREATE TABLE command_log (command_id TEXT PRIMARY KEY);
+                 CREATE TABLE task_dependencies (predecessor_task_id TEXT PRIMARY KEY);",
+            )
+            .expect("create old schema");
+
+        let error = verify_backup(&path).expect_err("reject old schema");
+        assert_eq!(error.kind(), "backup_verification_failed");
+        assert_eq!(error.to_string(), "backup verification failed");
+
+        let unchanged = Connection::open(&path).expect("inspect unmodified backup");
+        let version: i64 = unchanged
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("read original version");
+        assert_eq!(version, 3);
+    }
+
+    #[test]
+    fn missing_required_table_is_rejected_with_a_bounded_error() {
+        let temp = tempfile::tempdir().expect("temporary backup directory");
+        let path = temp.path().join("foreign-schema.sqlite3");
+        let connection = Connection::open(&path).expect("create malformed backup");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_migrations VALUES (4, '2026-08-16T00:00:00.000Z');
+                 CREATE TABLE jobs (id TEXT PRIMARY KEY);
+                 CREATE TABLE tasks (id TEXT PRIMARY KEY);
+                 CREATE TABLE command_log (command_id TEXT PRIMARY KEY);",
+            )
+            .expect("create foreign schema");
+
+        let error = verify_backup(&path).expect_err("reject missing table");
+        assert_eq!(error.kind(), "backup_verification_failed");
+        assert_eq!(error.to_string(), "backup verification failed");
+    }
+
+    #[test]
+    fn verification_failure_removes_only_the_owned_incomplete_snapshot() {
+        let temp = tempfile::tempdir().expect("temporary backup directory");
+        let source = temp.path().join("source.sqlite3");
+        let destination = temp.path().join("published.sqlite3");
+        let store = SqliteStore::open(&source).expect("create source database");
+
+        let error = store
+            .create_verified_backup_with(&destination, |incomplete| {
+                let owned = owned_incomplete_paths(incomplete);
+                assert!(
+                    !owned[1].exists(),
+                    "the unpublished backup must not retain a rollback journal"
+                );
+                std::fs::write(&owned[1], []).expect("create owned journal sidecar");
+                std::fs::write(&owned[2], []).expect("create owned WAL sidecar");
+                std::fs::write(&owned[3], []).expect("create owned SHM sidecar");
+                Err(ApplicationError::BackupVerificationFailed)
+            })
+            .expect_err("verification failure");
+        assert_eq!(error.kind(), "backup_verification_failed");
+        assert!(!destination.exists());
+        assert!(
+            std::fs::read_dir(temp.path())
+                .expect("list backup directory")
+                .all(|entry| !entry
+                    .expect("directory entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("published.sqlite3")),
+            "owned incomplete snapshot should be removed"
+        );
+        assert!(source.exists(), "the live source database remains intact");
+    }
 }

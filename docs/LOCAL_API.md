@@ -97,6 +97,14 @@ check the expected job version and commit exactly one audit row atomically.
 Archived jobs are immutable through the current task, hierarchy, schedule,
 duration, and dependency mutation commands.
 
+The desktop-only `create_verified_backup()` command opens the operating
+system's native Save dialog in Rust, suggests a dated `.sqlite3` filename, and
+returns `null` when cancelled. On success it returns only bounded metadata:
+`destination`, `createdAtUtc`, `byteSize`, and `verified`. The selected
+destination is passed to `ApplicationService` for the online SQLite backup and
+read-only verification; the browser client neither chooses a path nor receives
+database contents.
+
 ## Context and privacy
 
 - Read tools return bounded projections selected by job and requested fields.

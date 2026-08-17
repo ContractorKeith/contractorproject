@@ -32,7 +32,7 @@ The next recovery boundary is specified in
 - [x] Implement recoverable archive and recovery commands.
 - [x] Implement task hierarchy create/edit/reorder with record-version conflicts.
 - [x] Render the job list and editable work breakdown through the real application interface.
-- [ ] Add a consistent backup command and restore verification test.
+- [x] Add a verified online backup command; restore verification follows in the next recovery slice.
 
 Exit: a packaged development app can create a job and nested tasks, restart without data loss, archive a job recoverably, and restore a verified backup.
 
