@@ -7,14 +7,15 @@ mod storage;
 mod work_breakdown;
 
 use application::{
-    AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, CommandActor,
-    CommandContext, CreateJobRequest, CreateTaskRequest, Job, JobStatus, RemoveDependencyRequest,
-    ReorderTaskRequest, RestoreJobRequest, TaskHierarchy, TaskMutation, UpdateScheduleRequest,
-    UpdateTaskDurationRequest, UpdateTaskRequest,
+    AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, BackupResult,
+    CommandActor, CommandContext, CreateBackupRequest, CreateJobRequest, CreateTaskRequest, Job,
+    JobStatus, RemoveDependencyRequest, ReorderTaskRequest, RestoreJobRequest, TaskHierarchy,
+    TaskMutation, UpdateScheduleRequest, UpdateTaskDurationRequest, UpdateTaskRequest,
 };
 use gantt::GanttReadModel;
 use serde::Serialize;
-use tauri::{Manager, State};
+use tauri::{AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -80,13 +81,30 @@ impl From<ApplicationError> for CommandError {
                     command_id: command_id.clone(),
                 }
             }
-            ApplicationError::InvalidStoredData(_)
+            ApplicationError::BackupDestinationExists
+            | ApplicationError::BackupFailed
+            | ApplicationError::BackupVerificationFailed
+            | ApplicationError::InvalidStoredData(_)
             | ApplicationError::Database(_)
             | ApplicationError::Io(_) => CommandErrorDetails::None {},
         };
+        let message = match &error {
+            ApplicationError::BackupDestinationExists => {
+                "Choose a destination that does not already exist.".to_owned()
+            }
+            ApplicationError::BackupFailed | ApplicationError::BackupVerificationFailed => {
+                "The backup could not be verified. Your local data was not changed.".to_owned()
+            }
+            ApplicationError::InvalidStoredData(_)
+            | ApplicationError::Database(_)
+            | ApplicationError::Io(_) => {
+                "Local storage is unavailable. Please try again.".to_owned()
+            }
+            _ => error.to_string(),
+        };
         Self {
             kind: error.kind(),
-            message: error.to_string(),
+            message,
             details: Box::new(details),
         }
     }
@@ -131,6 +149,40 @@ fn restore_job(
 ) -> Result<Job, CommandError> {
     service
         .restore_job(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+async fn create_verified_backup(
+    app: AppHandle,
+    service: State<'_, ApplicationService>,
+) -> Result<Option<BackupResult>, CommandError> {
+    let suggested_name = format!(
+        "ContractorProject-backup-{}.sqlite3",
+        chrono::Utc::now().format("%Y-%m-%d")
+    );
+    let Some(destination) = app
+        .dialog()
+        .file()
+        .set_file_name(&suggested_name)
+        .add_filter("SQLite backup", &["sqlite3"])
+        .blocking_save_file()
+    else {
+        return Ok(None);
+    };
+    let destination = destination
+        .into_path()
+        .map_err(|_| ApplicationError::InvalidInput {
+            field: "destination",
+            message: "Choose a local filesystem destination.".into(),
+        })
+        .map_err(CommandError::from)?;
+
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: destination.to_string_lossy().into_owned(),
+        })
+        .map(Some)
         .map_err(Into::into)
 }
 
@@ -231,6 +283,7 @@ fn tauri_command_context() -> CommandContext {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_data = app.path().app_data_dir()?;
             let service = ApplicationService::open(app_data.join("contractorproject.sqlite3"))?;
@@ -242,6 +295,7 @@ pub fn run() {
             list_jobs,
             archive_job,
             restore_job,
+            create_verified_backup,
             create_task,
             list_tasks,
             get_schedule,

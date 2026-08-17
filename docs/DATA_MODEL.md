@@ -135,6 +135,23 @@ Archived jobs are immutable through normal task, hierarchy, scheduling-input,
 and dependency commands. Their child rows, audit history, and derived schedule
 inputs remain untouched, so restore reconstructs the same schedule projection.
 
+### Verified local backups
+
+A local backup is a consistent whole-database SQLite snapshot made through the
+SQLite online-backup API while the application remains open. The destination
+must not already exist; the application writes to a unique same-directory
+incomplete file, verifies it, and publishes it with an atomic no-clobber
+operation. It never overwrites a selected file. The live database is not
+modified and backup creation is not a domain command, so it has no
+`command_log` row.
+
+Before reporting success, the completed snapshot is opened read-only without
+running migrations. Verification requires `integrity_check` to return exactly
+`ok`, no `foreign_key_check` rows, schema migration version 4, the required
+canonical tables, and bounded count reads from the job, task, dependency, and
+audit tables. A failed backup removes only the newly reserved incomplete
+destination; it never changes the live database or an existing file.
+
 ## Archive contract
 
 The portable job archive is a versioned ZIP containing:

@@ -82,6 +82,21 @@ pub struct RestoreJobRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateBackupRequest {
+    pub destination: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupResult {
+    pub destination: String,
+    pub created_at_utc: String,
+    pub byte_size: u64,
+    pub verified: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
     pub job_id: String,
     pub parent_task_id: Option<String>,
@@ -198,6 +213,16 @@ impl ApplicationService {
 
     pub fn list_jobs_by_status(&self, status: JobStatus) -> Result<Vec<Job>, ApplicationError> {
         self.store.list_jobs_by_status(status)
+    }
+
+    /// Creates and verifies a consistent online snapshot of the local database.
+    /// This is intentionally a storage operation, not an audited domain command.
+    pub fn create_verified_backup(
+        &self,
+        request: CreateBackupRequest,
+    ) -> Result<BackupResult, ApplicationError> {
+        let destination = required_text("destination", request.destination, 1_024)?;
+        self.store.create_verified_backup(&destination)
     }
 
     pub fn archive_job(

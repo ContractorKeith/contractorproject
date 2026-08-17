@@ -4,6 +4,7 @@ import type {
   CreateJobRequest,
   CreateTaskRequest,
   Job,
+  BackupResult,
   JobStatus,
   JobStatusRequest,
   ReorderTaskRequest,
@@ -22,6 +23,7 @@ export interface JobClient {
   createJob(request: CreateJobRequest): Promise<Job>;
   archiveJob?(request: JobStatusRequest): Promise<Job>;
   restoreJob?(request: JobStatusRequest): Promise<Job>;
+  createVerifiedBackup?(): Promise<BackupResult | null>;
   listTasks(jobId: string): Promise<TaskHierarchy>;
   getSchedule?(jobId: string): Promise<GanttReadModel>;
   createTask(request: CreateTaskRequest): Promise<TaskHierarchy>;
@@ -41,6 +43,7 @@ export const tauriJobClient: JobClient = {
   createJob: (request) => invoke<Job>("create_job", { request }),
   archiveJob: (request) => invoke<Job>("archive_job", { request }),
   restoreJob: (request) => invoke<Job>("restore_job", { request }),
+  createVerifiedBackup: () => invoke<BackupResult | null>("create_verified_backup"),
   listTasks: (jobId) => invoke<TaskHierarchy>("list_tasks", { jobId }),
   getSchedule: (jobId) => invoke<GanttReadModel>("get_schedule", { jobId }),
   async createTask(request) {

@@ -1,6 +1,6 @@
 # Local recovery milestone
 
-Status: in progress — archive/restore slice implemented
+Status: in progress — archive/restore and verified online backup implemented
 Updated: 2026-08-16
 
 This milestone follows the persisted scheduled-job tracer. It proves local
@@ -54,6 +54,10 @@ Acceptance:
 The recommended UI suggests a dated filename and lets the user choose the
 destination. It does not schedule or prune backups. Backups contain plaintext
 job data; never log their contents.
+
+The desktop command owns the native dialog in Rust so the frontend receives no
+filesystem path-selection capability. Cancel is a successful no-op; success
+renders only the returned bounded metadata and verification state.
 
 ## 3. Verify restore into a clean app database
 

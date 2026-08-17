@@ -29,6 +29,15 @@ pub enum ApplicationError {
     #[error("command {command_id} was already applied")]
     DuplicateCommand { command_id: String },
 
+    #[error("backup destination already exists")]
+    BackupDestinationExists,
+
+    #[error("backup could not be created")]
+    BackupFailed,
+
+    #[error("backup verification failed")]
+    BackupVerificationFailed,
+
     #[error("stored job data is invalid: {0}")]
     InvalidStoredData(String),
 
@@ -47,6 +56,9 @@ impl ApplicationError {
             Self::ValidationFailed { .. } => "validation_failed",
             Self::VersionConflict { .. } => "version_conflict",
             Self::DuplicateCommand { .. } => "duplicate_command",
+            Self::BackupDestinationExists => "backup_destination_exists",
+            Self::BackupFailed => "backup_failed",
+            Self::BackupVerificationFailed => "backup_verification_failed",
             Self::InvalidStoredData(_) => "invalid_stored_data",
             Self::Database(_) | Self::Io(_) => "storage_unavailable",
         }

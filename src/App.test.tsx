@@ -731,6 +731,70 @@ describe("job workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("disk unavailable");
     expect(screen.getByRole("heading", { name: job.name })).toBeVisible();
   });
+
+  it("creates a verified backup from the accessible keyboard action and restores focus", async () => {
+    const user = userEvent.setup();
+    const createVerifiedBackup = vi
+      .fn()
+      .mockResolvedValue({
+        destination: "/Users/tester/Documents/ContractorProject-backup-2026-08-16.sqlite3",
+        createdAtUtc: "2026-08-16T18:00:00.000Z",
+        byteSize: 4096,
+        verified: true,
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn(), createVerifiedBackup,
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    const backup = await screen.findByRole("button", { name: "Create verified backup" });
+    backup.focus();
+    await user.keyboard("{Enter}");
+
+    expect(createVerifiedBackup).toHaveBeenCalledOnce();
+    expect(await screen.findByText(/Verified backup created:/)).toHaveTextContent("4,096 bytes");
+    expect(backup).toHaveFocus();
+  });
+
+  it("supports Space, keeps the backup action disabled while pending, and reports cancellation", async () => {
+    const user = userEvent.setup();
+    let resolveBackup: ((value: null) => void) | undefined;
+    const createVerifiedBackup = vi.fn(
+      () => new Promise<null>((resolve) => { resolveBackup = resolve; }),
+    );
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn(), createVerifiedBackup,
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    const backup = await screen.findByRole("button", { name: "Create verified backup" });
+    backup.focus();
+    await user.keyboard(" ");
+
+    expect(createVerifiedBackup).toHaveBeenCalledOnce();
+    expect(backup).toBeDisabled();
+    expect(backup).toHaveTextContent("Creating backup…");
+    resolveBackup?.(null);
+    expect(await screen.findByText("Backup cancelled. Your local data was not changed.")).toBeVisible();
+    expect(backup).toHaveFocus();
+  });
+
+  it("surfaces a bounded verified-backup failure without changing the job list", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]), createJob: vi.fn(),
+      createVerifiedBackup: vi.fn().mockRejectedValue({ message: "backup verification failed" }),
+      listTasks: vi.fn(), createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Create verified backup" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't create verified backup.");
+    expect(screen.getByRole("heading", { name: job.name })).toBeVisible();
+  });
 });
 
 function defaultCalendar(): WorkingCalendar {
