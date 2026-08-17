@@ -1,7 +1,7 @@
 # Deterministic scheduling contract
 
-Status: implemented FS slice
-Updated: 2026-08-14
+Status: implemented FS slice with leaf constraints
+Updated: 2026-08-17
 
 The scheduling core is a pure Rust projection. It accepts canonical task,
 dependency, and weekly-calendar inputs and returns calculated dates, total
@@ -56,7 +56,8 @@ Summary values are derived recursively after leaf scheduling:
 - duration: working minutes across the early-date envelope, not the sum of
   child durations
 - total float: minimum descendant total float
-- critical: true when the derived total float is zero
+- critical: true when the derived total float is zero or negative
+- constraint violated: true when any descendant leaf violates its own finish-no-later-than
 
 ## Finish-to-start graph
 
@@ -81,14 +82,43 @@ LS(t) = LF(t) - duration(t)
 total float(t) = LS(t) - ES(t)
 ```
 
-A task is critical exactly when total float is zero. Negative float requires a
-deadline or other constraint and therefore cannot occur in this unconstrained
-slice.
+A leaf may have optional job-local civil-date `startNoEarlierThan` (SNET) and
+`finishNoLaterThan` (FNLT) constraints. Constraints are supplied separately to
+the pure scheduler until the persistence slice adds canonical task fields.
+Blank, duplicate, missing, and summary-task constraints are rejected; summary
+constraint state is always derived.
 
-Topological ties and equal driving branches use lexical task ID order. The
-result preserves input task order for hierarchy joining, returns a sorted set
-of all critical IDs, and returns one lexically deterministic primary critical
-path. Summary rows are never included in that path.
+SNET normalizes to the start of the first working day on or after its date and
+lower-bounds early start. FNLT normalizes to the finish of the last working day
+on or before its date and upper-bounds late finish without changing early
+dates. Constraints before schedule start remain valid. Signed working offsets
+and explicit civil boundary instants preserve prior-workday finishes without
+aliasing them to the normalized schedule start. The passes are:
+
+```text
+ES(t) = max(0, SNET(t), EF(predecessor) + lag)
+LF(t) = min(project finish, FNLT(t), LS(successor) - lag)
+LS(t) = LF(t) - duration(t)
+TF(t) = LS(t) - ES(t)
+```
+
+Negative float is valid. A leaf is critical when `TF <= 0`; summaries derive
+criticality from their minimum descendant float. A leaf's `constraintViolated`
+is true only when its early finish exceeds its own normalized FNLT, while a
+summary derives that state from descendants. Results provide lexically sorted
+directly violated leaf IDs.
+
+Working-time offsets collapse non-working gaps. Therefore an SNET milestone at
+the next workday start and an FNLT at the prior workday finish can have zero
+working-minute float while still being a civil-time violation. The scheduler
+preserves the SNET milestone instant and reports the violation explicitly; it
+never invents a working-day duration for a zero-duration task.
+
+Topological ties and equal driving branches use lexical task ID order. With no
+negative float, the primary-path rule is unchanged. With negative float, the
+path starts at the directly violated leaf with the smallest float (then lexical
+ID) and walks backward through lexical driving predecessors with equal float.
+Summary rows are never included in that path.
 
 ## Executable examples
 
@@ -101,13 +131,14 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 | Equal B/C branches supplied in different orders | Both branches are critical; primary path remains `A, B, D`. |
 | One-day A on Friday followed by one-day B | B starts Monday; the weekend consumes no working time. |
 | `A ->(960 lag) M -> B` | M occurs Wednesday 16:00 and B starts Thursday 08:00. |
+| `A(960)` with FNLT Monday | A finishes Tuesday, has -480 float, and is directly violated. |
+| Weekend SNET/FNLT | Normalize to the following start/prior finish respectively. |
 | Summary S1 containing critical A/B and S2 containing floating C | S1 rolls up to zero float; S2 rolls up to 480 minutes float. |
 | `A -> B -> C -> A` | Calculation returns `dependency_cycle` and no projection. |
 
 ## Deferred semantics
 
-SS, FF, and SF links; negative lag; manual scheduling; task constraints;
-deadlines and negative float; dated calendar exceptions; data-date/progress
-logic; multiple daily intervals; and resource calendars are outside this
-slice. Unsupported inputs must be rejected by the adapter that introduces
-them, never partially interpreted.
+SS, FF, and SF links; negative lag; manual scheduling; dated calendar
+exceptions; data-date/progress logic; multiple daily intervals; and resource
+calendars are outside this slice. Unsupported inputs must be rejected by the
+adapter that introduces them, never partially interpreted.

@@ -66,6 +66,18 @@ pub struct ScheduleInput {
     pub dependencies: Vec<FinishStartDependency>,
 }
 
+/// Job-local civil-date constraints applied to one leaf task while calculating a schedule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskConstraint {
+    pub task_id: String,
+    pub start_no_earlier_than: Option<NaiveDate>,
+    pub finish_no_later_than: Option<NaiveDate>,
+}
+
+/// A compatibility name that makes the leaf-only constraint scope explicit.
+pub type LeafTaskConstraint = TaskConstraint;
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledTask {
@@ -78,6 +90,7 @@ pub struct ScheduledTask {
     pub late_finish: NaiveDateTime,
     pub total_float_minutes: i64,
     pub critical: bool,
+    pub constraint_violated: bool,
     pub milestone: bool,
     pub summary: bool,
 }
@@ -90,6 +103,7 @@ pub struct ScheduleResult {
     pub tasks: Vec<ScheduledTask>,
     pub critical_task_ids: Vec<String>,
     pub critical_path: Vec<String>,
+    pub directly_violated_leaf_task_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -120,11 +134,24 @@ impl ScheduleError {
 
 /// Calculates one deterministic, unconstrained finish-to-start schedule.
 pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, ScheduleError> {
+    calculate_schedule_with_constraints(input, &[])
+}
+
+/// Calculates one deterministic finish-to-start schedule with optional leaf constraints.
+pub fn calculate_schedule_with_constraints(
+    input: &ScheduleInput,
+    constraints: &[TaskConstraint],
+) -> Result<ScheduleResult, ScheduleError> {
     let calendar = CalendarMath::new(&input.calendar, input.schedule_start)?;
     let hierarchy = TaskHierarchy::new(&input.tasks)?;
     let graph = LeafGraph::new(&hierarchy, &input.dependencies)?;
+    let constraints = ConstraintSet::new(constraints, &hierarchy, &graph, &calendar)?;
     let task_count = graph.tasks.len();
-    let mut early_start = vec![0_i64; task_count];
+    let mut early_start = constraints
+        .start_no_earlier_than
+        .iter()
+        .map(|&offset| offset.max(0))
+        .collect::<Vec<_>>();
     let mut early_finish = vec![0_i64; task_count];
 
     for &task_index in &graph.topological_order {
@@ -143,6 +170,8 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
     let mut late_finish = vec![schedule_finish_offset; task_count];
     let mut late_start = vec![0_i64; task_count];
     for &task_index in graph.topological_order.iter().rev() {
+        late_finish[task_index] =
+            late_finish[task_index].min(constraints.finish_no_later_than[task_index]);
         if !graph.successors[task_index].is_empty() {
             let mut earliest_successor_start = i64::MAX;
             for &(successor, lag) in &graph.successors[task_index] {
@@ -152,7 +181,7 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
                         .ok_or(ScheduleError::ScheduleOutOfRange)?,
                 );
             }
-            late_finish[task_index] = earliest_successor_start;
+            late_finish[task_index] = late_finish[task_index].min(earliest_successor_start);
         }
         late_start[task_index] = late_finish[task_index]
             .checked_sub(graph.durations[task_index])
@@ -167,11 +196,33 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
                 .ok_or(ScheduleError::ScheduleOutOfRange)
         })
         .collect::<Result<_, _>>()?;
+    let mut directly_violated = Vec::new();
+    for index in 0..task_count {
+        let Some(deadline_date) = constraints.normalized_finish_dates[index] else {
+            continue;
+        };
+        let milestone = graph.durations[index] == 0;
+        let constrained_milestone_start = milestone
+            && constraints.normalized_start_dates[index].is_some()
+            && early_start[index] == constraints.start_no_earlier_than[index].max(0);
+        let actual_finish = if constrained_milestone_start {
+            calendar.working_day_start(
+                constraints.normalized_start_dates[index]
+                    .expect("constrained milestone start date"),
+            )?
+        } else {
+            calendar.task_finish_instant(early_finish[index], milestone)?
+        };
+        if actual_finish > calendar.working_day_finish(deadline_date)? {
+            directly_violated.push(index);
+        }
+    }
     let critical_path_indices = graph.critical_path(
         &early_start,
         &early_finish,
         &total_float,
         schedule_finish_offset,
+        &directly_violated,
     );
     let critical_path = critical_path_indices
         .iter()
@@ -187,27 +238,43 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
             late_finish: late_finish[index],
             total_float_minutes: total_float[index],
             duration_minutes: graph.durations[index],
+            constraint_violated: directly_violated.contains(&index),
         });
     }
     for index in 0..input.tasks.len() {
         derive_summary(index, &hierarchy, &mut offsets)?;
     }
 
+    let mut instants = vec![None; input.tasks.len()];
+    for index in 0..input.tasks.len() {
+        derive_task_instants(
+            index,
+            &hierarchy,
+            &graph,
+            &constraints,
+            &calendar,
+            &offsets,
+            &mut instants,
+        )?;
+    }
+
     let mut tasks = Vec::with_capacity(input.tasks.len());
     for (index, task) in input.tasks.iter().enumerate() {
         let offset = offsets[index].as_ref().expect("validated task calculation");
+        let task_instants = instants[index].as_ref().expect("validated task instants");
         let summary = !hierarchy.children[index].is_empty();
         let zero_span = offset.duration_minutes == 0;
         tasks.push(ScheduledTask {
             id: task.id.clone(),
             parent_task_id: task.parent_task_id.clone(),
             duration_minutes: offset.duration_minutes,
-            early_start: calendar.task_start_instant(offset.early_start, zero_span)?,
-            early_finish: calendar.event_instant(offset.early_finish)?,
-            late_start: calendar.task_start_instant(offset.late_start, zero_span)?,
-            late_finish: calendar.event_instant(offset.late_finish)?,
+            early_start: task_instants.early_start,
+            early_finish: task_instants.early_finish,
+            late_start: task_instants.late_start,
+            late_finish: task_instants.late_finish,
             total_float_minutes: offset.total_float_minutes,
-            critical: offset.total_float_minutes == 0,
+            critical: offset.total_float_minutes <= 0,
+            constraint_violated: offset.constraint_violated,
             milestone: !summary && zero_span,
             summary,
         });
@@ -232,6 +299,14 @@ pub fn calculate_schedule(input: &ScheduleInput) -> Result<ScheduleResult, Sched
             ids
         },
         critical_path,
+        directly_violated_leaf_task_ids: {
+            let mut ids = directly_violated
+                .iter()
+                .map(|&index| graph.tasks[index].id.clone())
+                .collect::<Vec<_>>();
+            ids.sort();
+            ids
+        },
         tasks,
     })
 }
@@ -244,6 +319,15 @@ struct OffsetTask {
     late_finish: i64,
     total_float_minutes: i64,
     duration_minutes: i64,
+    constraint_violated: bool,
+}
+
+#[derive(Clone)]
+struct TaskInstants {
+    early_start: NaiveDateTime,
+    early_finish: NaiveDateTime,
+    late_start: NaiveDateTime,
+    late_finish: NaiveDateTime,
 }
 
 struct TaskHierarchy<'a> {
@@ -420,9 +504,198 @@ fn derive_summary(
         duration_minutes: early_finish
             .checked_sub(early_start)
             .ok_or(ScheduleError::ScheduleOutOfRange)?,
+        constraint_violated: calculated_children
+            .iter()
+            .any(|task| task.constraint_violated),
     };
     offsets[index] = Some(calculated.clone());
     Ok(calculated)
+}
+
+fn derive_task_instants(
+    index: usize,
+    hierarchy: &TaskHierarchy<'_>,
+    graph: &LeafGraph<'_>,
+    constraints: &ConstraintSet,
+    calendar: &CalendarMath,
+    offsets: &[Option<OffsetTask>],
+    instants: &mut [Option<TaskInstants>],
+) -> Result<TaskInstants, ScheduleError> {
+    if let Some(calculated) = &instants[index] {
+        return Ok(calculated.clone());
+    }
+    let offset = offsets[index].as_ref().expect("validated task calculation");
+    let calculated = if hierarchy.children[index].is_empty() {
+        let leaf_index = graph
+            .original_indices
+            .iter()
+            .position(|&original_index| original_index == index)
+            .expect("validated leaf index");
+        let milestone = offset.duration_minutes == 0;
+        let constrained_milestone_start = milestone
+            && constraints.normalized_start_dates[leaf_index].is_some()
+            && offset.early_start == constraints.start_no_earlier_than[leaf_index].max(0);
+        let (early_start, early_finish) = if constrained_milestone_start {
+            let instant = calendar.working_day_start(
+                constraints.normalized_start_dates[leaf_index]
+                    .expect("constrained milestone start date"),
+            )?;
+            (instant, instant)
+        } else {
+            (
+                calendar.task_start_instant(offset.early_start, milestone)?,
+                calendar.task_finish_instant(offset.early_finish, milestone)?,
+            )
+        };
+        let constrained_milestone_finish = milestone
+            && constraints.normalized_finish_dates[leaf_index].is_some()
+            && offset.late_finish == constraints.finish_no_later_than[leaf_index];
+        let (late_start, late_finish) = if constrained_milestone_finish {
+            let instant = calendar.working_day_finish(
+                constraints.normalized_finish_dates[leaf_index]
+                    .expect("constrained milestone finish date"),
+            )?;
+            (instant, instant)
+        } else {
+            (
+                calendar.task_start_instant(offset.late_start, milestone)?,
+                calendar.task_finish_instant(offset.late_finish, milestone)?,
+            )
+        };
+        TaskInstants {
+            early_start,
+            early_finish,
+            late_start,
+            late_finish,
+        }
+    } else {
+        let calculated_children = hierarchy.children[index]
+            .iter()
+            .map(|&child| {
+                derive_task_instants(
+                    child,
+                    hierarchy,
+                    graph,
+                    constraints,
+                    calendar,
+                    offsets,
+                    instants,
+                )
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        TaskInstants {
+            early_start: calculated_children
+                .iter()
+                .map(|task| task.early_start)
+                .min()
+                .expect("summary has children"),
+            early_finish: calculated_children
+                .iter()
+                .map(|task| task.early_finish)
+                .max()
+                .expect("summary has children"),
+            late_start: calculated_children
+                .iter()
+                .map(|task| task.late_start)
+                .min()
+                .expect("summary has children"),
+            late_finish: calculated_children
+                .iter()
+                .map(|task| task.late_finish)
+                .max()
+                .expect("summary has children"),
+        }
+    };
+    instants[index] = Some(calculated.clone());
+    Ok(calculated)
+}
+
+struct ConstraintSet {
+    start_no_earlier_than: Vec<i64>,
+    finish_no_later_than: Vec<i64>,
+    normalized_start_dates: Vec<Option<NaiveDate>>,
+    normalized_finish_dates: Vec<Option<NaiveDate>>,
+}
+
+impl ConstraintSet {
+    fn new(
+        constraints: &[TaskConstraint],
+        hierarchy: &TaskHierarchy<'_>,
+        graph: &LeafGraph<'_>,
+        calendar: &CalendarMath,
+    ) -> Result<Self, ScheduleError> {
+        let mut leaf_indices = HashMap::new();
+        for (index, task) in graph.tasks.iter().enumerate() {
+            leaf_indices.insert(task.id.as_str(), index);
+        }
+        let mut start_no_earlier_than = vec![0; graph.tasks.len()];
+        let mut finish_no_later_than = vec![i64::MAX; graph.tasks.len()];
+        let mut normalized_start_dates = vec![None; graph.tasks.len()];
+        let mut normalized_finish_dates = vec![None; graph.tasks.len()];
+        let mut seen = HashSet::new();
+        for constraint in constraints {
+            if constraint.task_id.trim().is_empty() {
+                return Err(invalid_task(
+                    "task_constraint_id_required",
+                    "task constraints require a task ID",
+                ));
+            }
+            if !seen.insert(constraint.task_id.as_str()) {
+                return Err(invalid_task(
+                    "task_constraint_duplicate",
+                    format!("task {} has more than one constraint", constraint.task_id),
+                ));
+            }
+            let original_index = hierarchy
+                .task_indices
+                .get(constraint.task_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    invalid_task(
+                        "task_constraint_task_missing",
+                        format!("constrained task {} does not exist", constraint.task_id),
+                    )
+                })?;
+            if hierarchy.is_summary(original_index) {
+                return Err(invalid_task(
+                    "task_constraint_summary",
+                    format!(
+                        "summary task {} cannot have a constraint",
+                        constraint.task_id
+                    ),
+                ));
+            }
+            if constraint.start_no_earlier_than.is_none()
+                && constraint.finish_no_later_than.is_none()
+            {
+                return Err(invalid_task(
+                    "task_constraint_empty",
+                    format!("task {} has an empty constraint", constraint.task_id),
+                ));
+            }
+            let index = leaf_indices[constraint.task_id.as_str()];
+            if let Some(date) = constraint.start_no_earlier_than {
+                let normalized = calendar
+                    .working_date_on_or_after(date)?
+                    .max(calendar.first_working_date);
+                start_no_earlier_than[index] =
+                    calendar.start_offset_for_working_date(normalized)?;
+                normalized_start_dates[index] = Some(normalized);
+            }
+            if let Some(date) = constraint.finish_no_later_than {
+                let normalized = calendar.working_date_on_or_before(date)?;
+                finish_no_later_than[index] =
+                    calendar.finish_offset_for_working_date(normalized)?;
+                normalized_finish_dates[index] = Some(normalized);
+            }
+        }
+        Ok(Self {
+            start_no_earlier_than,
+            finish_no_later_than,
+            normalized_start_dates,
+            normalized_finish_dates,
+        })
+    }
 }
 
 struct LeafGraph<'a> {
@@ -537,7 +810,36 @@ impl<'a> LeafGraph<'a> {
         early_finish: &[i64],
         total_float: &[i64],
         schedule_finish: i64,
+        directly_violated: &[usize],
     ) -> Vec<usize> {
+        if directly_violated
+            .iter()
+            .any(|&index| total_float[index] < 0)
+        {
+            let mut current = directly_violated
+                .iter()
+                .copied()
+                .filter(|&index| total_float[index] < 0)
+                .min_by(|&left, &right| {
+                    total_float[left]
+                        .cmp(&total_float[right])
+                        .then_with(|| self.tasks[left].id.cmp(&self.tasks[right].id))
+                })
+                .expect("non-empty directly violated task list");
+            let mut path = vec![current];
+            while let Some(predecessor) =
+                self.predecessors[current].iter().find_map(|&(index, lag)| {
+                    (total_float[index] == total_float[current]
+                        && early_finish[index].checked_add(lag) == Some(early_start[current]))
+                    .then_some(index)
+                })
+            {
+                path.push(predecessor);
+                current = predecessor;
+            }
+            path.reverse();
+            return path;
+        }
         let Some(mut current) = (0..self.tasks.len())
             .filter(|&index| {
                 self.successors[index].is_empty()
@@ -642,9 +944,8 @@ impl CalendarMath {
     }
 
     fn start_instant(&self, offset_minutes: i64) -> Result<NaiveDateTime, ScheduleError> {
-        debug_assert!(offset_minutes >= 0);
-        let working_days = offset_minutes / self.workday_duration_minutes;
-        let minute_in_day = offset_minutes % self.workday_duration_minutes;
+        let working_days = offset_minutes.div_euclid(self.workday_duration_minutes);
+        let minute_in_day = offset_minutes.rem_euclid(self.workday_duration_minutes);
         let date = self.working_date_after(working_days)?;
         date.and_hms_opt(0, 0, 0)
             .ok_or(ScheduleError::ScheduleOutOfRange)?
@@ -664,11 +965,29 @@ impl CalendarMath {
         }
     }
 
+    fn task_finish_instant(
+        &self,
+        offset_minutes: i64,
+        milestone: bool,
+    ) -> Result<NaiveDateTime, ScheduleError> {
+        if milestone || offset_minutes != 0 {
+            self.event_instant(offset_minutes)
+        } else {
+            let date = self.working_date_after(-1)?;
+            date.and_hms_opt(0, 0, 0)
+                .ok_or(ScheduleError::ScheduleOutOfRange)?
+                .checked_add_signed(Duration::minutes(
+                    self.workday_start_minute + self.workday_duration_minutes,
+                ))
+                .ok_or(ScheduleError::ScheduleOutOfRange)
+        }
+    }
+
     fn event_instant(&self, offset_minutes: i64) -> Result<NaiveDateTime, ScheduleError> {
         if offset_minutes == 0 || offset_minutes % self.workday_duration_minutes != 0 {
             return self.start_instant(offset_minutes);
         }
-        let prior_working_day = offset_minutes / self.workday_duration_minutes - 1;
+        let prior_working_day = offset_minutes.div_euclid(self.workday_duration_minutes) - 1;
         let date = self.working_date_after(prior_working_day)?;
         date.and_hms_opt(0, 0, 0)
             .ok_or(ScheduleError::ScheduleOutOfRange)?
@@ -681,7 +1000,7 @@ impl CalendarMath {
     fn working_date_after(&self, working_days: i64) -> Result<NaiveDate, ScheduleError> {
         let days_per_week = i64::try_from(self.working_weekdays.len())
             .map_err(|_| ScheduleError::ScheduleOutOfRange)?;
-        let full_weeks = working_days / days_per_week;
+        let full_weeks = working_days.div_euclid(days_per_week);
         let calendar_days = full_weeks
             .checked_mul(7)
             .ok_or(ScheduleError::ScheduleOutOfRange)?;
@@ -691,14 +1010,87 @@ impl CalendarMath {
             .first_working_date
             .checked_add_signed(calendar_delta)
             .ok_or(ScheduleError::ScheduleOutOfRange)?;
-        let mut remaining = working_days % days_per_week;
-        while remaining > 0 {
-            date = date.succ_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
+        let rank = working_days.rem_euclid(days_per_week);
+        let mut seen = 0;
+        loop {
             if self.working_weekdays.contains(&date.weekday()) {
-                remaining -= 1;
+                if seen == rank {
+                    return Ok(date);
+                }
+                seen += 1;
             }
+            date = date.succ_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
         }
-        Ok(date)
+    }
+
+    fn working_date_on_or_after(&self, date: NaiveDate) -> Result<NaiveDate, ScheduleError> {
+        next_working_date(date, &self.working_weekdays)
+    }
+
+    fn start_offset_for_working_date(&self, date: NaiveDate) -> Result<i64, ScheduleError> {
+        self.working_offset_for_date(date)?
+            .checked_mul(self.workday_duration_minutes)
+            .ok_or(ScheduleError::ScheduleOutOfRange)
+    }
+
+    fn working_date_on_or_before(&self, date: NaiveDate) -> Result<NaiveDate, ScheduleError> {
+        previous_working_date(date, &self.working_weekdays)
+    }
+
+    fn working_day_start(&self, date: NaiveDate) -> Result<NaiveDateTime, ScheduleError> {
+        date.and_hms_opt(0, 0, 0)
+            .ok_or(ScheduleError::ScheduleOutOfRange)?
+            .checked_add_signed(Duration::minutes(self.workday_start_minute))
+            .ok_or(ScheduleError::ScheduleOutOfRange)
+    }
+
+    fn working_day_finish(&self, date: NaiveDate) -> Result<NaiveDateTime, ScheduleError> {
+        date.and_hms_opt(0, 0, 0)
+            .ok_or(ScheduleError::ScheduleOutOfRange)?
+            .checked_add_signed(Duration::minutes(
+                self.workday_start_minute + self.workday_duration_minutes,
+            ))
+            .ok_or(ScheduleError::ScheduleOutOfRange)
+    }
+
+    fn finish_offset_for_working_date(&self, date: NaiveDate) -> Result<i64, ScheduleError> {
+        self.working_offset_for_date(date)?
+            .checked_add(1)
+            .and_then(|days| days.checked_mul(self.workday_duration_minutes))
+            .ok_or(ScheduleError::ScheduleOutOfRange)
+    }
+
+    fn working_offset_for_date(&self, date: NaiveDate) -> Result<i64, ScheduleError> {
+        let first_week_start = self
+            .first_working_date
+            .checked_sub_signed(Duration::days(i64::from(
+                self.first_working_date.weekday().num_days_from_monday(),
+            )))
+            .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        let date_week_start = date
+            .checked_sub_signed(Duration::days(i64::from(
+                date.weekday().num_days_from_monday(),
+            )))
+            .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        let weeks = date_week_start
+            .signed_duration_since(first_week_start)
+            .num_days()
+            .checked_div(7)
+            .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        let weekday_rank = (0..date.weekday().num_days_from_monday())
+            .filter(|day| self.working_weekdays.contains(&weekday_from_monday(*day)))
+            .count();
+        let first_rank = (0..self.first_working_date.weekday().num_days_from_monday())
+            .filter(|day| self.working_weekdays.contains(&weekday_from_monday(*day)))
+            .count();
+        weeks
+            .checked_mul(
+                i64::try_from(self.working_weekdays.len())
+                    .map_err(|_| ScheduleError::ScheduleOutOfRange)?,
+            )
+            .and_then(|offset| offset.checked_add(i64::try_from(weekday_rank).ok()?))
+            .and_then(|offset| offset.checked_sub(i64::try_from(first_rank).ok()?))
+            .ok_or(ScheduleError::ScheduleOutOfRange)
     }
 }
 
@@ -710,6 +1102,29 @@ fn next_working_date(
         date = date.succ_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
     }
     Ok(date)
+}
+
+fn previous_working_date(
+    mut date: NaiveDate,
+    working_weekdays: &HashSet<Weekday>,
+) -> Result<NaiveDate, ScheduleError> {
+    while !working_weekdays.contains(&date.weekday()) {
+        date = date.pred_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
+    }
+    Ok(date)
+}
+
+fn weekday_from_monday(day: u32) -> Weekday {
+    match day {
+        0 => Weekday::Mon,
+        1 => Weekday::Tue,
+        2 => Weekday::Wed,
+        3 => Weekday::Thu,
+        4 => Weekday::Fri,
+        5 => Weekday::Sat,
+        6 => Weekday::Sun,
+        _ => unreachable!("weekday index is bounded by chrono"),
+    }
 }
 
 fn invalid_calendar(code: &'static str, message: impl Into<String>) -> ScheduleError {
