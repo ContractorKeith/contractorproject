@@ -10,7 +10,8 @@ use application::{
     AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, BackupResult,
     CommandActor, CommandContext, CreateBackupRequest, CreateJobRequest, CreateTaskRequest, Job,
     JobStatus, RemoveDependencyRequest, ReorderTaskRequest, RestoreJobRequest, TaskHierarchy,
-    TaskMutation, UpdateScheduleRequest, UpdateTaskDurationRequest, UpdateTaskRequest,
+    TaskMutation, UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
+    UpdateTaskRequest,
 };
 use gantt::GanttReadModel;
 use serde::Serialize;
@@ -259,6 +260,16 @@ fn update_task_duration(
 }
 
 #[tauri::command]
+fn update_task_constraint(
+    service: State<'_, ApplicationService>,
+    request: UpdateTaskConstraintRequest,
+) -> Result<TaskMutation, CommandError> {
+    service
+        .update_task_constraint(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 fn add_dependency(
     service: State<'_, ApplicationService>,
     request: AddDependencyRequest,
@@ -309,6 +320,7 @@ pub fn run() {
             reorder_task,
             update_schedule,
             update_task_duration,
+            update_task_constraint,
             add_dependency,
             remove_dependency
         ])
@@ -320,7 +332,7 @@ pub fn run() {
 mod tests {
     use serde_json::json;
 
-    use super::{ApplicationError, CommandError};
+    use super::{ApplicationError, CommandError, UpdateTaskConstraintRequest};
 
     #[test]
     fn validation_command_error_includes_code_and_field_path() {
@@ -339,5 +351,17 @@ mod tests {
                 "field": "newParentTaskId"
             })
         );
+    }
+
+    #[test]
+    fn unknown_task_constraint_kind_is_rejected_at_the_command_boundary() {
+        let request = serde_json::from_value::<UpdateTaskConstraintRequest>(json!({
+            "taskId": "task-1",
+            "kind": "unsupported_constraint",
+            "value": "2026-08-20",
+            "expectedVersion": 1,
+            "expectedJobVersion": 1
+        }));
+        assert!(request.is_err());
     }
 }

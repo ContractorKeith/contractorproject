@@ -42,7 +42,8 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 - `kind` (`task`, `milestone`)
 - `scheduling_mode` (`auto`, `manual`)
 - `duration_minutes`
-- optional start/finish constraints
+- `start_no_earlier_than` and `finish_no_later_than`, independently nullable
+  ISO date-only inputs for leaf tasks
 - `percent_complete`
 - calculated start, finish, total float, and critical flag as a replaceable projection
 - `created_at`, `updated_at`, `version`
@@ -52,6 +53,13 @@ Summary tasks are ordinary tasks with children. Their calculated dates, duration
 Persisted input rules: leaf duration is either zero (milestone) or positive
 (normal work); `NULL` is used by summaries and permitted while schedule setup
 is incomplete. Finish-to-start dependency endpoints must be scheduled leaves.
+Summary tasks cannot carry constraints. Constraint edits validate the complete
+proposed schedule before commit; failed validation leaves canonical rows,
+versions, and `command_log` unchanged.
+
+Migration v5 adds the two nullable constraint columns. Existing null values
+retain their unconstrained meaning. Verified-backup preflight accepts exact v4
+or v5 snapshots without migration; new databases and verified backups use v5.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in

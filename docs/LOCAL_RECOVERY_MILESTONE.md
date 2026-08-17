@@ -7,6 +7,10 @@ This milestone follows the persisted scheduled-job tracer. It proves local
 recovery in three sequential slices without starting baselines or the later
 portable job archive/import format.
 
+Compatibility note: constrained scheduling later adds v5 nullable task
+constraint fields. Read-only recovery preflight accepts exact v4 and v5
+backups without migration; only an owned restored copy may migrate before use.
+
 ## 1. Recoverably archive and restore a local job
 
 Depends on issue #21.

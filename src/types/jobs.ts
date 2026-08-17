@@ -42,6 +42,8 @@ export interface Task {
   updatedAt: string;
   version: number;
   durationMinutes?: number | null;
+  startNoEarlierThan?: string | null;
+  finishNoLaterThan?: string | null;
 }
 
 export interface TaskHierarchy {
@@ -79,5 +81,13 @@ export interface TaskMutation {
 }
 export interface UpdateScheduleRequest { jobId: string; scheduleStart: string | null; calendar: WorkingCalendar; expectedJobVersion: number; }
 export interface UpdateTaskDurationRequest { taskId: string; durationMinutes: number | null; expectedVersion: number; expectedJobVersion: number; }
+export type TaskConstraintKind = "start_no_earlier_than" | "finish_no_later_than";
+export interface UpdateTaskConstraintRequest {
+  taskId: string;
+  kind: TaskConstraintKind;
+  value: string | null;
+  expectedVersion: number;
+  expectedJobVersion: number;
+}
 export interface AddDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; lagMinutes: number; expectedJobVersion: number; }
 export interface RemoveDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; expectedJobVersion: number; }

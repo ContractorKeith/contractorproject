@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { JobClient } from "./api/jobs";
-import type { WorkingCalendar } from "./types/jobs";
+import type { TaskMutation, UpdateTaskConstraintRequest, WorkingCalendar } from "./types/jobs";
 
 describe("job workspace", () => {
   beforeEach(() => {
@@ -458,6 +458,152 @@ describe("job workspace", () => {
       name: "My second draft",
       expectedVersion: 1,
     });
+  });
+
+  it("sets, replaces, and clears each leaf constraint through the typed client without erasing the other", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const summary = fixtureTask(job, "summary", null, "Site work", 0, 1);
+    const leaf = fixtureTask(job, "leaf", summary.id, "Excavate", 0, 1);
+    const initial = { jobId: job.id, jobVersion: 1, tasks: [summary, leaf] };
+    const withStart = {
+      jobId: job.id,
+      jobVersion: 2,
+      tasks: [summary, { ...leaf, version: 2, startNoEarlierThan: "2026-09-01" }],
+    };
+    const withBoth = {
+      jobId: job.id,
+      jobVersion: 3,
+      tasks: [summary, { ...leaf, version: 3, startNoEarlierThan: "2026-09-01", finishNoLaterThan: "2026-09-12" }],
+    };
+    const replacedStart = {
+      jobId: job.id,
+      jobVersion: 4,
+      tasks: [summary, { ...leaf, version: 4, startNoEarlierThan: "2026-09-03", finishNoLaterThan: "2026-09-12" }],
+    };
+    const clearedStart = {
+      jobId: job.id,
+      jobVersion: 5,
+      tasks: [summary, { ...leaf, version: 5, startNoEarlierThan: null, finishNoLaterThan: "2026-09-12" }],
+    };
+    let currentJob = job;
+    const updateTaskConstraint = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 2 };
+        return Promise.resolve({ task: withStart.tasks[1], jobVersion: 2 });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 3 };
+        return Promise.resolve({ task: withBoth.tasks[1], jobVersion: 3 });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 4 };
+        return Promise.resolve({ task: replacedStart.tasks[1], jobVersion: 4 });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 5 };
+        return Promise.resolve({ task: clearedStart.tasks[1], jobVersion: 5 });
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi.fn()
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(withStart)
+        .mockResolvedValueOnce(withBoth)
+        .mockResolvedValueOnce(replacedStart)
+        .mockResolvedValueOnce(clearedStart),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(), updateTaskConstraint,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    expect(screen.queryByLabelText("Start no earlier than for Site work")).not.toBeInTheDocument();
+
+    const start = screen.getByLabelText("Start no earlier than for Excavate");
+    await user.type(start, "2026-09-01");
+    await user.click(screen.getByRole("button", { name: "Save start constraint" }));
+    await waitFor(() => expect(updateTaskConstraint).toHaveBeenLastCalledWith({
+      taskId: leaf.id, kind: "start_no_earlier_than", value: "2026-09-01", expectedVersion: 1, expectedJobVersion: 1,
+    }));
+
+    const finish = screen.getByLabelText("Finish no later than for Excavate");
+    await user.type(finish, "2026-09-12");
+    await user.click(screen.getByRole("button", { name: "Save finish constraint" }));
+    await waitFor(() => expect(updateTaskConstraint).toHaveBeenLastCalledWith({
+      taskId: leaf.id, kind: "finish_no_later_than", value: "2026-09-12", expectedVersion: 2, expectedJobVersion: 2,
+    }));
+
+    await user.clear(start);
+    await user.type(start, "2026-09-03");
+    await user.click(screen.getByRole("button", { name: "Save start constraint" }));
+    await waitFor(() => expect(updateTaskConstraint).toHaveBeenLastCalledWith({
+      taskId: leaf.id, kind: "start_no_earlier_than", value: "2026-09-03", expectedVersion: 3, expectedJobVersion: 3,
+    }));
+    expect(finish).toHaveValue("2026-09-12");
+
+    await user.click(screen.getByRole("button", { name: "Clear start constraint" }));
+    await waitFor(() => expect(updateTaskConstraint).toHaveBeenLastCalledWith({
+      taskId: leaf.id, kind: "start_no_earlier_than", value: null, expectedVersion: 4, expectedJobVersion: 4,
+    }));
+    expect(finish).toHaveValue("2026-09-12");
+  });
+
+  it("keeps a stale constraint draft visible until the user explicitly refreshes", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const task = fixtureTask(job, "leaf", null, "Excavate", 0, 1);
+    const initial = { jobId: job.id, jobVersion: 1, tasks: [task] };
+    const refreshedJob = { ...job, version: 2 };
+    const refreshed = { jobId: job.id, jobVersion: 2, tasks: [{ ...task, version: 2, finishNoLaterThan: "2026-09-09" }] };
+    let jobLoads = 0;
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([jobLoads++ >= 2 ? refreshedJob : job])),
+      createJob: vi.fn(), listTasks: vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(refreshed),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateTaskConstraint: vi.fn().mockRejectedValue({ kind: "version_conflict", message: "stale" }),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    const finish = screen.getByLabelText("Finish no later than for Excavate");
+    await user.type(finish, "2026-09-12");
+    await user.click(screen.getByRole("button", { name: "Save finish constraint" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Tasks changed elsewhere");
+    expect(finish).toHaveValue("2026-09-12");
+
+    await user.click(screen.getByRole("button", { name: "Refresh tasks" }));
+    expect(finish).toHaveValue("2026-09-12");
+    expect(client.listTasks).toHaveBeenCalledTimes(2);
+  });
+
+  it("disables a pending leaf constraint save and surfaces bounded validation errors", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const task = fixtureTask(job, "leaf", null, "Excavate", 0, 1);
+    let rejectSave: ((reason: unknown) => void) | undefined;
+    const updateTaskConstraint = vi.fn(
+      (_request: UpdateTaskConstraintRequest) =>
+        new Promise<TaskMutation>((_resolve, reject) => {
+          rejectSave = reject;
+        }),
+    );
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]), createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [task] }),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(), updateTaskConstraint,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    const start = screen.getByLabelText("Start no earlier than for Excavate");
+    await user.type(start, "2026-09-01");
+    await user.click(screen.getByRole("button", { name: "Save start constraint" }));
+    expect(start).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Save finish constraint" })).toBeDisabled();
+    rejectSave?.({ message: "invalid_constraint_value" });
+    expect(await screen.findByRole("alert")).toHaveTextContent("invalid_constraint_value");
   });
 
   it("edits persisted schedule inputs and keeps the shared job version synchronized", async () => {

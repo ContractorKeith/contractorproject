@@ -26,6 +26,8 @@ pub struct Task {
     pub name: String,
     /// None is an incomplete or summary input; scheduling is validated when requested.
     pub duration_minutes: Option<i64>,
+    pub start_no_earlier_than: Option<String>,
+    pub finish_no_later_than: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub version: i64,
