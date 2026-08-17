@@ -1428,38 +1428,15 @@ fn cleanup_unpublished_restore(staging: &Path, target: &Path) -> Result<(), Appl
 }
 
 fn same_regular_file(staged: &Path, target: &Path) -> bool {
-    let target_metadata = match std::fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
-            metadata
-        }
+    match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
         _ => return false,
-    };
-    let staged_metadata = match std::fs::metadata(staged) {
-        Ok(metadata) if metadata.file_type().is_file() => metadata,
+    }
+    match std::fs::metadata(staged) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
         _ => return false,
-    };
-    same_file_identity(&staged_metadata, &target_metadata)
-}
-
-#[cfg(unix)]
-fn same_file_identity(staged: &std::fs::Metadata, target: &std::fs::Metadata) -> bool {
-    use std::os::unix::fs::MetadataExt;
-
-    staged.dev() == target.dev() && staged.ino() == target.ino()
-}
-
-#[cfg(windows)]
-fn same_file_identity(staged: &std::fs::Metadata, target: &std::fs::Metadata) -> bool {
-    use std::os::windows::fs::MetadataExt;
-
-    staged.volume_serial_number() == target.volume_serial_number()
-        && staged.file_index() == target.file_index()
-        && staged.file_index().is_some()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn same_file_identity(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
-    false
+    }
+    same_file::is_same_file(staged, target).unwrap_or(false)
 }
 
 /// Hard-linking is atomic and no-clobber: an unexpected file inside the
