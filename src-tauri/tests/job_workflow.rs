@@ -2,13 +2,17 @@ use contractorproject_lib::application::{
     AddDependencyRequest, RemoveDependencyRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
 };
 use contractorproject_lib::application::{
-    ApplicationService, ArchiveJobRequest, CommandActor, CommandContext, CreateBackupRequest,
-    CreateJobRequest, CreateTaskRequest, JobStatus, RestoreJobRequest,
+    ApplicationError, ApplicationService, ArchiveJobRequest, CommandActor, CommandContext,
+    CreateBackupRequest, CreateJobRequest, CreateTaskRequest, JobStatus, RestoreJobRequest,
+    VerifyRestoreRequest,
 };
 use contractorproject_lib::application::{ReorderTaskRequest, UpdateTaskRequest};
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Barrier,
+};
 
 static NEXT_COMMAND_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -28,6 +32,28 @@ fn command_log_count(path: &std::path::Path) -> i64 {
         .expect("open audit database")
         .query_row("SELECT COUNT(*) FROM command_log", [], |row| row.get(0))
         .expect("count command log")
+}
+
+fn canonical_snapshot(path: &std::path::Path) -> Vec<Vec<String>> {
+    let connection = Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .expect("open snapshot read-only");
+    [
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version) FROM jobs ORDER BY id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version) FROM tasks ORDER BY id",
+        "SELECT printf('%Q|%Q|%Q|%Q', job_id, predecessor_task_id, successor_task_id, lag_minutes) FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q', command_id, actor, client_name, created_at, summary) FROM command_log ORDER BY command_id",
+    ]
+    .into_iter()
+    .map(|query| {
+        connection
+            .prepare(query)
+            .expect("prepare canonical snapshot")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query canonical snapshot")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("collect canonical snapshot")
+    })
+    .collect()
 }
 
 fn working_calendar() -> WorkingCalendar {
@@ -2750,4 +2776,493 @@ fn online_backup_is_a_complete_snapshot_before_a_concurrent_wal_writer_commits()
     assert_eq!((backup_jobs, backup_audit), (0, 0));
     assert_eq!(service.list_jobs().expect("live job after commit").len(), 1);
     assert_eq!(command_log_count(&database_path), 1);
+}
+
+#[test]
+fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let database_path = temp.path().join("source.sqlite3");
+    let backup_path = temp.path().join("scheduled-job.backup.sqlite3");
+    let target_app_data_dir = temp.path().join("restored-app-data");
+    let service = ApplicationService::open(&database_path).expect("open source service");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Archived schedule".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create scheduled job");
+    let summary = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Summary".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("create summary");
+    let activity = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: Some(summary.task.id.clone()),
+                name: "Activity".into(),
+                expected_job_version: summary.job_version,
+            },
+        )
+        .expect("create activity");
+    let milestone = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Milestone".into(),
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("create milestone");
+    let activity = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: activity.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: activity.task.version,
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("set activity duration");
+    let milestone = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: milestone.task.id.clone(),
+                duration_minutes: Some(0),
+                expected_version: milestone.task.version,
+                expected_job_version: activity.job_version,
+            },
+        )
+        .expect("set milestone duration");
+    let dependency = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: activity.task.id.clone(),
+                successor_task_id: milestone.task.id.clone(),
+                lag_minutes: 30,
+                expected_job_version: milestone.job_version,
+            },
+        )
+        .expect("add dependency");
+    let scheduled = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: dependency.job_version,
+            },
+        )
+        .expect("schedule job");
+    service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job.id.clone(),
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("archive job");
+    let expected_projection = service
+        .get_schedule(&job.id)
+        .expect("build archived schedule at backup point");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Active at backup point".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create active job");
+    let audit_before_backup = command_log_count(&database_path);
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create verified backup");
+    let backup_snapshot = canonical_snapshot(&backup_path);
+
+    // This mutation occurs after backup creation and must not appear in the
+    // restored target.
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Created after backup".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("mutate source after backup");
+    assert_ne!(canonical_snapshot(&database_path), backup_snapshot);
+
+    let result = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            target_app_data_dir: target_app_data_dir.to_string_lossy().into_owned(),
+        })
+        .expect("verify restore into fresh app data");
+    assert_eq!(
+        result,
+        contractorproject_lib::application::RestoreVerificationResult {
+            verified: true,
+            job_count: 2,
+            task_count: 3,
+            dependency_count: 1,
+            command_log_count: audit_before_backup,
+        }
+    );
+    let restored_database_path = target_app_data_dir.join("contractorproject.sqlite3");
+    assert_eq!(canonical_snapshot(&restored_database_path), backup_snapshot);
+    let restored =
+        ApplicationService::open(&restored_database_path).expect("open restored service");
+    assert_eq!(
+        restored.get_schedule(&job.id).expect("restored schedule"),
+        expected_projection
+    );
+    drop(restored);
+    let reopened =
+        ApplicationService::open(&restored_database_path).expect("reopen restored service");
+    assert_eq!(canonical_snapshot(&restored_database_path), backup_snapshot);
+    assert_eq!(
+        reopened.get_schedule(&job.id).expect("reopened schedule"),
+        expected_projection
+    );
+}
+
+#[test]
+fn restore_verification_rejects_invalid_backups_without_activating_or_mutating_targets() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let source_path = temp.path().join("source.sqlite3");
+    let backup_path = temp.path().join("valid.backup.sqlite3");
+    let service = ApplicationService::open(&source_path).expect("open source service");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Source job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create source job");
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create valid backup");
+    let source_before = canonical_snapshot(&source_path);
+
+    for (name, bytes) in [
+        ("corrupt", b"not sqlite".as_slice()),
+        ("truncated", b"SQLite".as_slice()),
+    ] {
+        let input = temp.path().join(format!("{name}.sqlite3"));
+        std::fs::write(&input, bytes).expect("write invalid input");
+        let input_before = std::fs::read(&input).expect("read invalid input");
+        let target = temp.path().join(format!("{name}-target"));
+        let error = service
+            .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+                backup_path: input.to_string_lossy().into_owned(),
+                target_app_data_dir: target.to_string_lossy().into_owned(),
+            })
+            .expect_err("reject invalid backup");
+        assert_eq!(error.kind(), "restore_verification_failed");
+        assert_eq!(error.to_string(), "restore verification failed");
+        assert_eq!(
+            std::fs::read(&input).expect("input unchanged"),
+            input_before
+        );
+        assert!(!target.exists(), "invalid input must not activate a target");
+    }
+
+    let foreign_schema = temp.path().join("foreign-schema.sqlite3");
+    let foreign = Connection::open(&foreign_schema).expect("create foreign schema database");
+    foreign
+        .execute_batch("CREATE TABLE foreign_data (id INTEGER PRIMARY KEY);")
+        .expect("create foreign schema");
+    drop(foreign);
+    let foreign_before = std::fs::read(&foreign_schema).expect("read foreign schema");
+    let foreign_target = temp.path().join("foreign-target");
+    let error = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: foreign_schema.to_string_lossy().into_owned(),
+            target_app_data_dir: foreign_target.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject foreign schema");
+    assert_eq!(error.kind(), "restore_verification_failed");
+    assert_eq!(
+        std::fs::read(&foreign_schema).expect("foreign input unchanged"),
+        foreign_before
+    );
+    assert!(!foreign_target.exists());
+
+    let existing_target = temp.path().join("existing-target");
+    std::fs::create_dir(&existing_target).expect("reserve target directory");
+    std::fs::write(existing_target.join("sentinel"), b"do not replace").expect("write sentinel");
+    let valid_before = std::fs::read(&backup_path).expect("read valid backup");
+    let error = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            target_app_data_dir: existing_target.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject existing target");
+    assert_eq!(error.kind(), "restore_target_exists");
+    assert_eq!(error.to_string(), "restore target already exists");
+    assert_eq!(
+        std::fs::read(existing_target.join("sentinel")).expect("sentinel remains"),
+        b"do not replace"
+    );
+    assert_eq!(
+        std::fs::read(&backup_path).expect("valid backup unchanged"),
+        valid_before
+    );
+    assert_eq!(canonical_snapshot(&source_path), source_before);
+    assert!(
+        std::fs::read_dir(temp.path())
+            .expect("list temporary directory")
+            .all(|entry| !entry
+                .expect("directory entry")
+                .file_name()
+                .to_string_lossy()
+                .contains(".restore-staging")),
+        "failed restores clean only their owned staging directories"
+    );
+}
+
+#[test]
+fn restore_verification_rejects_a_v4_named_lookalike_schema_before_target_reservation() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let source_path = temp.path().join("source.sqlite3");
+    let foreign_path = temp.path().join("lookalike-v4.sqlite3");
+    let target = temp.path().join("lookalike-target");
+    let service = ApplicationService::open(&source_path).expect("open source service");
+    let foreign = Connection::open(&foreign_path).expect("create lookalike database");
+    foreign
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migrations VALUES
+                 (1, '2026-08-16T00:00:00.000Z'),
+                 (2, '2026-08-16T00:00:00.000Z'),
+                 (3, '2026-08-16T00:00:00.000Z'),
+                 (4, '2026-08-16T00:00:00.000Z');
+             CREATE TABLE jobs (id TEXT PRIMARY KEY);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY);
+             CREATE TABLE command_log (command_id TEXT PRIMARY KEY);
+             CREATE TABLE task_dependencies (predecessor_task_id TEXT PRIMARY KEY);",
+        )
+        .expect("create all required lookalike names");
+    drop(foreign);
+    let before = std::fs::read(&foreign_path).expect("read lookalike input");
+
+    let error = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: foreign_path.to_string_lossy().into_owned(),
+            target_app_data_dir: target.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject incompatible named schema");
+    assert_eq!(error.kind(), "restore_verification_failed");
+    assert_eq!(error.to_string(), "restore verification failed");
+    assert_eq!(
+        std::fs::read(&foreign_path).expect("input unchanged"),
+        before
+    );
+    assert!(!target.exists(), "lookalike input never reserves a target");
+}
+
+#[test]
+fn restore_verification_rejects_widened_v4_command_constraints_before_target_reservation() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let source_path = temp.path().join("source.sqlite3");
+    let foreign_path = temp.path().join("widened-v4.sqlite3");
+    let target = temp.path().join("widened-target");
+    let service = ApplicationService::open(&source_path).expect("open source service");
+    let foreign = Connection::open(&foreign_path).expect("create widened schema database");
+    foreign
+        .execute_batch(
+            "CREATE TABLE schema_migrations (
+                 version INTEGER PRIMARY KEY,
+                 applied_at TEXT NOT NULL
+             );
+             INSERT INTO schema_migrations VALUES
+                 (1, '2026-08-16T00:00:00.000Z'),
+                 (2, '2026-08-16T00:00:00.000Z'),
+                 (3, '2026-08-16T00:00:00.000Z'),
+                 (4, '2026-08-16T00:00:00.000Z');
+             CREATE TABLE jobs (
+                 id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+                 timezone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK (version > 0), schedule_start TEXT,
+                 calendar_json TEXT NOT NULL DEFAULT '[]'
+             );
+             CREATE TABLE tasks (
+                 id TEXT PRIMARY KEY, job_id TEXT NOT NULL, parent_task_id TEXT,
+                 sort_key INTEGER NOT NULL CHECK (sort_key >= 0), name TEXT NOT NULL,
+                 created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                 version INTEGER NOT NULL CHECK (version > 0),
+                 duration_minutes INTEGER CHECK (duration_minutes >= 0),
+                 UNIQUE (job_id, id),
+                 FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+                 FOREIGN KEY (job_id, parent_task_id)
+                     REFERENCES tasks(job_id, id) ON DELETE RESTRICT
+             );
+             CREATE INDEX tasks_job_parent_order ON tasks(job_id, parent_task_id, sort_key, id);
+             CREATE UNIQUE INDEX tasks_root_sibling_order
+                 ON tasks(job_id, sort_key) WHERE parent_task_id IS NULL;
+             CREATE UNIQUE INDEX tasks_child_sibling_order
+                 ON tasks(job_id, parent_task_id, sort_key) WHERE parent_task_id IS NOT NULL;
+             CREATE TABLE command_log (
+                 command_id TEXT NOT NULL PRIMARY KEY
+                     CHECK (length(command_id) BETWEEN 1 AND 1280),
+                 actor TEXT NOT NULL CHECK (actor IN ('user', 'agent', 'import', 'evil')),
+                 client_name TEXT NOT NULL CHECK (length(client_name) BETWEEN 1 AND 120),
+                 created_at TEXT NOT NULL,
+                 summary TEXT NOT NULL CHECK (length(summary) <= 240)
+             );
+             CREATE TABLE task_dependencies (
+                 job_id TEXT NOT NULL, predecessor_task_id TEXT NOT NULL,
+                 successor_task_id TEXT NOT NULL,
+                 lag_minutes INTEGER NOT NULL CHECK (lag_minutes >= 0),
+                 PRIMARY KEY (predecessor_task_id, successor_task_id),
+                 FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+                 FOREIGN KEY (job_id, predecessor_task_id)
+                     REFERENCES tasks(job_id, id) ON DELETE RESTRICT,
+                 FOREIGN KEY (job_id, successor_task_id)
+                     REFERENCES tasks(job_id, id) ON DELETE RESTRICT,
+                 CHECK (predecessor_task_id <> successor_task_id)
+             );
+             CREATE INDEX task_dependencies_job_successor ON task_dependencies(job_id, successor_task_id);",
+        )
+        .expect("create widened v4 lookalike");
+    drop(foreign);
+    let before = std::fs::read(&foreign_path).expect("read widened input");
+
+    let error = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: foreign_path.to_string_lossy().into_owned(),
+            target_app_data_dir: target.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject widened command constraints");
+    assert_eq!(error.kind(), "restore_verification_failed");
+    assert_eq!(error.to_string(), "restore verification failed");
+    assert_eq!(
+        std::fs::read(&foreign_path).expect("input unchanged"),
+        before
+    );
+    assert!(!target.exists(), "widened input never reserves a target");
+}
+
+#[test]
+fn restore_verification_has_one_no_clobber_winner_under_target_contention() {
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let source_path = temp.path().join("source.sqlite3");
+    let backup_path = temp.path().join("valid.backup.sqlite3");
+    let target = temp.path().join("contended-target");
+    let service = Arc::new(ApplicationService::open(&source_path).expect("open source service"));
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Source job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create source job");
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create valid backup");
+
+    let barrier = Arc::new(Barrier::new(2));
+    let handles = (0..2)
+        .map(|_| {
+            let service = Arc::clone(&service);
+            let barrier = Arc::clone(&barrier);
+            let backup_path = backup_path.clone();
+            let target = target.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                service.verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+                    backup_path: backup_path.to_string_lossy().into_owned(),
+                    target_app_data_dir: target.to_string_lossy().into_owned(),
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let results = handles
+        .into_iter()
+        .map(|handle| handle.join().expect("restore thread completes"))
+        .collect::<Vec<_>>();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    assert_eq!(
+        results
+            .iter()
+            .filter_map(|result| result.as_ref().err())
+            .map(ApplicationError::kind)
+            .collect::<Vec<_>>(),
+        vec!["restore_target_exists"]
+    );
+    assert!(target.join("contractorproject.sqlite3").is_file());
+}
+
+#[cfg(unix)]
+#[test]
+fn restore_verification_rejects_a_dangling_target_symlink_without_touching_it() {
+    use std::os::unix::fs::symlink;
+
+    let temp = tempfile::tempdir().expect("temporary app data");
+    let source_path = temp.path().join("source.sqlite3");
+    let backup_path = temp.path().join("valid.backup.sqlite3");
+    let target = temp.path().join("dangling-target");
+    let service = ApplicationService::open(&source_path).expect("open source service");
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Source job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("create source job");
+    service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("create valid backup");
+    let backup_before = std::fs::read(&backup_path).expect("read valid backup");
+    symlink(temp.path().join("missing-target"), &target).expect("create dangling symlink");
+
+    let error = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            target_app_data_dir: target.to_string_lossy().into_owned(),
+        })
+        .expect_err("reject dangling target symlink");
+    assert_eq!(error.kind(), "restore_target_exists");
+    assert!(std::fs::symlink_metadata(&target)
+        .expect("symlink remains")
+        .file_type()
+        .is_symlink());
+    assert_eq!(
+        std::fs::read(&backup_path).expect("backup unchanged"),
+        backup_before
+    );
 }

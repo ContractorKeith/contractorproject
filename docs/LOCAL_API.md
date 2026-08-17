@@ -105,6 +105,19 @@ destination is passed to `ApplicationService` for the online SQLite backup and
 read-only verification; the browser client neither chooses a path nor receives
 database contents.
 
+`ApplicationService::verify_restore_into_fresh_app_data()` is intentionally a
+developer-facing service operation, not a desktop command or normal-app UI.
+It accepts a backup path and a required non-existing target app-data directory,
+validates the backup read-only before any target exists, atomically reserves
+the non-existing target without following symlinks, restores through SQLite's
+online-backup API into an owned staging directory, verifies again, publishes
+with a no-clobber operation, retains the staging file as an ownership token
+through post-open verification, and opens the result through
+`ApplicationService`.
+Its bounded result reports only verification plus job, task, dependency, and
+audit-row counts. It never replaces a running database, migrates the selected
+backup, returns database contents, or writes a command-log row.
+
 ## Context and privacy
 
 - Read tools return bounded projections selected by job and requested fields.

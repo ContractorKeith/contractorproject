@@ -1,6 +1,6 @@
 # Local recovery milestone
 
-Status: in progress — archive/restore and verified online backup implemented
+Status: complete — archive/restore, verified online backup, and clean-directory restore verification implemented
 Updated: 2026-08-16
 
 This milestone follows the persisted scheduled-job tracer. It proves local
@@ -76,6 +76,15 @@ Acceptance:
   target or leaking SQL/customer data in errors.
 - Keep in-place replacement of the running app database out of scope. That
   later UX requires restart, rollback-copy, and explicit confirmation design.
+
+Implementation note: this slice is a typed ApplicationService-only developer
+verification operation. It has no normal-app restore control or portable
+import/export UI. The backup is read-only verified before creating an owned
+sibling staging directory, copied with SQLite's online-backup API, reverified,
+published through an atomically reserved non-existing target directory without
+clobbering files or following dangling symlinks, and opened through
+ApplicationService. The staged hard link remains until post-open verification
+confirms the published file identity. Invalid input never activates a target.
 
 ## Expected boundaries
 
