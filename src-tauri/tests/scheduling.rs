@@ -1,7 +1,8 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Weekday};
 use contractorproject_lib::scheduling::{
-    calculate_schedule, CalendarWeekday, FinishStartDependency, ScheduleError, ScheduleInput,
-    ScheduleTask, WorkingCalendar,
+    calculate_schedule, calculate_schedule_with_constraints, CalendarWeekday,
+    FinishStartDependency, ScheduleError, ScheduleInput, ScheduleTask, TaskConstraint,
+    WorkingCalendar,
 };
 
 fn at(date: &str, time: &str) -> NaiveDateTime {
@@ -70,6 +71,301 @@ fn fs(predecessor: &str, successor: &str, lag_minutes: i64) -> FinishStartDepend
         predecessor_task_id: predecessor.into(),
         successor_task_id: successor.into(),
         lag_minutes,
+    }
+}
+
+fn constraint(task_id: &str, snet: Option<&str>, fnlt: Option<&str>) -> TaskConstraint {
+    let date = |value: &str| NaiveDate::parse_from_str(value, "%Y-%m-%d").expect("fixture date");
+    TaskConstraint {
+        task_id: task_id.into(),
+        start_no_earlier_than: snet.map(date),
+        finish_no_later_than: fnlt.map(date),
+    }
+}
+
+#[test]
+fn applies_weekday_and_weekend_snet_without_changing_unconstrained_results() {
+    let input = ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks: vec![task("A", 480), task("B", 480)],
+        dependencies: vec![],
+    };
+    let unconstrained = calculate_schedule(&input).expect("valid schedule");
+    assert_eq!(
+        unconstrained.tasks[0].early_start,
+        at("2026-01-05", "08:00")
+    );
+    let pre_start =
+        calculate_schedule_with_constraints(&input, &[constraint("A", Some("2026-01-02"), None)])
+            .expect("valid pre-start SNET");
+    assert_eq!(pre_start.tasks[0].early_start, at("2026-01-05", "08:00"));
+
+    let result = calculate_schedule_with_constraints(
+        &input,
+        &[
+            constraint("A", Some("2026-01-07"), None),
+            constraint("B", Some("2026-01-10"), None),
+        ],
+    )
+    .expect("valid constrained schedule");
+    assert_eq!(result.tasks[0].early_start, at("2026-01-07", "08:00"));
+    assert_eq!(result.tasks[1].early_start, at("2026-01-12", "08:00"));
+    assert!(result.directly_violated_leaf_task_ids.is_empty());
+}
+
+#[test]
+fn pre_start_snet_milestone_stays_at_the_normalized_project_start() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("M", 0)],
+            dependencies: vec![],
+        },
+        &[constraint("M", Some("2026-01-02"), None)],
+    )
+    .expect("valid constrained milestone");
+    assert_eq!(result.tasks[0].early_start, at("2026-01-05", "08:00"));
+    assert_eq!(result.tasks[0].early_finish, result.tasks[0].early_start);
+}
+
+#[test]
+fn applies_fnlt_and_reports_negative_float_and_direct_violation() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("A", 960)],
+            dependencies: vec![],
+        },
+        &[constraint("A", None, Some("2026-01-05"))],
+    )
+    .expect("valid constrained schedule");
+
+    let a = &result.tasks[0];
+    assert_eq!(a.early_start, at("2026-01-05", "08:00"));
+    assert_eq!(a.early_finish, at("2026-01-06", "16:00"));
+    assert_eq!(a.late_start, at("2026-01-02", "08:00"));
+    assert_eq!(a.total_float_minutes, -480);
+    assert!(a.critical);
+    assert!(a.constraint_violated);
+    assert_eq!(result.directly_violated_leaf_task_ids, vec!["A"]);
+    assert_eq!(result.critical_path, vec!["A"]);
+}
+
+#[test]
+fn normalizes_weekend_fnlt_and_supports_conflicting_leaf_constraints() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("A", 480)],
+            dependencies: vec![],
+        },
+        &[constraint("A", Some("2026-01-12"), Some("2026-01-10"))],
+    )
+    .expect("valid constrained schedule");
+    let a = &result.tasks[0];
+    assert_eq!(a.early_start, at("2026-01-12", "08:00"));
+    assert_eq!(a.late_finish, at("2026-01-09", "16:00"));
+    assert_eq!(a.total_float_minutes, -480);
+    assert!(a.constraint_violated);
+}
+
+#[test]
+fn fnlt_before_schedule_start_preserves_the_prior_working_finish() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("A", 480)],
+            dependencies: vec![],
+        },
+        &[constraint("A", None, Some("2026-01-04"))],
+    )
+    .expect("pre-start FNLT is valid");
+    assert_eq!(result.tasks[0].late_start, at("2026-01-02", "08:00"));
+    assert_eq!(result.tasks[0].late_finish, at("2026-01-02", "16:00"));
+    assert_eq!(result.tasks[0].total_float_minutes, -480);
+    assert!(result.tasks[0].constraint_violated);
+}
+
+#[test]
+fn pre_start_fnlt_milestone_preserves_its_deadline_boundary() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("M", 0)],
+            dependencies: vec![],
+        },
+        &[constraint("M", None, Some("2026-01-04"))],
+    )
+    .expect("pre-start milestone FNLT is valid");
+    let milestone = &result.tasks[0];
+    assert_eq!(milestone.early_start, at("2026-01-05", "08:00"));
+    assert_eq!(milestone.late_start, at("2026-01-02", "16:00"));
+    assert_eq!(milestone.late_finish, milestone.late_start);
+    assert_eq!(milestone.total_float_minutes, 0);
+    assert!(milestone.constraint_violated);
+}
+
+#[test]
+fn nonterminal_fnlt_is_preserved_while_propagating_successor_dates() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("A", 480), task("B", 480)],
+            dependencies: vec![fs("A", "B", 0)],
+        },
+        &[constraint("A", None, Some("2026-01-05"))],
+    )
+    .expect("valid constrained schedule");
+    assert_eq!(result.tasks[0].late_finish, at("2026-01-05", "16:00"));
+    assert_eq!(result.tasks[0].late_start, at("2026-01-05", "08:00"));
+}
+
+#[test]
+fn impossible_milestone_constraint_keeps_late_boundary_dates_equal() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("M", 0)],
+            dependencies: vec![],
+        },
+        &[constraint("M", Some("2026-01-06"), Some("2026-01-05"))],
+    )
+    .expect("valid constrained schedule");
+    let milestone = &result.tasks[0];
+    assert_eq!(milestone.early_start, at("2026-01-06", "08:00"));
+    assert_eq!(milestone.early_finish, milestone.early_start);
+    assert_eq!(milestone.late_start, at("2026-01-05", "16:00"));
+    assert_eq!(milestone.late_start, milestone.late_finish);
+    assert_eq!(milestone.total_float_minutes, 0);
+    assert!(milestone.constraint_violated);
+}
+
+#[test]
+fn zero_float_civil_violation_does_not_replace_the_unconstrained_path_rule() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![task("A", 480), task("M", 0)],
+            dependencies: vec![],
+        },
+        &[constraint("M", Some("2026-01-06"), Some("2026-01-05"))],
+    )
+    .expect("valid constrained schedule");
+    assert!(result.tasks[1].constraint_violated);
+    assert_eq!(result.tasks[1].total_float_minutes, 0);
+    assert_eq!(result.critical_path, vec!["A"]);
+}
+
+#[test]
+fn summary_preserves_a_constrained_milestone_civil_instant() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![summary("S"), child_task("M", "S", 0)],
+            dependencies: vec![],
+        },
+        &[constraint("M", Some("2026-01-06"), None)],
+    )
+    .expect("valid constrained schedule");
+    assert_eq!(result.tasks[0].early_start, at("2026-01-06", "08:00"));
+    assert_eq!(result.tasks[0].early_finish, result.tasks[0].early_start);
+    assert_eq!(result.tasks[1].early_start, result.tasks[0].early_start);
+    assert_eq!(result.tasks[1].early_finish, result.tasks[0].early_finish);
+}
+
+#[test]
+fn constraints_propagate_through_dependencies_milestones_and_summaries() {
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+            calendar: standard_calendar(),
+            tasks: vec![
+                summary("S"),
+                child_task("A", "S", 480),
+                child_task("M", "S", 0),
+                child_task("B", "S", 480),
+            ],
+            dependencies: vec![fs("A", "M", 480), fs("M", "B", 0)],
+        },
+        &[constraint("B", None, Some("2026-01-06"))],
+    )
+    .expect("valid constrained schedule");
+    assert_eq!(result.tasks[1].early_finish, at("2026-01-05", "16:00"));
+    assert_eq!(result.tasks[2].early_finish, at("2026-01-06", "16:00"));
+    assert_eq!(result.tasks[3].early_finish, at("2026-01-07", "16:00"));
+    assert!(result.tasks[0].constraint_violated);
+    assert_eq!(result.directly_violated_leaf_task_ids, vec!["B"]);
+}
+
+#[test]
+fn negative_float_path_uses_lexical_branch_when_input_is_shuffled() {
+    let input = |tasks| ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks,
+        dependencies: vec![fs("A", "B", 0), fs("A", "C", 0)],
+    };
+    let constraints = [
+        constraint("B", None, Some("2026-01-05")),
+        constraint("C", None, Some("2026-01-05")),
+    ];
+    let first = calculate_schedule_with_constraints(
+        &input(vec![task("C", 960), task("A", 480), task("B", 960)]),
+        &constraints,
+    )
+    .expect("schedule");
+    let second = calculate_schedule_with_constraints(
+        &input(vec![task("B", 960), task("C", 960), task("A", 480)]),
+        &constraints,
+    )
+    .expect("schedule");
+    assert_eq!(first.critical_path, vec!["A", "B"]);
+    assert_eq!(second.critical_path, first.critical_path);
+}
+
+#[test]
+fn rejects_invalid_constraint_targets_stably() {
+    let input = ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks: vec![summary("S"), child_task("A", "S", 480)],
+        dependencies: vec![],
+    };
+    for (constraints, code) in [
+        (
+            vec![constraint("", None, None)],
+            "task_constraint_id_required",
+        ),
+        (
+            vec![constraint("missing", None, None)],
+            "task_constraint_task_missing",
+        ),
+        (vec![constraint("S", None, None)], "task_constraint_summary"),
+        (
+            vec![
+                constraint("A", Some("2026-01-05"), None),
+                constraint("A", Some("2026-01-05"), None),
+            ],
+            "task_constraint_duplicate",
+        ),
+        (vec![constraint("A", None, None)], "task_constraint_empty"),
+    ] {
+        assert_eq!(
+            calculate_schedule_with_constraints(&input, &constraints)
+                .expect_err("invalid constraint")
+                .code(),
+            code
+        );
     }
 }
 
