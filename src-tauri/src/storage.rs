@@ -381,7 +381,9 @@ impl SqliteStore {
                     .map_err(|_| ApplicationError::BackupFailed)?;
             }
             drop(target);
-            std::fs::File::open(&incomplete_destination)
+            OpenOptions::new()
+                .write(true)
+                .open(&incomplete_destination)
                 .and_then(|file| file.sync_all())
                 .map_err(|_| ApplicationError::BackupFailed)?;
             verify(&incomplete_destination)?;
