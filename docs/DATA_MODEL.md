@@ -152,6 +152,33 @@ canonical tables, and bounded count reads from the job, task, dependency, and
 audit tables. A failed backup removes only the newly reserved incomplete
 destination; it never changes the live database or an existing file.
 
+### Clean-directory restore verification
+
+Restore verification is a developer-facing recovery check, not a normal-app
+import flow. It first opens the selected backup read-only and applies the same
+integrity, foreign-key, schema-version, required-table, and bounded domain-read
+checks as backup creation. The verifier requires the complete v4 migration
+sequence, supported column/type/nullability/primary-key layouts, required
+foreign keys, and exact normalized supported DDL signatures for every required
+table and named index, including constraints and partial-index predicates. It
+also executes canonical read queries; a database that merely reuses table names
+or widens a constraint is rejected without migration. Only then does it use
+SQLite's online-backup API to copy that snapshot into a uniquely owned sibling
+staging directory containing
+`contractorproject.sqlite3`. It atomically reserves the required non-existing
+app-data directory first (including rejecting dangling symlinks), re-verifies
+the staging database, then publishes it into that reservation with a
+no-clobber hard link. The staging hard link is retained as the ownership token
+until the result opens and passes final verification; rollback removes a
+published target only when its filesystem identity still matches that token.
+
+The source backup is never migrated or changed. A corrupt, truncated,
+foreign-schema, or otherwise invalid backup creates no target. An existing
+target is rejected without replacement. Failure removes only owned staging or
+reserved target artifacts; an unexpected entry in a contended target is never
+removed and causes a bounded failure. The operation does not create an audit
+record because it does not mutate a job aggregate.
+
 ## Archive contract
 
 The portable job archive is a versioned ZIP containing:

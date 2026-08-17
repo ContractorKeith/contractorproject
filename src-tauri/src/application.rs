@@ -95,6 +95,25 @@ pub struct BackupResult {
     pub verified: bool,
 }
 
+/// A developer-facing verification request. The target is a new app-data
+/// directory; this API never replaces the running application's database.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VerifyRestoreRequest {
+    pub backup_path: String,
+    pub target_app_data_dir: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RestoreVerificationResult {
+    pub verified: bool,
+    pub job_count: i64,
+    pub task_count: i64,
+    pub dependency_count: i64,
+    pub command_log_count: i64,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateTaskRequest {
@@ -223,6 +242,44 @@ impl ApplicationService {
     ) -> Result<BackupResult, ApplicationError> {
         let destination = required_text("destination", request.destination, 1_024)?;
         self.store.create_verified_backup(&destination)
+    }
+
+    /// Restores a verified snapshot into a fresh app-data directory for
+    /// developer verification. It does not alter the source backup or this
+    /// service's live database and is not an audited domain command.
+    pub fn verify_restore_into_fresh_app_data(
+        &self,
+        request: VerifyRestoreRequest,
+    ) -> Result<RestoreVerificationResult, ApplicationError> {
+        let backup_path = required_text("backupPath", request.backup_path, 1_024)?;
+        let target_app_data_dir =
+            required_text("targetAppDataDir", request.target_app_data_dir, 1_024)?;
+        let published = self
+            .store
+            .restore_verified_backup_into_fresh_app_data(&backup_path, &target_app_data_dir)?;
+
+        // Opening after the pre-publish verification proves the restored
+        // directory can be used through the normal application seam.
+        let verification = (|| {
+            let restored = Self::open(&published.target_database_path)
+                .map_err(|_| ApplicationError::RestoreVerificationFailed)?;
+            let result = restored
+                .store
+                .verify_restored_database()
+                .map_err(|_| ApplicationError::RestoreVerificationFailed)?;
+            drop(restored);
+            Ok(result)
+        })();
+        match verification {
+            Ok(result) => {
+                SqliteStore::finalize_published_restore(&published)?;
+                Ok(result)
+            }
+            Err(error) => {
+                SqliteStore::rollback_published_restore(&published)?;
+                Err(error)
+            }
+        }
     }
 
     pub fn archive_job(

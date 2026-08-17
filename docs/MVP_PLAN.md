@@ -32,9 +32,9 @@ The next recovery boundary is specified in
 - [x] Implement recoverable archive and recovery commands.
 - [x] Implement task hierarchy create/edit/reorder with record-version conflicts.
 - [x] Render the job list and editable work breakdown through the real application interface.
-- [x] Add a verified online backup command; restore verification follows in the next recovery slice.
+- [x] Add a verified online backup command and clean-directory restore verification.
 
-Exit: a packaged development app can create a job and nested tasks, restart without data loss, archive a job recoverably, and restore a verified backup.
+Exit: a packaged development app can create a job and nested tasks, restart without data loss, archive a job recoverably, create a verified backup, and verify restore into fresh app data without replacing the running database.
 
 ## 2. Deterministic scheduling
 

@@ -38,6 +38,15 @@ pub enum ApplicationError {
     #[error("backup verification failed")]
     BackupVerificationFailed,
 
+    #[error("restore target already exists")]
+    RestoreTargetExists,
+
+    #[error("restore could not be completed")]
+    RestoreFailed,
+
+    #[error("restore verification failed")]
+    RestoreVerificationFailed,
+
     #[error("stored job data is invalid: {0}")]
     InvalidStoredData(String),
 
@@ -59,6 +68,9 @@ impl ApplicationError {
             Self::BackupDestinationExists => "backup_destination_exists",
             Self::BackupFailed => "backup_failed",
             Self::BackupVerificationFailed => "backup_verification_failed",
+            Self::RestoreTargetExists => "restore_target_exists",
+            Self::RestoreFailed => "restore_failed",
+            Self::RestoreVerificationFailed => "restore_verification_failed",
             Self::InvalidStoredData(_) => "invalid_stored_data",
             Self::Database(_) | Self::Io(_) => "storage_unavailable",
         }

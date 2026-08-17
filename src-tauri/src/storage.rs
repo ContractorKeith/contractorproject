@@ -12,8 +12,9 @@ use uuid::Uuid;
 
 use crate::application::{
     AddDependencyRequest, BackupResult, CommandContext, RemoveDependencyRequest,
-    ReorderTaskRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
-    MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
+    ReorderTaskRequest, RestoreVerificationResult, UpdateScheduleRequest,
+    UpdateTaskDurationRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
+    MAX_COMMAND_ID_CHARACTERS,
 };
 use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
@@ -21,6 +22,11 @@ use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent
 
 pub(crate) struct SqliteStore {
     database_path: PathBuf,
+}
+
+pub(crate) struct PublishedRestore {
+    pub(crate) target_database_path: PathBuf,
+    staging_directory: PathBuf,
 }
 
 #[derive(Clone, Copy)]
@@ -354,7 +360,95 @@ impl SqliteStore {
         destination: &str,
     ) -> Result<BackupResult, ApplicationError> {
         let destination = PathBuf::from(destination);
-        self.create_verified_backup_with(&destination, verify_backup)
+        self.create_verified_backup_with(&destination, |path| verify_backup(path).map(|_| ()))
+    }
+
+    pub(crate) fn restore_verified_backup_into_fresh_app_data(
+        &self,
+        backup_path: &str,
+        target_app_data_dir: &str,
+    ) -> Result<PublishedRestore, ApplicationError> {
+        let backup_path = PathBuf::from(backup_path);
+        let target_app_data_dir = PathBuf::from(target_app_data_dir);
+
+        // This preflight uses a read-only connection and happens before any
+        // target or staging directory exists, so untrusted input is never
+        // migrated or activated.
+        verify_backup(&backup_path).map_err(|_| ApplicationError::RestoreVerificationFailed)?;
+        reserve_fresh_restore_target(&target_app_data_dir)?;
+        let staging = match create_restore_staging_directory(&target_app_data_dir) {
+            Ok(staging) => staging,
+            Err(error) => {
+                cleanup_empty_restore_reservation(&target_app_data_dir)?;
+                return Err(error);
+            }
+        };
+        let target_database_path = target_app_data_dir.join("contractorproject.sqlite3");
+        let staged_database_path = staging.join("contractorproject.sqlite3");
+
+        let restore_result = (|| {
+            copy_verified_snapshot(&backup_path, &staged_database_path)?;
+            verify_backup(&staged_database_path)
+                .map_err(|_| ApplicationError::RestoreVerificationFailed)?;
+            publish_restored_database(&staged_database_path, &target_database_path)?;
+            Ok(PublishedRestore {
+                target_database_path,
+                staging_directory: staging.clone(),
+            })
+        })();
+
+        match restore_result {
+            Ok(published) => Ok(published),
+            Err(error) => {
+                cleanup_unpublished_restore(&staging, &target_app_data_dir)?;
+                Err(error)
+            }
+        }
+    }
+
+    pub(crate) fn verify_restored_database(
+        &self,
+    ) -> Result<RestoreVerificationResult, ApplicationError> {
+        let snapshot = verify_backup(&self.database_path)
+            .map_err(|_| ApplicationError::RestoreVerificationFailed)?;
+        Ok(RestoreVerificationResult {
+            verified: true,
+            job_count: snapshot.job_count,
+            task_count: snapshot.task_count,
+            dependency_count: snapshot.dependency_count,
+            command_log_count: snapshot.command_log_count,
+        })
+    }
+
+    pub(crate) fn finalize_published_restore(
+        published: &PublishedRestore,
+    ) -> Result<(), ApplicationError> {
+        cleanup_owned_restore_staging(&published.staging_directory)
+    }
+
+    pub(crate) fn rollback_published_restore(
+        published: &PublishedRestore,
+    ) -> Result<(), ApplicationError> {
+        if !same_regular_file(
+            &published
+                .staging_directory
+                .join("contractorproject.sqlite3"),
+            &published.target_database_path,
+        ) {
+            return Err(ApplicationError::RestoreFailed);
+        }
+        std::fs::remove_file(&published.target_database_path)
+            .map_err(|_| ApplicationError::RestoreFailed)?;
+        let target = published
+            .target_database_path
+            .parent()
+            .ok_or(ApplicationError::RestoreFailed)?;
+        let target_result = cleanup_empty_restore_reservation(target);
+        let staging_result = cleanup_owned_restore_staging(&published.staging_directory);
+        if target_result.is_err() || staging_result.is_err() {
+            return Err(ApplicationError::RestoreFailed);
+        }
+        Ok(())
     }
 
     fn create_verified_backup_with(
@@ -998,6 +1092,199 @@ const REQUIRED_BACKUP_TABLES: [&str; 5] = [
     "task_dependencies",
 ];
 
+#[derive(Clone, Copy)]
+struct ColumnSpec {
+    name: &'static str,
+    data_type: &'static str,
+    not_null: bool,
+    primary_key_position: i64,
+}
+
+const SCHEMA_MIGRATION_COLUMNS: [ColumnSpec; 2] = [
+    ColumnSpec {
+        name: "version",
+        data_type: "INTEGER",
+        not_null: false,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "applied_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
+const JOB_COLUMNS: [ColumnSpec; 9] = [
+    ColumnSpec {
+        name: "id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "name",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "status",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "timezone",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "created_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "updated_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "version",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "schedule_start",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "calendar_json",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
+const TASK_COLUMNS: [ColumnSpec; 9] = [
+    ColumnSpec {
+        name: "id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "parent_task_id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "sort_key",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "name",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "created_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "updated_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "version",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "duration_minutes",
+        data_type: "INTEGER",
+        not_null: false,
+        primary_key_position: 0,
+    },
+];
+const COMMAND_LOG_COLUMNS: [ColumnSpec; 5] = [
+    ColumnSpec {
+        name: "command_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "actor",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "client_name",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "created_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "summary",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
+const DEPENDENCY_COLUMNS: [ColumnSpec; 4] = [
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "predecessor_task_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "successor_task_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 2,
+    },
+    ColumnSpec {
+        name: "lag_minutes",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
+
 fn create_incomplete_backup_path(destination: &Path) -> Result<PathBuf, ApplicationError> {
     let file_name = destination.file_name().and_then(|name| name.to_str());
     let Some(file_name) = file_name.filter(|name| !name.is_empty()) else {
@@ -1065,9 +1352,162 @@ fn owned_incomplete_paths(incomplete: &Path) -> [PathBuf; 4] {
     ]
 }
 
+fn create_restore_staging_directory(target: &Path) -> Result<PathBuf, ApplicationError> {
+    let parent = target.parent().ok_or(ApplicationError::RestoreFailed)?;
+    if !parent.is_dir() {
+        return Err(ApplicationError::RestoreFailed);
+    }
+    let name = target
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .ok_or(ApplicationError::RestoreFailed)?;
+
+    for _ in 0..3 {
+        let staging = parent.join(format!(".{name}.{}.restore-staging", Uuid::now_v7()));
+        match std::fs::create_dir(&staging) {
+            Ok(()) => return Ok(staging),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(ApplicationError::RestoreFailed),
+        }
+    }
+    Err(ApplicationError::RestoreFailed)
+}
+
+/// Atomically claims a fresh target directory. `symlink_metadata` deliberately
+/// treats a dangling symlink as an existing entry, and `create_dir` closes the
+/// check/create race without replacing a contender's directory.
+fn reserve_fresh_restore_target(target: &Path) -> Result<(), ApplicationError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(_) => return Err(ApplicationError::RestoreTargetExists),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(ApplicationError::RestoreFailed),
+    }
+    match std::fs::create_dir(target) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(ApplicationError::RestoreTargetExists)
+        }
+        Err(_) => Err(ApplicationError::RestoreFailed),
+    }
+}
+
+fn cleanup_owned_restore_staging(staging: &Path) -> Result<(), ApplicationError> {
+    match std::fs::remove_dir_all(staging) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(ApplicationError::RestoreFailed),
+    }
+}
+
+/// Removes a target reservation only while it is empty. Before publication the
+/// operation has no ownership of canonical database names inside that directory.
+fn cleanup_empty_restore_reservation(target: &Path) -> Result<(), ApplicationError> {
+    let metadata =
+        std::fs::symlink_metadata(target).map_err(|_| ApplicationError::RestoreFailed)?;
+    if !metadata.file_type().is_dir() {
+        return Err(ApplicationError::RestoreFailed);
+    }
+    if std::fs::read_dir(target)
+        .map_err(|_| ApplicationError::RestoreFailed)?
+        .next()
+        .is_some()
+    {
+        return Err(ApplicationError::RestoreFailed);
+    }
+    std::fs::remove_dir(target).map_err(|_| ApplicationError::RestoreFailed)
+}
+
+fn cleanup_unpublished_restore(staging: &Path, target: &Path) -> Result<(), ApplicationError> {
+    let staging_result = cleanup_owned_restore_staging(staging);
+    let target_result = cleanup_empty_restore_reservation(target);
+    if staging_result.is_err() || target_result.is_err() {
+        return Err(ApplicationError::RestoreFailed);
+    }
+    Ok(())
+}
+
+fn same_regular_file(staged: &Path, target: &Path) -> bool {
+    let target_metadata = match std::fs::symlink_metadata(target) {
+        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {
+            metadata
+        }
+        _ => return false,
+    };
+    let staged_metadata = match std::fs::metadata(staged) {
+        Ok(metadata) if metadata.file_type().is_file() => metadata,
+        _ => return false,
+    };
+    same_file_identity(&staged_metadata, &target_metadata)
+}
+
+#[cfg(unix)]
+fn same_file_identity(staged: &std::fs::Metadata, target: &std::fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    staged.dev() == target.dev() && staged.ino() == target.ino()
+}
+
+#[cfg(windows)]
+fn same_file_identity(staged: &std::fs::Metadata, target: &std::fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+
+    staged.volume_serial_number() == target.volume_serial_number()
+        && staged.file_index() == target.file_index()
+        && staged.file_index().is_some()
+}
+
+#[cfg(not(any(unix, windows)))]
+fn same_file_identity(_: &std::fs::Metadata, _: &std::fs::Metadata) -> bool {
+    false
+}
+
+/// Hard-linking is atomic and no-clobber: an unexpected file inside the
+/// reserved target makes the restore fail rather than replacing it.
+fn publish_restored_database(staged: &Path, target: &Path) -> Result<(), ApplicationError> {
+    std::fs::hard_link(staged, target).map_err(|_| ApplicationError::RestoreFailed)?;
+    OpenOptions::new()
+        .write(true)
+        .open(target)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| ApplicationError::RestoreFailed)
+}
+
+/// Copies an already-verified, static snapshot through SQLite's online backup
+/// API rather than treating the database file as an application-level blob.
+fn copy_verified_snapshot(source_path: &Path, destination: &Path) -> Result<(), ApplicationError> {
+    let source = Connection::open_with_flags(source_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|_| ApplicationError::RestoreFailed)?;
+    let mut target = Connection::open(destination).map_err(|_| ApplicationError::RestoreFailed)?;
+    target
+        .execute_batch("PRAGMA journal_mode = OFF; PRAGMA synchronous = OFF;")
+        .map_err(|_| ApplicationError::RestoreFailed)?;
+    {
+        let backup =
+            Backup::new(&source, &mut target).map_err(|_| ApplicationError::RestoreFailed)?;
+        backup
+            .run_to_completion(100, Duration::from_millis(1), None)
+            .map_err(|_| ApplicationError::RestoreFailed)?;
+    }
+    drop(target);
+    OpenOptions::new()
+        .write(true)
+        .open(destination)
+        .and_then(|file| file.sync_all())
+        .map_err(|_| ApplicationError::RestoreFailed)
+}
+
+#[derive(Clone, Copy, Debug)]
+struct VerifiedSnapshot {
+    job_count: i64,
+    task_count: i64,
+    dependency_count: i64,
+    command_log_count: i64,
+}
+
 /// Opens the completed snapshot read-only. It never runs the application's
 /// migration path, so verification cannot change a user-selected backup.
-fn verify_backup(destination: &Path) -> Result<(), ApplicationError> {
+fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationError> {
     let connection = Connection::open_with_flags(destination, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
     connection
@@ -1122,17 +1562,226 @@ fn verify_backup(destination: &Path) -> Result<(), ApplicationError> {
     if required_table_count != REQUIRED_BACKUP_TABLES.len() as i64 {
         return Err(ApplicationError::BackupVerificationFailed);
     }
+    verify_supported_v4_schema(&connection)?;
 
     // These bounded counts prove the core domain tables are readable without
     // exposing any customer or job content in the result or error surface.
-    for table in ["jobs", "tasks", "task_dependencies", "command_log"] {
+    let job_count = bounded_table_count(&connection, "jobs")?;
+    let task_count = bounded_table_count(&connection, "tasks")?;
+    let dependency_count = bounded_table_count(&connection, "task_dependencies")?;
+    let command_log_count = bounded_table_count(&connection, "command_log")?;
+    Ok(VerifiedSnapshot {
+        job_count,
+        task_count,
+        dependency_count,
+        command_log_count,
+    })
+}
+
+fn verify_supported_v4_schema(connection: &Connection) -> Result<(), ApplicationError> {
+    let migrations = connection
+        .prepare("SELECT version FROM schema_migrations ORDER BY version")
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| row.get::<_, i64>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if migrations != [1, 2, 3, 4] {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+
+    verify_table_columns(connection, "schema_migrations", &SCHEMA_MIGRATION_COLUMNS)?;
+    verify_table_columns(connection, "jobs", &JOB_COLUMNS)?;
+    verify_table_columns(connection, "tasks", &TASK_COLUMNS)?;
+    verify_table_columns(connection, "command_log", &COMMAND_LOG_COLUMNS)?;
+    verify_table_columns(connection, "task_dependencies", &DEPENDENCY_COLUMNS)?;
+    verify_foreign_keys(
+        connection,
+        "tasks",
+        [
+            ("jobs", "job_id", "id"),
+            ("tasks", "job_id", "job_id"),
+            ("tasks", "parent_task_id", "id"),
+        ],
+    )?;
+    verify_foreign_keys(
+        connection,
+        "task_dependencies",
+        [
+            ("jobs", "job_id", "id"),
+            ("tasks", "job_id", "job_id"),
+            ("tasks", "predecessor_task_id", "id"),
+            ("tasks", "job_id", "job_id"),
+            ("tasks", "successor_task_id", "id"),
+        ],
+    )?;
+    for (name, expected_sql) in [
+        (
+            "tasks_job_parent_order",
+            "createindextasks_job_parent_orderontasksjob_idparent_task_idsort_keyid",
+        ),
+        (
+            "tasks_root_sibling_order",
+            "createuniqueindextasks_root_sibling_orderontasksjob_idsort_keywhereparent_task_idisnull",
+        ),
+        (
+            "tasks_child_sibling_order",
+            "createuniqueindextasks_child_sibling_orderontasksjob_idparent_task_idsort_keywhereparent_task_idisnotnull",
+        ),
+        (
+            "task_dependencies_job_successor",
+            "createindextask_dependencies_job_successorontask_dependenciesjob_idsuccessor_task_id",
+        ),
+    ] {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if !matches_supported_schema_sql(&sql, expected_sql) {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
+    for (table, expected_sql) in [
+        (
+            "schema_migrations",
+            "createtableschema_migrationsversionintegerprimarykeyapplied_attextnotnull",
+        ),
+        (
+            "jobs",
+            "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefault",
+        ),
+        (
+            "tasks",
+            "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0uniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict",
+        ),
+        (
+            "command_log",
+            "createtablecommand_logcommand_idtextnotnullprimarykeychecklengthcommand_idbetween1and128actortextnotnullcheckactorinuseragentimportclient_nametextnotnullchecklengthclient_namebetween1and120created_attextnotnullsummarytextnotnullchecklengthsummary<=240",
+        ),
+        (
+            "task_dependencies",
+            "createtabletask_dependenciesjob_idtextnotnullpredecessor_task_idtextnotnullsuccessor_task_idtextnotnulllag_minutesintegernotnullchecklag_minutes>=0primarykeypredecessor_task_idsuccessor_task_idforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idpredecessor_task_idreferencestasksjob_ididondeleterestrictforeignkeyjob_idsuccessor_task_idreferencestasksjob_ididondeleterestrictcheckpredecessor_task_id<>successor_task_id",
+        ),
+    ] {
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if !matches_supported_schema_sql(&sql, expected_sql) {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
+    for query in [
+        "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1",
+        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
+        "SELECT job_id, predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id LIMIT 1",
+        "SELECT command_id, actor, client_name, created_at, summary FROM command_log ORDER BY command_id LIMIT 1",
+    ] {
         connection
-            .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
-                row.get::<_, i64>(0)
-            })
+            .prepare(query)
+            .and_then(|mut statement| statement.query([]).map(|_| ()))
             .map_err(|_| ApplicationError::BackupVerificationFailed)?;
     }
     Ok(())
+}
+
+fn verify_table_columns(
+    connection: &Connection,
+    table: &str,
+    expected: &[ColumnSpec],
+) -> Result<(), ApplicationError> {
+    let actual = connection
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?.to_ascii_uppercase(),
+                        row.get::<_, i64>(3)? != 0,
+                        row.get::<_, i64>(5)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if actual.len() != expected.len()
+        || actual.iter().zip(expected).any(|(actual, expected)| {
+            actual.0 != expected.name
+                || actual.1 != expected.data_type
+                || actual.2 != expected.not_null
+                || actual.3 != expected.primary_key_position
+        })
+    {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    Ok(())
+}
+
+fn verify_foreign_keys<const N: usize>(
+    connection: &Connection,
+    table: &str,
+    expected: [(&str, &str, &str); N],
+) -> Result<(), ApplicationError> {
+    let mut actual = connection
+        .prepare(&format!("PRAGMA foreign_key_list({table})"))
+        .and_then(|mut statement| {
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    actual.sort();
+    let mut expected = expected
+        .into_iter()
+        .map(|(table, from, to)| (table.to_owned(), from.to_owned(), to.to_owned()))
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    Ok(())
+}
+
+fn normalize_schema_sql(sql: &str) -> String {
+    sql.chars()
+        .filter(|character| {
+            character.is_ascii_alphanumeric()
+                || *character == '_'
+                || *character == '>'
+                || *character == '<'
+                || *character == '='
+        })
+        .flat_map(char::to_lowercase)
+        .collect()
+}
+
+fn matches_supported_schema_sql(sql: &str, expected: &str) -> bool {
+    !sql.contains("--")
+        && !sql.contains("/*")
+        && !sql.contains("*/")
+        && normalize_schema_sql(sql) == expected
+}
+
+fn bounded_table_count(connection: &Connection, table: &str) -> Result<i64, ApplicationError> {
+    connection
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get::<_, i64>(0)
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)
 }
 
 fn ensure_command_is_new(
@@ -1390,7 +2039,11 @@ fn load_ancestor_chain(
 
 #[cfg(test)]
 mod backup_verification_tests {
-    use super::{owned_incomplete_paths, verify_backup, SqliteStore};
+    use super::{
+        cleanup_empty_restore_reservation, cleanup_unpublished_restore,
+        create_restore_staging_directory, owned_incomplete_paths, publish_restored_database,
+        reserve_fresh_restore_target, verify_backup, SqliteStore,
+    };
     use crate::error::ApplicationError;
     use rusqlite::Connection;
 
@@ -1476,5 +2129,79 @@ mod backup_verification_tests {
             "owned incomplete snapshot should be removed"
         );
         assert!(source.exists(), "the live source database remains intact");
+    }
+
+    #[test]
+    fn restore_cleanup_never_removes_an_unexpected_target_entry() {
+        let temp = tempfile::tempdir().expect("temporary restore directory");
+        let target = temp.path().join("reserved-target");
+        std::fs::create_dir(&target).expect("reserve target");
+        let sentinel = target.join("contender-file");
+        std::fs::write(&sentinel, b"do not remove").expect("write contender file");
+
+        let error = cleanup_empty_restore_reservation(&target).expect_err("reject foreign entry");
+        assert_eq!(error.kind(), "restore_failed");
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel remains"),
+            b"do not remove"
+        );
+        assert!(target.is_dir());
+    }
+
+    #[test]
+    fn unpublished_restore_never_removes_a_same_name_contender_database() {
+        let temp = tempfile::tempdir().expect("temporary restore directory");
+        let target = temp.path().join("reserved-target");
+        reserve_fresh_restore_target(&target).expect("reserve target");
+        let staging = create_restore_staging_directory(&target).expect("create staging");
+        let staged_database = staging.join("contractorproject.sqlite3");
+        std::fs::write(&staged_database, b"owned staging database")
+            .expect("write staging database");
+        let contender = target.join("contractorproject.sqlite3");
+        std::fs::write(&contender, b"contender database").expect("write contender database");
+
+        let error = publish_restored_database(&staged_database, &contender)
+            .expect_err("no-clobber publication rejects contender");
+        assert_eq!(error.kind(), "restore_failed");
+        let cleanup = cleanup_unpublished_restore(&staging, &target)
+            .expect_err("non-empty reservation is not owned cleanup");
+        assert_eq!(cleanup.kind(), "restore_failed");
+        assert_eq!(
+            std::fs::read(&contender).expect("contender remains"),
+            b"contender database"
+        );
+        assert!(!staging.exists(), "owned staging is still removed");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpublished_restore_never_removes_a_same_name_contender_symlink() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempfile::tempdir().expect("temporary restore directory");
+        let target = temp.path().join("reserved-target");
+        reserve_fresh_restore_target(&target).expect("reserve target");
+        let staging = create_restore_staging_directory(&target).expect("create staging");
+        let staged_database = staging.join("contractorproject.sqlite3");
+        std::fs::write(&staged_database, b"owned staging database")
+            .expect("write staging database");
+        let sentinel = temp.path().join("contender.sqlite3");
+        std::fs::write(&sentinel, b"contender database").expect("write sentinel");
+        let contender = target.join("contractorproject.sqlite3");
+        symlink(&sentinel, &contender).expect("create contender symlink");
+
+        publish_restored_database(&staged_database, &contender)
+            .expect_err("no-clobber publication rejects symlink");
+        cleanup_unpublished_restore(&staging, &target)
+            .expect_err("non-empty reservation is not owned cleanup");
+        assert!(std::fs::symlink_metadata(&contender)
+            .expect("contender remains")
+            .file_type()
+            .is_symlink());
+        assert_eq!(
+            std::fs::read(&sentinel).expect("sentinel remains"),
+            b"contender database"
+        );
+        assert!(!staging.exists(), "owned staging is still removed");
     }
 }

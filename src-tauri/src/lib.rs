@@ -84,6 +84,9 @@ impl From<ApplicationError> for CommandError {
             ApplicationError::BackupDestinationExists
             | ApplicationError::BackupFailed
             | ApplicationError::BackupVerificationFailed
+            | ApplicationError::RestoreTargetExists
+            | ApplicationError::RestoreFailed
+            | ApplicationError::RestoreVerificationFailed
             | ApplicationError::InvalidStoredData(_)
             | ApplicationError::Database(_)
             | ApplicationError::Io(_) => CommandErrorDetails::None {},
@@ -92,7 +95,10 @@ impl From<ApplicationError> for CommandError {
             ApplicationError::BackupDestinationExists => {
                 "Choose a destination that does not already exist.".to_owned()
             }
-            ApplicationError::BackupFailed | ApplicationError::BackupVerificationFailed => {
+            ApplicationError::BackupFailed
+            | ApplicationError::BackupVerificationFailed
+            | ApplicationError::RestoreFailed
+            | ApplicationError::RestoreVerificationFailed => {
                 "The backup could not be verified. Your local data was not changed.".to_owned()
             }
             ApplicationError::InvalidStoredData(_)
