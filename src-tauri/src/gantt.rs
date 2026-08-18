@@ -278,8 +278,11 @@ pub fn build_gantt_read_model(
                             .early_finish
                             .signed_duration_since(baseline.finish)
                             .num_minutes(),
-                        duration_variance_minutes: scheduled.duration_minutes
-                            - baseline.duration_minutes,
+                        // saturating so a hand-edited absurd stored duration
+                        // cannot panic or wrap the signed difference.
+                        duration_variance_minutes: scheduled
+                            .duration_minutes
+                            .saturating_sub(baseline.duration_minutes),
                     }
                 }),
             })

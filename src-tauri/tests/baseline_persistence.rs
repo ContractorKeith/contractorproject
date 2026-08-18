@@ -992,6 +992,38 @@ fn get_schedule_drops_a_baseline_row_for_a_task_that_became_a_summary() {
     assert!(child_row.baseline.is_none());
 }
 
+#[test]
+fn get_schedule_rejects_a_corrupt_baseline_instant_without_panicking() {
+    // A hand-edited non-canonical instant in the snapshot must surface as typed
+    // invalid stored data from the read path, never a panic.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, _task_id, _task_version, job_version) = seed_scheduled_leaf(&path);
+    let baseline = service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job_id.clone(),
+                name: "Corruptible".into(),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("baseline");
+
+    Connection::open(&path)
+        .expect("open baseline database")
+        .execute(
+            "UPDATE baseline_tasks SET start = '2026-8-1T5:00:00' WHERE baseline_id = ?1",
+            [&baseline.id],
+        )
+        .expect("corrupt the stored instant");
+
+    let error = service
+        .get_schedule(&job_id)
+        .expect_err("corrupt instant rejected");
+    assert!(matches!(error, ApplicationError::InvalidStoredData(_)));
+}
+
 /// Writes an exact-v6 database (schema migrations 1..6, data-date/progress
 /// columns present, no baseline tables) with one scheduled leaf.
 fn write_exact_v6_database(path: &std::path::Path, job_id: &str) {

@@ -65,20 +65,65 @@ test("announces visible constraint values and direct violations without color-on
     const constrainedRow = page.locator('tr[data-task-id="phase-1-task-1"]');
     const visibleFacts = constrainedRow.locator("[data-testid='schedule-current'], [data-testid='schedule-baseline'], [data-testid='schedule-constraint'], .gantt-treegrid__constraint-float");
     await expect(visibleFacts.nth(0)).toHaveText("2026-08-17 08:00");
-    await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 08:00 +4,320 min");
+    await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 +4,320 min");
     await expect(visibleFacts.nth(2)).toHaveText("≥ 2026-08-18");
     await expect(constrainedRow.getByTestId("constraint-float-phase-1-task-1")).toHaveText(/Constraint\s*violated/);
-    // The Duration cell surfaces the Rust-derived baseline duration variance fact.
+    // The Duration cell surfaces the Rust-derived baseline duration variance fact
+    // (unit dropped from the first number to shorten the narrow-cell fragment).
     const durationBaseline = constrainedRow.getByTestId("duration-baseline-phase-1-task-1");
-    await expect(durationBaseline).toHaveText("Baseline 360 min +120 min");
-    const durationFit = await durationBaseline.evaluate((element) => ({
-      scrollWidth: element.scrollWidth,
-      clientWidth: element.clientWidth,
-      scrollHeight: element.scrollHeight,
-      clientHeight: element.clientHeight,
-    }));
-    expect(durationFit.scrollWidth, "duration baseline horizontal fit").toBeLessThanOrEqual(durationFit.clientWidth);
-    expect(durationFit.scrollHeight, "duration baseline vertical fit").toBeLessThanOrEqual(durationFit.clientHeight);
+    await expect(durationBaseline).toHaveText("Baseline 360 +120 min");
+
+    // Milestone rows suppress the duration fact (they carry start/finish baselines).
+    const milestoneDuration = page.locator('tr[data-task-id="phase-1-task-99"] [data-testid="duration-baseline-phase-1-task-99"]');
+    await expect(milestoneDuration).toHaveCount(0);
+
+    // measure() reports line-box geometry under forced system-ui. Wrapping text
+    // fills the width (scrollWidth == clientWidth is meaningless), so the widest
+    // rendered LINE is measured via range rects; the fact stretches to its grid
+    // track so spare vertical lines are real and a wrap regression overflows.
+    const measure = async (locator: import("@playwright/test").Locator) =>
+      locator.evaluate((element) => {
+        const line = parseFloat(getComputedStyle(element).lineHeight) || element.clientHeight;
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        const rects = Array.from(range.getClientRects());
+        const widestLine = rects.length ? Math.max(...rects.map((rect) => rect.width)) : element.scrollWidth;
+        // Count actual rendered lines by unique top (a stretched span makes
+        // scrollHeight == clientHeight, so it cannot report the line count).
+        const tops = new Set(rects.map((rect) => Math.round(rect.top)));
+        const lineCount = Math.max(1, tops.size);
+        const trackLines = Math.max(1, Math.round(element.clientHeight / line));
+        return {
+          clientWidth: element.clientWidth,
+          widestLine: Math.round(widestLine * 10) / 10,
+          widthHeadroom: Math.round(((element.clientWidth - widestLine) / element.clientWidth) * 1000) / 1000,
+          lineCount,
+          trackLines,
+          spareLines: trackLines - lineCount,
+        };
+      });
+
+    // Wrapping baseline facts must never overflow horizontally (widest rendered
+    // line stays within the cell) AND keep >=1 spare vertical line, at BOTH the
+    // default (720px pane) and the narrow (460px capped pane) layouts. Horizontal
+    // "headroom" is not asserted on wrapping facts: greedy wrapping fills the
+    // width by design, so the meaningful clip guard is vertical.
+    const wrapping = {
+      "schedule-baseline": visibleFacts.nth(1),
+      "duration-baseline": durationBaseline,
+    } as const;
+    for (const [name, locator] of Object.entries(wrapping)) {
+      const m = await measure(locator);
+      console.log(`FACT_FIT ${width} ${name} ${JSON.stringify(m)}`);
+      expect(m.widestLine, `${name} horizontal fit @${width}`).toBeLessThanOrEqual(m.clientWidth);
+      expect(m.spareLines, `${name} spare lines @${width}`).toBeGreaterThanOrEqual(1);
+    }
+    const currentFit = await measure(visibleFacts.nth(0));
+    console.log(`FACT_FIT ${width} schedule-current ${JSON.stringify(currentFit)}`);
+    expect(currentFit.widthHeadroom, `schedule-current width headroom @${width}`).toBeGreaterThanOrEqual(0.05);
+    expect(currentFit.lineCount, `schedule-current vertical fit @${width}`).toBeLessThanOrEqual(currentFit.trackLines);
+
+    // Constraint facts (single line each) must remain visible and unclipped.
     const factDimensions = await visibleFacts.evaluateAll((elements) => elements.map((element) => ({
       fact: element.getAttribute("data-testid") ?? element.className,
       clientWidth: element.clientWidth,
@@ -152,13 +197,13 @@ test("keeps compact density synchronized with the virtual scroll model", async (
         actual: grid.querySelector<HTMLElement>("tr[data-task-id]")?.getBoundingClientRect().height,
       })),
     )
-    .toEqual({ configured: 40, actual: 40 });
+    .toEqual({ configured: 50, actual: 50 });
 
   const geometry = await page.locator(".gantt-treegrid-scrollport").evaluate((scrollport) => ({
     scrollHeight: scrollport.scrollHeight,
     headerHeight: scrollport.querySelector<HTMLElement>("thead")?.getBoundingClientRect().height ?? 0,
   }));
-  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(40_000, 0);
+  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(50_000, 0);
 });
 
 test("moves cell focus and recovers it after an offscreen jump", async ({ page }) => {

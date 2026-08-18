@@ -202,7 +202,9 @@ Bar labels sit outside the bar to the right in Barlow 11px `--color-neutral-700`
 
 ### Variance view
 
-Baseline and current bars stack in the same row: current above, baseline ghost below. The variance column shows a signed day count in tabular figures — late in `--state-variance-late` with a filled triangle glyph, early in `--color-neutral-700`. Cost variance follows the same signed pattern in minor-unit-formatted currency.
+Baseline and current bars stack in the same row: current above, baseline ghost below.
+
+As shipped (read model v4), schedule variance is presented as **stacked signed-minute facts inside the existing cells**, not a dedicated variance column: the Start and Finish cells carry a second line `Baseline <civil-date> <signed> min` (the clock time is dropped from the visible fact to fit the narrow cell and preserve the Name reading column; the precise instant stays in the cell's accessible name and on the timeline ghost bar), and the Duration cell carries `Baseline <duration> <signed> min` (unit dropped from the first number to fit the narrow cell; suppressed on milestones, which already show start/finish baselines). Rust computes every value; the table never recalculates it. Signed values read late as positive and early as negative; late still pairs with the ghost bar so meaning is never hue-only. A dedicated signed-day variance column (with the filled-triangle late glyph in `--state-variance-late`) and cost variance in minor-unit currency remain a possible future refinement once exportable variance views land.
 
 ---
 

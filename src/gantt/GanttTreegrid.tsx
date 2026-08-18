@@ -487,14 +487,14 @@ function TaskRow({
     <ScheduleDate
       key="start"
       current={currentStart}
-      baseline={row.baseline ? formatLocalDateTime(row.baseline.start) : null}
+      baseline={row.baseline ? formatLocalDate(row.baseline.start) : null}
       variance={row.baseline?.startVarianceMinutes ?? null}
       constraint={row.startNoEarlierThan ? `≥ ${row.startNoEarlierThan}` : null}
     />,
     <ScheduleDate
       key="finish"
       current={currentFinish}
-      baseline={row.baseline ? formatLocalDateTime(row.baseline.finish) : null}
+      baseline={row.baseline ? formatLocalDate(row.baseline.finish) : null}
       variance={row.baseline?.finishVarianceMinutes ?? null}
       constraint={row.finishNoLaterThan ? `≤ ${row.finishNoLaterThan}` : null}
     />,
@@ -562,16 +562,18 @@ function ScheduleDate({
 function DurationValue({ row }: { row: GanttRow }) {
   // Visible duration plus the Rust-derived baseline duration variance fact, so
   // schedule slippage in scope is text, not color-only. Summaries carry no
-  // baseline and simply show their rolled-up duration.
+  // baseline and simply show their rolled-up duration. Milestones (zero-length)
+  // suppress the duration fact — their slippage already shows on Start/Finish.
   const baseline = row.baseline;
+  const showBaseline = baseline != null && !row.milestone;
   return (
     <span className="gantt-treegrid__duration gantt-treegrid__date--detail">
       <span data-testid={`duration-current-${row.taskId}`}>
         {row.milestone ? "Milestone" : formatMinutes(row.durationMinutes)}
       </span>
-      {baseline ? (
+      {showBaseline ? (
         <span className="gantt-treegrid__secondary" data-testid={`duration-baseline-${row.taskId}`}>
-          {`Baseline ${formatMinutes(baseline.durationMinutes)} ${formatSignedMinutes(baseline.durationVarianceMinutes)}`}
+          {baselineDurationFact(baseline)}
         </span>
       ) : null}
     </span>
@@ -643,6 +645,12 @@ function formatLocalDateTime(value: string): string {
   return value.slice(0, 16).replace("T", " ");
 }
 
+// Civil date only (drops the clock time). The visible baseline fragment uses
+// this to fit the narrow cell; the full instant stays in the accessible name.
+function formatLocalDate(value: string): string {
+  return value.slice(0, 10);
+}
+
 function formatMinutes(value: number): string {
   return `${value.toLocaleString("en-US")} min`;
 }
@@ -655,6 +663,12 @@ function formatSignedMinutes(value: number): string {
 function formatCompactFloat(value: number): string {
   if (value === 0) return "0";
   return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")}`;
+}
+
+// Visible baseline duration fact. The unit is dropped from the first number
+// (the variance keeps it) to shorten the fragment for the narrow Duration cell.
+function baselineDurationFact(baseline: NonNullable<GanttRow["baseline"]>): string {
+  return `Baseline ${baseline.durationMinutes.toLocaleString("en-US")} ${formatSignedMinutes(baseline.durationVarianceMinutes)}`;
 }
 
 function cellLabel(row: GanttRow, columnIndex: number): string {
@@ -705,7 +719,8 @@ function constraintLabel(row: GanttRow): string {
 }
 
 function baselineDurationLabel(row: GanttRow): string {
-  if (!row.baseline) return "no baseline";
+  // Milestones suppress the visible duration fact, so the label matches.
+  if (!row.baseline || row.milestone) return "no baseline";
   return `baseline duration ${formatMinutes(row.baseline.durationMinutes)}, variance ${formatSignedMinutes(row.baseline.durationVarianceMinutes)}`;
 }
 
@@ -713,5 +728,7 @@ function baselineLabel(row: GanttRow, field: "start" | "finish"): string {
   if (!row.baseline) return "no baseline";
   const value = field === "start" ? row.baseline.start : row.baseline.finish;
   const variance = field === "start" ? row.baseline.startVarianceMinutes : row.baseline.finishVarianceMinutes;
-  return `baseline ${formatLocalDateTime(value)}, variance ${formatSignedMinutes(variance)}`;
+  // The accessible name keeps the precise instant even though the visible fact
+  // shows the civil date only.
+  return `baseline ${field} ${formatLocalDateTime(value)}, variance ${formatSignedMinutes(variance)}`;
 }

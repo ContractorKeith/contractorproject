@@ -2651,11 +2651,10 @@ fn verify_v7_baseline_domain(connection: &Connection) -> Result<(), ApplicationE
             return Err(ApplicationError::BackupVerificationFailed);
         }
         // Round-trip the instant so non-canonical text (e.g. "2026-8-1T5:00:00")
-        // is rejected; #44 joins these strings against serialized instants.
+        // is rejected; #44 joins these strings against serialized instants. Shares
+        // the same canonical parser get_schedule uses to load the snapshot.
         for value in [start, finish] {
-            let parsed = NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S")
-                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-            if parsed.format("%Y-%m-%dT%H:%M:%S").to_string() != value {
+            if canonical_instant(&value).is_none() {
                 return Err(ApplicationError::BackupVerificationFailed);
             }
         }
@@ -3275,18 +3274,19 @@ fn format_baseline_instant(instant: NaiveDateTime) -> String {
     instant.format("%Y-%m-%dT%H:%M:%S").to_string()
 }
 
-/// Parses a stored baseline instant, round-tripping through the canonical format
-/// so non-canonical text is rejected as corrupt stored data.
+/// Round-trips a stored instant through the canonical serialized format,
+/// returning None when the text is non-canonical (e.g. "2026-8-1T5:00:00").
+/// Shared by the read path and the v7 backup preflight.
+fn canonical_instant(value: &str) -> Option<NaiveDateTime> {
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").ok()?;
+    (parsed.format("%Y-%m-%dT%H:%M:%S").to_string() == value).then_some(parsed)
+}
+
+/// Parses a stored baseline instant; corrupt text surfaces as InvalidStoredData.
 fn parse_baseline_instant(value: &str) -> Result<NaiveDateTime, ApplicationError> {
-    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").map_err(|_| {
+    canonical_instant(value).ok_or_else(|| {
         ApplicationError::InvalidStoredData("baseline has an invalid instant".into())
-    })?;
-    if parsed.format("%Y-%m-%dT%H:%M:%S").to_string() != value {
-        return Err(ApplicationError::InvalidStoredData(
-            "baseline has an invalid instant".into(),
-        ));
-    }
-    Ok(parsed)
+    })
 }
 
 /// Comparison-default baseline leaf snapshot loaded for the Gantt read model.

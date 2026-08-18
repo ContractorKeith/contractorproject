@@ -1,8 +1,12 @@
 .gantt-schedule {
   min-width: 0;
   --gantt-wbs-width: clamp(460px, 55vw, 720px);
-  --row-h: 52px;
-  --row-h-compact: 48px;
+  /* Row height seats the stacked detail cells: a current line, the two-line
+     wrapping baseline fact in a three-line track (one spare line so a wrap
+     regression overflows rather than silently clipping), and a constraint line.
+     Compact equals the detail grid's total height (its floor); normal adds slack. */
+  --row-h: 64px;
+  --row-h-compact: 60px;
 }
 
 .gantt-schedule__toolbar {
@@ -233,33 +237,37 @@
 }
 
 .gantt-treegrid__wbs-column {
-  width: 8.333%;
+  width: 8%;
 }
 
+/* Name is the primary reading column, so it keeps a usable width; the date facts
+   are shortened to a civil date (time lives in the accessible name) to pay for it. */
 .gantt-treegrid__name-column {
   width: 9%;
 }
 
-/* Widened to seat the stacked baseline duration variance fact. */
+/* Widened to seat the stacked baseline duration variance fact ("Baseline" alone
+   must clear the cell at the narrow pane). */
 .gantt-treegrid__duration-column {
-  width: 10%;
+  width: 12%;
 }
 
 .gantt-treegrid__progress-column {
-  width: 8%;
+  width: 7%;
 }
 
+/* Float keeps 15%; the stacked "Constraint / violated" fact needs it. */
 .gantt-treegrid__float-column {
   width: 15%;
 }
 
-/* Date columns carry the widest facts; keep headroom for wide Linux fonts. */
+/* Date columns carry the widest facts; keep headroom for wide fallback fonts. */
 .gantt-treegrid__date-column {
   width: 22%;
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 6%;
+  width: 5%;
 }
 
 .gantt-treegrid th,
@@ -360,7 +368,11 @@
 
 .gantt-treegrid__date--detail {
   display: grid;
-  grid-template-rows: 12px 24px 12px;
+  /* current line / wrapping baseline fact (two lines + one spare) / constraint. */
+  grid-template-rows: 12px 36px 12px;
+  /* Stretch each fact to its track so the spare vertical line is measurable and
+     a wrap regression overflows (rather than centering and hiding the clip). */
+  align-items: stretch;
   gap: 0;
   width: 100%;
   height: 100%;
@@ -381,7 +393,8 @@
 }
 
 /* The Duration cell stacks only the current value and its baseline fact (no
-   constraint line), so give the wrapping baseline row the remaining height. */
+   constraint line), so give the wrapping baseline row the remaining height.
+   Its first track matches Start/Finish so the current line shares their rhythm. */
 .gantt-treegrid__duration.gantt-treegrid__date--detail {
   grid-template-rows: 12px 1fr;
 }
@@ -398,17 +411,24 @@
 @media (min-width: 1000px) {
   .gantt-schedule {
     --gantt-wbs-width: 720px;
-    --row-h: 44px;
-    --row-h-compact: 40px;
+    --row-h: 54px;
+    --row-h-compact: 50px;
   }
 
+  /* The 720px pane keeps the baseline fact to two lines, so a three-line middle
+     track leaves one spare line. */
   .gantt-treegrid__date--detail {
-    grid-template-rows: 10px 20px 10px;
+    grid-template-rows: 10px 30px 10px;
   }
 
   .gantt-treegrid__date--detail > span {
     min-height: 10px;
     line-height: 10px;
+  }
+
+  /* Keep the Duration current line aligned with Start/Finish at this breakpoint. */
+  .gantt-treegrid__duration.gantt-treegrid__date--detail {
+    grid-template-rows: 10px 1fr;
   }
 }
 

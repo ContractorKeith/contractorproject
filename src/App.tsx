@@ -1228,17 +1228,37 @@ function ScheduleSettings({
   const [dataDateBaseVersion, setDataDateBaseVersion] = useState<number | null>(
     null,
   );
+  // The persisted values a dirty draft was based on. When a sibling command (a
+  // baseline create/switch) bumps the job version without touching schedule
+  // inputs, we silently rebase the draft instead of raising a phantom conflict;
+  // a genuinely changed persisted input still raises it.
+  const scheduleBaseRef = useRef<{ start: string; calendar: WorkingCalendar } | null>(null);
+  const dataDateBaseRef = useRef<{ value: string } | null>(null);
   useEffect(() => {
     if (baseVersion === null) {
       setStart(job.scheduleStart ?? "");
       setCalendar(job.calendar ?? DEFAULT_CALENDAR);
     } else if (hierarchy.jobVersion !== baseVersion) {
-      setConflict(true);
+      const base = scheduleBaseRef.current;
+      if (
+        base !== null &&
+        base.start === (job.scheduleStart ?? "") &&
+        calendarsEqual(base.calendar, job.calendar ?? DEFAULT_CALENDAR)
+      ) {
+        setBaseVersion(hierarchy.jobVersion);
+      } else {
+        setConflict(true);
+      }
     }
     if (dataDateBaseVersion === null) {
       setDataDate(job.dataDate ?? "");
     } else if (hierarchy.jobVersion !== dataDateBaseVersion) {
-      setConflict(true);
+      const base = dataDateBaseRef.current;
+      if (base !== null && base.value === (job.dataDate ?? "")) {
+        setDataDateBaseVersion(hierarchy.jobVersion);
+      } else {
+        setConflict(true);
+      }
     }
   }, [
     baseVersion,
@@ -1276,7 +1296,15 @@ function ScheduleSettings({
     }
   }
   const markDirty = () =>
-    setBaseVersion((current) => current ?? hierarchy.jobVersion);
+    setBaseVersion((current) => {
+      if (current === null) {
+        scheduleBaseRef.current = {
+          start: job.scheduleStart ?? "",
+          calendar: job.calendar ?? DEFAULT_CALENDAR,
+        };
+      }
+      return current ?? hierarchy.jobVersion;
+    });
   const refresh = async () => {
     setSaving(true);
     setMessage(null);
@@ -1350,7 +1378,12 @@ function ScheduleSettings({
               disabled={saving}
               onChange={(event) => {
                 setDataDate(event.target.value);
-                setDataDateBaseVersion((current) => current ?? hierarchy.jobVersion);
+                setDataDateBaseVersion((current) => {
+                  if (current === null) {
+                    dataDateBaseRef.current = { value: job.dataDate ?? "" };
+                  }
+                  return current ?? hierarchy.jobVersion;
+                });
               }}
             />
           </label>
@@ -1536,10 +1569,21 @@ function BaselineSettings({
         name: trimmed,
         expectedJobVersion: hierarchy.jobVersion,
       });
-      setName("");
-      await applied(`Baseline “${trimmed}” created.`);
     } catch (reason: unknown) {
       failed(reason);
+      setSaving(false);
+      return;
+    }
+    // The baseline is committed. A post-command reload failure must never report
+    // the create as failed; clear the name only once the reload succeeds.
+    try {
+      await applied(`Baseline “${trimmed}” created.`);
+      setName("");
+    } catch {
+      setConflict(true);
+      setMessage(
+        `Baseline “${trimmed}” was created, but refreshing the view failed. Refresh to see it.`,
+      );
     } finally {
       setSaving(false);
     }
@@ -1591,7 +1635,7 @@ function BaselineSettings({
             <li key={baseline.id} className="baseline-settings__item">
               <span className="baseline-settings__name">{baseline.name}</span>
               <span className="baseline-settings__created">
-                Created {baseline.createdAt.slice(0, 10)}
+                Created {formatLocalDate(baseline.createdAt)}
               </span>
               {baseline.isComparisonDefault ? (
                 <span className="baseline-settings__default">Comparison default</span>
@@ -1601,7 +1645,7 @@ function BaselineSettings({
                   disabled={saving}
                   onClick={() => void setDefault(baseline.id)}
                 >
-                  Set as comparison default
+                  {`Set "${baseline.name}" as comparison default`}
                 </button>
               )}
             </li>
@@ -1803,6 +1847,27 @@ async function loadJobSnapshot(
   throw new Error(
     "The job changed while refreshing. Refresh again before saving.",
   );
+}
+
+// Content equality for working calendars (weekday set plus workday window),
+// used to tell an unchanged persisted schedule from a genuine external edit.
+function calendarsEqual(left: WorkingCalendar, right: WorkingCalendar): boolean {
+  if (
+    left.workdayStartMinute !== right.workdayStartMinute ||
+    left.workdayDurationMinutes !== right.workdayDurationMinutes ||
+    left.workingWeekdays.length !== right.workingWeekdays.length
+  ) {
+    return false;
+  }
+  const leftDays = [...left.workingWeekdays].sort();
+  const rightDays = [...right.workingWeekdays].sort();
+  return leftDays.every((day, index) => day === rightDays[index]);
+}
+
+// Renders a stored UTC timestamp as a local calendar date for display.
+function formatLocalDate(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString();
 }
 
 function errorMessage(reason: unknown): string {
