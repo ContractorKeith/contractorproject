@@ -35,6 +35,9 @@ export function createGanttVerificationReadModel(): GanttReadModel {
       start: localTimestamp(phaseStartDay),
       finish: localTimestamp(phaseStartDay + 98, 17),
       totalFloatMinutes: phase === 0 ? 0 : 480,
+      startNoEarlierThan: null,
+      finishNoLaterThan: null,
+      constraintViolated: phase === 0,
       critical: phase === 0,
       milestone: false,
       summary: true,
@@ -71,6 +74,9 @@ export function createGanttVerificationReadModel(): GanttReadModel {
         finish:
           task === 98 ? localTimestamp(taskDay) : localTimestamp(taskDay, 17),
         totalFloatMinutes: phase === 0 ? 0 : 480,
+        startNoEarlierThan: phase === 0 && task === 0 ? "2026-08-18" : null,
+        finishNoLaterThan: phase === 0 && task === 0 ? "2026-08-17" : null,
+        constraintViolated: phase === 0 && task === 0,
         critical: phase === 0,
         milestone: task === 98,
         summary: false,
@@ -117,7 +123,7 @@ export function reorderFirstVerificationActivity(
 
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 1,
+    contractVersion: 2,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",

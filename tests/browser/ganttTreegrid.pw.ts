@@ -45,9 +45,49 @@ test("virtualizes 1,000 logical rows without accessibility violations", async ({
   expect(results.violations).toEqual([]);
 });
 
+test("announces visible constraint values and direct violations without color-only state", async ({ page }) => {
+  for (const width of [1100, 760]) {
+    await page.setViewportSize({ width, height: 700 });
+    if (width === 760) {
+      await page.getByTestId("gantt-scrollport").evaluate((scrollport) => {
+        const schedule = scrollport.closest<HTMLElement>(".gantt-schedule");
+        if (!schedule) throw new Error("Schedule surface is missing");
+        schedule.style.width = "724px";
+      });
+    }
+    const constrainedName = page.getByRole("rowheader", {
+      name: /1\.1 Activity 1, task, activity, critical, start no earlier than 2026-08-18, finish no later than 2026-08-17, constraint violated/,
+    });
+    await expect(constrainedName).toBeVisible();
+    const constrainedRow = page.locator('tr[data-task-id="phase-1-task-1"]');
+    const visibleFacts = constrainedRow.locator("[data-testid='schedule-current'], [data-testid='schedule-baseline'], [data-testid='schedule-constraint'], .gantt-treegrid__constraint-float");
+    await expect(visibleFacts.nth(0)).toHaveText("2026-08-17 08:00");
+    await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 08:00 +4,320 min");
+    await expect(visibleFacts.nth(2)).toHaveText("≥ 2026-08-18");
+    await expect(constrainedRow.getByTestId("constraint-float-phase-1-task-1")).toHaveText(/Constraint\s*violated/);
+    const factDimensions = await visibleFacts.evaluateAll((elements) => elements.map((element) => ({
+      clientWidth: element.clientWidth,
+      scrollWidth: element.scrollWidth,
+      clientHeight: element.clientHeight,
+      scrollHeight: element.scrollHeight,
+      visible: element.getBoundingClientRect().width > 0 && element.getBoundingClientRect().height > 0,
+    })));
+    for (const dimensions of factDimensions) {
+      expect(dimensions.visible).toBe(true);
+      expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
+      expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.clientHeight);
+    }
+  }
+
+  const float = page.getByRole("gridcell", {
+    name: /1\.1 Activity 1, total float, 0 min, critical, constraint violated/,
+  });
+  await expect(float).toHaveText(/Constraint\s*violated/);
+});
+
 test("keeps compact density synchronized with the virtual scroll model", async ({ page }) => {
   await page.evaluate(() => {
-    document.documentElement.style.setProperty("--row-h", "var(--row-h-compact)");
+    document.querySelector<HTMLElement>(".gantt-schedule")?.style.setProperty("--row-h", "var(--row-h-compact)");
   });
 
   await expect
@@ -57,13 +97,13 @@ test("keeps compact density synchronized with the virtual scroll model", async (
         actual: grid.querySelector<HTMLElement>("tr[data-task-id]")?.getBoundingClientRect().height,
       })),
     )
-    .toEqual({ configured: 24, actual: 24 });
+    .toEqual({ configured: 36, actual: 36 });
 
   const geometry = await page.locator(".gantt-treegrid-scrollport").evaluate((scrollport) => ({
     scrollHeight: scrollport.scrollHeight,
     headerHeight: scrollport.querySelector<HTMLElement>("thead")?.getBoundingClientRect().height ?? 0,
   }));
-  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(24_000, 0);
+  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(36_000, 0);
 });
 
 test("moves cell focus and recovers it after an offscreen jump", async ({ page }) => {
@@ -136,14 +176,18 @@ test("moves a viewport page down and back while keeping focus visible", async ({
     name: /1 Phase 1, task/,
   });
   await firstTaskCell.focus();
+  const pageStep = await page.getByTestId("gantt-scrollport").evaluate((scrollport) => {
+    const styles = getComputedStyle(scrollport);
+    const rowHeight = Number.parseFloat(styles.getPropertyValue("--row-h"));
+    const viewportHeight = Number.parseFloat(styles.getPropertyValue("--gantt-viewport-height"));
+    return Math.max(1, Math.floor(viewportHeight / rowHeight) - 1);
+  });
   await page.keyboard.press("PageDown");
 
-  const pagedCell = page.getByRole("rowheader", {
-    name: /1\.16 Activity 16, task/,
-  });
+  const pagedCell = page.locator(`tr[aria-rowindex="${pageStep + 2}"] [role="rowheader"]`);
   await expect(pagedCell).toBeFocused();
   await expect(pagedCell).toBeInViewport();
-  await expect(pagedCell.locator("xpath=ancestor::tr")).toHaveAttribute("aria-rowindex", "18");
+  await expect(pagedCell).toHaveAccessibleName(new RegExp(`1\\.${pageStep} Activity ${pageStep}, task`));
 
   await page.keyboard.press("PageUp");
   await expect(firstTaskCell).toBeFocused();
@@ -198,12 +242,15 @@ test("keeps every mounted timeline row aligned through scroll and compact densit
   expect(Math.abs((stickyGeometry.tableHeaderTop ?? 0) - stickyGeometry.scrollportTop)).toBeLessThanOrEqual(1.1);
   expect(Math.abs((stickyGeometry.rulerTop ?? 0) - stickyGeometry.scrollportTop)).toBeLessThanOrEqual(1.1);
 
-  await page.evaluate(() => document.documentElement.style.setProperty("--row-h", "var(--row-h-compact)"));
+  await page.evaluate(() =>
+    document.querySelector<HTMLElement>(".gantt-schedule")?.style.setProperty("--row-h", "var(--row-h-compact)"),
+  );
   await page.waitForTimeout(50);
   expect(await maximumDrift()).toBeLessThanOrEqual(1);
 
   await page.getByTestId("gantt-scrollport").evaluate((element) => {
-    element.scrollTop = 2_200;
+    const rowHeight = Number.parseFloat(getComputedStyle(element).getPropertyValue("--row-h"));
+    element.scrollTop = rowHeight * 99;
   });
   const milestoneStack = await page.locator('[data-timeline-task-id="phase-1-task-99"]').evaluate((milestone) => {
     const baseline = document.querySelector<SVGRectElement>('[data-baseline-task-id="phase-1-task-99"]');

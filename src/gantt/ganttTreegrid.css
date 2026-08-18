@@ -1,6 +1,8 @@
 .gantt-schedule {
   min-width: 0;
   --gantt-wbs-width: clamp(460px, 55vw, 720px);
+  --row-h: 52px;
+  --row-h-compact: 48px;
 }
 
 .gantt-schedule__toolbar {
@@ -201,27 +203,28 @@
 }
 
 .gantt-treegrid__name-column {
-  width: 25%;
+  width: 19%;
 }
 
 .gantt-treegrid__duration-column {
-  width: 10%;
+  width: 8%;
 }
 
 .gantt-treegrid__float-column {
-  width: 10%;
+  width: 12%;
 }
 
 .gantt-treegrid__date-column {
-  width: 16.667%;
+  width: 22%;
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 13.333%;
+  width: 10%;
 }
 
 .gantt-treegrid th,
 .gantt-treegrid td {
+  box-sizing: border-box;
   height: var(--row-h);
   padding: 0 var(--space-3);
   overflow: hidden;
@@ -229,6 +232,11 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   box-shadow: inset 0 calc(-1 * var(--border-hairline)) var(--color-divider);
+}
+
+.gantt-treegrid td:nth-child(4),
+.gantt-treegrid td:nth-child(5) {
+  padding-inline: var(--space-1);
 }
 
 .gantt-treegrid thead {
@@ -308,6 +316,48 @@
   text-overflow: ellipsis;
 }
 
+.gantt-treegrid__date--detail {
+  display: grid;
+  grid-template-rows: 12px 24px 12px;
+  gap: 0;
+  width: 100%;
+  height: 100%;
+  font-family: var(--font-heading);
+  font-size: 9px;
+  line-height: 1;
+}
+
+.gantt-treegrid__date--detail > span {
+  width: 100%;
+  min-height: 12px;
+  line-height: 12px;
+}
+
+.gantt-treegrid__date--detail .gantt-treegrid__secondary {
+  font-size: inherit;
+  white-space: normal;
+}
+
+.gantt-treegrid__constraint-date {
+  color: var(--color-text);
+}
+
+@media (min-width: 1000px) {
+  .gantt-schedule {
+    --gantt-wbs-width: 720px;
+    --row-h: 40px;
+    --row-h-compact: 36px;
+  }
+
+  .gantt-treegrid__date--detail {
+    grid-template-rows: repeat(3, 12px);
+  }
+
+  .gantt-treegrid__date--detail .gantt-treegrid__secondary {
+    white-space: nowrap;
+  }
+}
+
 .gantt-treegrid__states {
   display: flex;
   flex: none;
@@ -337,6 +387,19 @@
   min-width: 0;
   color: var(--color-neutral-700);
   font-size: var(--font-size-meta);
+}
+
+.gantt-treegrid__constraint-float {
+  display: grid;
+  grid-template-rows: repeat(3, 12px);
+  color: var(--state-risk);
+  font-family: var(--font-heading);
+  font-size: 9px;
+  line-height: 12px;
+  height: 100%;
+  min-height: 36px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
 }
 
 .gantt-treegrid__disclosure,

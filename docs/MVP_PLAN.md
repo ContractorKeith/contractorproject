@@ -39,7 +39,8 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 ## 2. Deterministic scheduling
 
 - [x] Specify duration, working-date, FS lag, weekly-calendar, and summary-task rules with executable examples.
-- [ ] Specify constraints and data-date/progress rules with examples.
+- [x] Specify and implement leaf start-no-earlier-than and finish-no-later-than constraints with executable examples.
+- [ ] Specify and implement data-date/progress rules with examples.
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
 - [ ] Add SS, FF, and SF dependency types plus negative lag.
 - [x] Persist the default weekly working calendar.

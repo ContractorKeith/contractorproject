@@ -5,8 +5,8 @@ use contractorproject_lib::gantt::{
     GANTT_READ_MODEL_VERSION,
 };
 use contractorproject_lib::scheduling::{
-    calculate_schedule, CalendarWeekday, FinishStartDependency, ScheduleInput, ScheduleTask,
-    WorkingCalendar,
+    calculate_schedule, calculate_schedule_with_constraints, CalendarWeekday,
+    FinishStartDependency, ScheduleInput, ScheduleTask, TaskConstraint, WorkingCalendar,
 };
 use serde_json::json;
 
@@ -52,7 +52,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 1,
+            "contractVersion": 2,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -62,6 +62,84 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
             "criticalTaskIds": [],
             "criticalPath": [],
             "rows": []
+        })
+    );
+}
+
+#[test]
+fn constrained_violating_leaf_serializes_the_exact_v2_contract() {
+    let schedule = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+            calendar: standard_calendar(),
+            tasks: vec![ScheduleTask {
+                id: "leaf".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            }],
+            dependencies: vec![],
+        },
+        &[TaskConstraint {
+            task_id: "leaf".into(),
+            start_no_earlier_than: Some(NaiveDate::from_ymd_opt(2026, 1, 6).expect("date")),
+            finish_no_later_than: Some(NaiveDate::from_ymd_opt(2026, 1, 5).expect("date")),
+        }],
+    )
+    .expect("calculate constrained schedule");
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![GanttTaskSource {
+            id: "leaf".into(),
+            parent_task_id: None,
+            sort_key: 0,
+            name: "Constrained leaf".into(),
+            start_no_earlier_than: Some(NaiveDate::from_ymd_opt(2026, 1, 6).expect("date")),
+            finish_no_later_than: Some(NaiveDate::from_ymd_opt(2026, 1, 5).expect("date")),
+        }],
+        schedule,
+        baseline: None,
+        predecessors: vec![],
+    })
+    .expect("build read model");
+
+    assert_eq!(
+        serde_json::to_value(read_model).expect("serialize read model"),
+        json!({
+            "contractVersion": 2,
+            "jobId": "job-1",
+            "jobVersion": 1,
+            "scheduleStart": "2026-01-05T08:00:00",
+            "scheduleFinish": "2026-01-06T16:00:00",
+            "baselineId": null,
+            "rowCount": 1,
+            "criticalTaskIds": ["leaf"],
+            "criticalPath": ["leaf"],
+            "rows": [{
+                "taskId": "leaf",
+                "parentTaskId": null,
+                "logicalIndex": 0,
+                "depth": 0,
+                "positionInSet": 1,
+                "setSize": 1,
+                "sortKey": 0,
+                "wbs": "1",
+                "name": "Constrained leaf",
+                "kind": "task",
+                "hasChildren": false,
+                "durationMinutes": 480,
+                "start": "2026-01-06T08:00:00",
+                "finish": "2026-01-06T16:00:00",
+                "totalFloatMinutes": -480,
+                "startNoEarlierThan": "2026-01-06",
+                "finishNoLaterThan": "2026-01-05",
+                "constraintViolated": true,
+                "critical": true,
+                "milestone": false,
+                "summary": false,
+                "predecessorIds": [],
+                "baseline": null
+            }]
         })
     );
 }
@@ -105,18 +183,24 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
                 parent_task_id: None,
                 sort_key: 0,
                 name: "Site work".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
             },
             GanttTaskSource {
                 id: "layout".into(),
                 parent_task_id: Some("summary".into()),
                 sort_key: 0,
                 name: "Layout".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
             },
             GanttTaskSource {
                 id: "excavate".into(),
                 parent_task_id: Some("summary".into()),
                 sort_key: 1,
                 name: "Excavate".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
             },
         ],
         schedule,
@@ -196,6 +280,8 @@ fn rejects_metadata_that_cannot_join_the_authoritative_schedule() {
             parent_task_id: None,
             sort_key: 0,
             name: "Different task".into(),
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
         }],
         schedule,
         baseline: None,
@@ -213,6 +299,55 @@ fn rejects_metadata_that_cannot_join_the_authoritative_schedule() {
 }
 
 #[test]
+fn rejects_constraints_on_a_scheduled_summary_with_a_stable_code() {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![
+            ScheduleTask {
+                id: "summary".into(),
+                parent_task_id: None,
+                duration_minutes: None,
+            },
+            ScheduleTask {
+                id: "leaf".into(),
+                parent_task_id: Some("summary".into()),
+                duration_minutes: Some(480),
+            },
+        ],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+    let error = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![
+            GanttTaskSource {
+                id: "summary".into(),
+                parent_task_id: None,
+                sort_key: 0,
+                name: "Summary".into(),
+                start_no_earlier_than: Some(NaiveDate::from_ymd_opt(2026, 1, 5).expect("date")),
+                finish_no_later_than: None,
+            },
+            GanttTaskSource {
+                id: "leaf".into(),
+                parent_task_id: Some("summary".into()),
+                sort_key: 0,
+                name: "Leaf".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+        ],
+        schedule,
+        baseline: None,
+        predecessors: vec![],
+    })
+    .expect_err("reject constrained summary");
+    assert_eq!(error.code(), "gantt_summary_constraint_invalid");
+}
+
+#[test]
 fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
     let mut tasks = Vec::with_capacity(1_000);
     let mut schedule_tasks = Vec::with_capacity(1_000);
@@ -223,6 +358,8 @@ fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
             parent_task_id: None,
             sort_key: phase - 1,
             name: format!("Phase {phase}"),
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
         });
         schedule_tasks.push(ScheduleTask {
             id: phase_id.clone(),
@@ -236,6 +373,8 @@ fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
                 parent_task_id: Some(phase_id.clone()),
                 sort_key: package - 1,
                 name: format!("Package {package}"),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
             });
             schedule_tasks.push(ScheduleTask {
                 id: package_id.clone(),
@@ -249,6 +388,8 @@ fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
                     parent_task_id: Some(package_id.clone()),
                     sort_key: leaf - 1,
                     name: format!("Task {leaf}"),
+                    start_no_earlier_than: None,
+                    finish_no_later_than: None,
                 });
                 schedule_tasks.push(ScheduleTask {
                     id: task_id,

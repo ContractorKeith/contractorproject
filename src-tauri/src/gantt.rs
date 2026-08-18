@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::NaiveDateTime;
+use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::scheduling::{ScheduleResult, ScheduledTask};
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 1;
+pub const GANTT_READ_MODEL_VERSION: u16 = 2;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +27,8 @@ pub struct GanttTaskSource {
     pub parent_task_id: Option<String>,
     pub sort_key: i64,
     pub name: String,
+    pub start_no_earlier_than: Option<NaiveDate>,
+    pub finish_no_later_than: Option<NaiveDate>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +106,9 @@ pub struct GanttRow {
     pub start: NaiveDateTime,
     pub finish: NaiveDateTime,
     pub total_float_minutes: i64,
+    pub start_no_earlier_than: Option<NaiveDate>,
+    pub finish_no_later_than: Option<NaiveDate>,
+    pub constraint_violated: bool,
     pub critical: bool,
     pub milestone: bool,
     pub summary: bool,
@@ -134,6 +139,8 @@ pub enum GanttReadModelError {
         task_id: String,
         predecessor_id: String,
     },
+    #[error("summary task {task_id} cannot carry task constraints")]
+    SummaryConstraint { task_id: String },
 }
 
 impl GanttReadModelError {
@@ -148,6 +155,7 @@ impl GanttReadModelError {
             Self::DuplicatePredecessorRow { .. } => "gantt_predecessor_row_duplicate",
             Self::UnknownPredecessorTask { .. } => "gantt_predecessor_task_unknown",
             Self::DuplicatePredecessor { .. } => "gantt_predecessor_duplicate",
+            Self::SummaryConstraint { .. } => "gantt_summary_constraint_invalid",
         }
     }
 }
@@ -194,6 +202,13 @@ pub fn build_gantt_read_model(
             } else {
                 GanttTaskKind::Task
             };
+            if scheduled.summary
+                && (task.start_no_earlier_than.is_some() || task.finish_no_later_than.is_some())
+            {
+                return Err(GanttReadModelError::SummaryConstraint {
+                    task_id: task.id.clone(),
+                });
+            }
             Ok(GanttRow {
                 task_id: task.id.clone(),
                 parent_task_id: task.parent_task_id.clone(),
@@ -210,6 +225,11 @@ pub fn build_gantt_read_model(
                 start: scheduled.early_start,
                 finish: scheduled.early_finish,
                 total_float_minutes: scheduled.total_float_minutes,
+                start_no_earlier_than: task.start_no_earlier_than,
+                finish_no_later_than: task.finish_no_later_than,
+                // Leaf values are rejected on summaries, while the scheduler derives
+                // summary violation state from constrained descendants.
+                constraint_violated: scheduled.constraint_violated,
                 critical: scheduled.critical,
                 milestone: scheduled.milestone,
                 summary: scheduled.summary,
