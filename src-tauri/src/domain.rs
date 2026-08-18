@@ -11,6 +11,8 @@ pub struct Job {
     pub timezone: String,
     pub schedule_start: Option<String>,
     pub calendar: WorkingCalendar,
+    /// Canonical YYYY-MM-DD job-local data date; None while the job is unstatused.
+    pub data_date: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub version: i64,
@@ -28,6 +30,12 @@ pub struct Task {
     pub duration_minutes: Option<i64>,
     pub start_no_earlier_than: Option<String>,
     pub finish_no_later_than: Option<String>,
+    /// Percent complete in [0, 100]; None is unstatused (equivalent to 0 with no actuals).
+    pub percent_complete: Option<i64>,
+    /// Canonical YYYY-MM-DD actual start; None when unreported.
+    pub actual_start: Option<String>,
+    /// Canonical YYYY-MM-DD actual finish; None until the leaf is complete.
+    pub actual_finish: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub version: i64,

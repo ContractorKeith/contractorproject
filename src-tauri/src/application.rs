@@ -177,6 +177,28 @@ pub struct UpdateTaskConstraintRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct UpdateJobDataDateRequest {
+    pub job_id: String,
+    /// None clears the data date; a set value is a canonical ISO date-only string.
+    pub data_date: Option<String>,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateTaskProgressRequest {
+    pub task_id: String,
+    /// When true the progress columns are nulled and percent/actuals are ignored.
+    pub clear: bool,
+    pub percent_complete: Option<i64>,
+    pub actual_start: Option<String>,
+    pub actual_finish: Option<String>,
+    pub expected_version: i64,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct AddDependencyRequest {
     pub job_id: String,
     pub predecessor_task_id: String,
@@ -235,6 +257,7 @@ impl ApplicationService {
             timezone,
             schedule_start: None,
             calendar: default_calendar(),
+            data_date: None,
             created_at: now.clone(),
             updated_at: now,
             version: 1,
@@ -349,6 +372,9 @@ impl ApplicationService {
             duration_minutes: None,
             start_no_earlier_than: None,
             finish_no_later_than: None,
+            percent_complete: None,
+            actual_start: None,
+            actual_finish: None,
             created_at: now.clone(),
             updated_at: now,
             version: 1,
@@ -584,6 +610,62 @@ impl ApplicationService {
         Ok(TaskMutation { task, job_version })
     }
 
+    pub fn update_job_data_date(
+        &self,
+        context: CommandContext,
+        request: UpdateJobDataDateRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        if let Some(value) = request.data_date.as_deref() {
+            parse_iso_date("dataDate", value)?;
+        }
+        self.store.update_job_data_date(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    pub fn update_task_progress(
+        &self,
+        context: CommandContext,
+        request: UpdateTaskProgressRequest,
+    ) -> Result<TaskMutation, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedVersion", request.expected_version)?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        // Basic input shape only; the scheduler owns the cross-field progress
+        // rules (actuals-vs-percent, milestone, data-date ordering) and surfaces
+        // them at the persistence boundary.
+        if !request.clear {
+            let percent = request
+                .percent_complete
+                .ok_or(ApplicationError::InvalidInput {
+                    field: "percentComplete",
+                    message: "must be an integer between 0 and 100".into(),
+                })?;
+            if !(0..=100).contains(&percent) {
+                return Err(ApplicationError::InvalidInput {
+                    field: "percentComplete",
+                    message: "must be an integer between 0 and 100".into(),
+                });
+            }
+            if let Some(value) = request.actual_start.as_deref() {
+                parse_iso_date("actualStart", value)?;
+            }
+            if let Some(value) = request.actual_finish.as_deref() {
+                parse_iso_date("actualFinish", value)?;
+            }
+        }
+        let (task, job_version) = self.store.update_task_progress(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )?;
+        Ok(TaskMutation { task, job_version })
+    }
+
     pub fn add_dependency(
         &self,
         context: CommandContext,
@@ -685,6 +767,22 @@ fn parse_constraint_date(value: &str) -> Result<NaiveDate, ApplicationError> {
         });
     }
     Ok(date)
+}
+
+fn parse_iso_date(field: &'static str, value: &str) -> Result<(), ApplicationError> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidInput {
+            field,
+            message: "must be an ISO date-only value".into(),
+        }
+    })?;
+    if date.format("%Y-%m-%d").to_string() != value {
+        return Err(ApplicationError::InvalidInput {
+            field,
+            message: "must be an ISO date-only value".into(),
+        });
+    }
+    Ok(())
 }
 
 fn required_version(field: &'static str, version: i64) -> Result<(), ApplicationError> {

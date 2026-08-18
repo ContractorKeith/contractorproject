@@ -10,8 +10,8 @@ use application::{
     AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, BackupResult,
     CommandActor, CommandContext, CreateBackupRequest, CreateJobRequest, CreateTaskRequest, Job,
     JobStatus, RemoveDependencyRequest, ReorderTaskRequest, RestoreJobRequest, TaskHierarchy,
-    TaskMutation, UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
-    UpdateTaskRequest,
+    TaskMutation, UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
+    UpdateTaskDurationRequest, UpdateTaskProgressRequest, UpdateTaskRequest,
 };
 use gantt::GanttReadModel;
 use serde::Serialize;
@@ -270,6 +270,26 @@ fn update_task_constraint(
 }
 
 #[tauri::command]
+fn update_job_data_date(
+    service: State<'_, ApplicationService>,
+    request: UpdateJobDataDateRequest,
+) -> Result<Job, CommandError> {
+    service
+        .update_job_data_date(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn update_task_progress(
+    service: State<'_, ApplicationService>,
+    request: UpdateTaskProgressRequest,
+) -> Result<TaskMutation, CommandError> {
+    service
+        .update_task_progress(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 fn add_dependency(
     service: State<'_, ApplicationService>,
     request: AddDependencyRequest,
@@ -321,6 +341,8 @@ pub fn run() {
             update_schedule,
             update_task_duration,
             update_task_constraint,
+            update_job_data_date,
+            update_task_progress,
             add_dependency,
             remove_dependency
         ])
