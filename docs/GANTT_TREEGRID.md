@@ -7,7 +7,10 @@ Updated: 2026-08-18
 Gantt read-model contract v3. It renders a native HTML table with
 `role="treegrid"` and uses TanStack Virtual to mount only the visible task rows
 plus overscan. The implemented supplemental SVG timeline remains a separate
-renderer and introduces no schedule facts that are absent from this table.
+renderer and introduces no schedule facts that are absent from this table, with
+two documented exceptions: the job data-date marker is a job-level instant drawn
+only on the timeline, and per-task actual start/finish appear in the table only
+inside the % Done cell's accessible name rather than as dedicated visible cells.
 
 ## Semantic contract
 

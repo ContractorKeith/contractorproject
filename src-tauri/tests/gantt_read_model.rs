@@ -301,6 +301,83 @@ fn statused_schedule_projects_the_v3_progress_facts_and_data_date() {
 }
 
 #[test]
+fn summary_status_reflects_started_descendants_when_percent_floors_to_zero() {
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+    // A summary over two milestones: one complete, one not started. The
+    // all-zero-duration rollup floors the summary percent to 0, but a descendant
+    // has started, so the derived status must be in progress, not not started.
+    let schedule = calculate_schedule_with_progress(
+        &ScheduleInput {
+            schedule_start: date(2026, 1, 5),
+            calendar: standard_calendar(),
+            tasks: vec![
+                ScheduleTask {
+                    id: "phase".into(),
+                    parent_task_id: None,
+                    duration_minutes: None,
+                },
+                ScheduleTask {
+                    id: "done".into(),
+                    parent_task_id: Some("phase".into()),
+                    duration_minutes: Some(0),
+                },
+                ScheduleTask {
+                    id: "todo".into(),
+                    parent_task_id: Some("phase".into()),
+                    duration_minutes: Some(0),
+                },
+            ],
+            dependencies: vec![],
+        },
+        &[],
+        &ScheduleProgress {
+            data_date: Some(date(2026, 1, 6)),
+            entries: vec![TaskProgress {
+                task_id: "done".into(),
+                percent_complete: 100,
+                actual_start: Some(date(2026, 1, 5)),
+                actual_finish: Some(date(2026, 1, 5)),
+            }],
+        },
+    )
+    .expect("calculate milestone summary schedule");
+
+    let source_task = |id: &str, parent: Option<&str>, sort_key: i64| GanttTaskSource {
+        id: id.into(),
+        parent_task_id: parent.map(Into::into),
+        sort_key,
+        name: id.into(),
+        start_no_earlier_than: None,
+        finish_no_later_than: None,
+    };
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![
+            source_task("phase", None, 0),
+            source_task("done", Some("phase"), 0),
+            source_task("todo", Some("phase"), 1),
+        ],
+        schedule,
+        baseline: None,
+        predecessors: vec![],
+    })
+    .expect("build milestone summary read model");
+
+    let summary = &read_model.rows[0];
+    assert_eq!(summary.percent_complete, 0);
+    assert_eq!(summary.progress_status, GanttProgressStatus::InProgress);
+    assert_eq!(
+        read_model.rows[1].progress_status,
+        GanttProgressStatus::Completed
+    );
+    assert_eq!(
+        read_model.rows[2].progress_status,
+        GanttProgressStatus::NotStarted
+    );
+}
+
+#[test]
 fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors() {
     let schedule = calculate_schedule(&ScheduleInput {
         schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),

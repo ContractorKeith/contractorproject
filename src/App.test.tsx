@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -1043,6 +1043,87 @@ describe("job workspace", () => {
     await user.click(await screen.findByRole("button", { name: "Clear data date" }));
     await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
       jobId: baseJob.id, dataDate: null, expectedJobVersion: 3,
+    }));
+  });
+
+  it("rejects a non-integer percent complete before calling the client", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const leaf = {
+      ...fixtureTask(job, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const updateTaskProgress = vi.fn();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [leaf] }),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(), updateTaskProgress,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    fireEvent.change(screen.getByLabelText("Percent complete for Excavate"), {
+      target: { value: "1.5" },
+    });
+    await user.click(screen.getByRole("button", { name: "Save progress" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Percent complete must be a whole number between 0 and 100.",
+    );
+    expect(updateTaskProgress).not.toHaveBeenCalled();
+  });
+
+  it("re-baselines a data-date draft after a refresh so the retried save succeeds", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 2, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = {
+      ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const hierarchyV2 = { jobId: baseJob.id, jobVersion: 2, tasks: [leaf], dependencies: [] };
+    const hierarchyV3 = { ...hierarchyV2, jobVersion: 3 };
+    const hierarchyV4 = { ...hierarchyV2, jobVersion: 4 };
+    const refreshedJob = { ...baseJob, version: 3 };
+    const savedJob = { ...baseJob, version: 4, dataDate: "2026-08-18" };
+    let currentJob = baseJob;
+    const updateJobDataDate = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        // Another writer advanced the job version between load and save.
+        currentJob = refreshedJob;
+        return Promise.reject({ kind: "version_conflict", message: "stale" });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = savedJob;
+        return Promise.resolve(savedJob);
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValueOnce(hierarchyV2)
+        .mockResolvedValueOnce(hierarchyV3)
+        .mockResolvedValueOnce(hierarchyV4),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(), updateJobDataDate,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    const field = screen.getByLabelText(`Data date for ${baseJob.name}`);
+    await user.type(field, "2026-08-18");
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+
+    expect(await screen.findByText(/Schedule inputs changed elsewhere/)).toBeVisible();
+    expect(field).toHaveValue("2026-08-18");
+
+    await user.click(screen.getByRole("button", { name: "Refresh schedule" }));
+    expect(field).toHaveValue("2026-08-18");
+
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+    await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
+      jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
     }));
   });
 });

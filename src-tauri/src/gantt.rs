@@ -203,6 +203,7 @@ pub fn build_gantt_read_model(
     let baseline_id = source.baseline.as_ref().map(|baseline| baseline.id.clone());
     let baseline_by_task = join_baseline(source.baseline, &task_ids)?;
     let predecessors_by_task = join_predecessors(source.predecessors, &task_ids)?;
+    let progress_statuses = derive_progress_statuses(&source.tasks, &schedule_by_id);
 
     let rows = hierarchy
         .into_iter()
@@ -256,7 +257,7 @@ pub fn build_gantt_read_model(
                 percent_complete: scheduled.percent_complete,
                 actual_start: scheduled.actual_start,
                 actual_finish: scheduled.actual_finish,
-                progress_status: derive_progress_status(scheduled),
+                progress_status: progress_statuses[task.id.as_str()],
                 predecessor_ids: predecessors_by_task
                     .get(task.id.as_str())
                     .cloned()
@@ -295,15 +296,68 @@ pub fn build_gantt_read_model(
     })
 }
 
-/// Derives completed/in-progress/not-started purely from scheduler facts. Leaves
-/// carry actuals; summaries expose only a derived percent (their actuals are None),
-/// so a fully-complete row is 100, an untouched row is 0 with no actual start, and
-/// everything between is in progress.
-fn derive_progress_status(scheduled: &ScheduledTask) -> GanttProgressStatus {
+/// Derives completed/in-progress/not-started for every task. Leaves use their own
+/// percent and actuals; summaries aggregate their direct children so that started
+/// work is never announced as "not started" even when the duration-weighted percent
+/// floors to zero (e.g. partially-started milestones).
+fn derive_progress_statuses<'a>(
+    tasks: &'a [GanttTaskSource],
+    schedule_by_id: &HashMap<&'a str, &'a ScheduledTask>,
+) -> HashMap<&'a str, GanttProgressStatus> {
+    let mut children: HashMap<&str, Vec<&str>> = HashMap::new();
+    for task in tasks {
+        if let Some(parent) = task.parent_task_id.as_deref() {
+            children.entry(parent).or_default().push(task.id.as_str());
+        }
+    }
+    // Tasks are in deterministic hierarchy pre-order, so iterating in reverse
+    // visits every descendant before its summary parent.
+    let mut statuses: HashMap<&str, GanttProgressStatus> = HashMap::with_capacity(tasks.len());
+    for task in tasks.iter().rev() {
+        let scheduled = schedule_by_id[task.id.as_str()];
+        let status = if scheduled.summary {
+            aggregate_summary_status(
+                children
+                    .get(task.id.as_str())
+                    .into_iter()
+                    .flatten()
+                    .map(|child| statuses[child]),
+            )
+        } else {
+            leaf_progress_status(scheduled)
+        };
+        statuses.insert(task.id.as_str(), status);
+    }
+    statuses
+}
+
+fn leaf_progress_status(scheduled: &ScheduledTask) -> GanttProgressStatus {
     if scheduled.percent_complete == 100 {
         GanttProgressStatus::Completed
     } else if scheduled.percent_complete == 0 && scheduled.actual_start.is_none() {
         GanttProgressStatus::NotStarted
+    } else {
+        GanttProgressStatus::InProgress
+    }
+}
+
+/// All descendants complete -> completed; all not started -> not started;
+/// otherwise in progress. An empty summary (no children) reports not started.
+fn aggregate_summary_status(
+    statuses: impl Iterator<Item = GanttProgressStatus>,
+) -> GanttProgressStatus {
+    let mut any = false;
+    let mut all_completed = true;
+    let mut all_not_started = true;
+    for status in statuses {
+        any = true;
+        all_completed &= status == GanttProgressStatus::Completed;
+        all_not_started &= status == GanttProgressStatus::NotStarted;
+    }
+    if !any || all_not_started {
+        GanttProgressStatus::NotStarted
+    } else if all_completed {
+        GanttProgressStatus::Completed
     } else {
         GanttProgressStatus::InProgress
     }

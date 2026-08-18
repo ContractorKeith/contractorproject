@@ -61,7 +61,7 @@ test("keeps the 1,000-row shared timeline within the ADR regression floor", asyn
         framesAbove25Percent: (samples.filter((sample) => sample > 25).length / samples.length) * 100,
         maximumDrift,
         taskNodeCount: scrollport.querySelectorAll(
-          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-dependency]",
+          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-progress-task-id], [data-dependency]",
         ).length,
         longTasks: longTasks.length,
       };

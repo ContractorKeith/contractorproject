@@ -443,6 +443,13 @@ function timelineDomain(readModel: GanttReadModel): {
 } {
   const starts = [parseLocalMinute(readModel.scheduleStart)];
   const finishes = [parseLocalMinute(readModel.scheduleFinish)];
+  if (readModel.dataDate) {
+    // Keep the data-date marker inside the drawn ruler/grid even when it sits
+    // beyond the last finish (e.g. an all-complete job with early actuals).
+    const dataDateMinute = parseLocalMinute(readModel.dataDate);
+    starts.push(dataDateMinute);
+    finishes.push(dataDateMinute);
+  }
   for (const row of readModel.rows) {
     starts.push(parseLocalMinute(row.start));
     finishes.push(parseLocalMinute(row.finish));

@@ -47,9 +47,13 @@ Each row exposes:
 - nullable `actualStart` and `actualFinish` normalized instants. A leaf reports
   its own actuals; summaries never fabricate actual dates and always report
   `null`.
-- `progressStatus` of `completed`, `inProgress`, or `notStarted`, derived in Rust
-  (100 percent is completed; 0 percent with no actual start is not started;
-  everything else is in progress). React renders this fact and never derives it.
+- `progressStatus` of `completed`, `inProgress`, or `notStarted`, derived in Rust.
+  A leaf is completed at 100 percent, not started at 0 percent with no actual
+  start, and in progress otherwise. A summary aggregates its descendant leaves:
+  all completed is completed, all not started is not started, and any mix is in
+  progress. This keeps a summary whose duration-weighted percent floors to zero
+  (for example a partially-started set of milestones) reporting `inProgress`
+  rather than `notStarted`. React renders this fact and never derives it.
 - nullable leaf `startNoEarlierThan` and `finishNoLaterThan` local-civil dates,
   plus explicit `constraintViolated` from the scheduler. A leaf reports its
   direct violation; a summary derives this state from a violated descendant.
@@ -94,9 +98,13 @@ The supplemental timeline draws these Rust-provided facts without any schedule
 math beyond proportioning:
 
 - The task-bar progress overlay width is strictly `barWidth * percentComplete /
-  100`. It never recomputes remaining work.
-- A vertical data-date marker is drawn at `dataDate` when set, with a visible
-  label and an accessible name; it scrolls with the bars.
+  100`. It never recomputes remaining work. Milestones render as a diamond only
+  and never receive a progress overlay, including when complete.
+- A vertical data-date marker is drawn at `dataDate` when set as a 1.5px
+  `--color-accent` line with a small flag label at the header and an accessible
+  name; it scrolls with the bars. The timeline domain always includes the data
+  date, so the marker stays inside the drawn ruler and grid even when it falls
+  beyond the last finish (an all-complete job with early actuals).
 - A not-started milestone driven by the data date reports the prior working
   day's finish instant (the same working instant as the data-date start) and
   therefore draws immediately before the marker line. This is the scheduler's

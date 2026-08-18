@@ -774,6 +774,15 @@ function TaskEditor({
 
   async function saveProgress(clear: boolean) {
     if (!task || !client.updateTaskProgress || pending) return;
+    // Reject non-integer percent client-side so a decimal never surfaces an
+    // opaque serialization error from the Rust command boundary.
+    if (!clear && percentComplete !== "") {
+      const parsed = Number(percentComplete);
+      if (!Number.isInteger(parsed) || parsed < 0 || parsed > 100) {
+        setError("Percent complete must be a whole number between 0 and 100.");
+        return;
+      }
+    }
     setPending(true);
     setError(null);
     try {
@@ -990,6 +999,7 @@ function TaskEditor({
                   type="number"
                   min="0"
                   max="100"
+                  step="1"
                   value={percentComplete}
                   disabled={pending}
                   onChange={(event) => {
@@ -1265,6 +1275,11 @@ function ScheduleSettings({
       onJobChange(snapshot.job);
       onHierarchyChange(refreshedHierarchy);
       setBaseVersion(refreshedHierarchy.jobVersion);
+      // Re-baseline the data-date draft too, or a dirty field plus a job-version
+      // bump wedges the conflict banner until the component remounts.
+      if (dataDateBaseVersion !== null) {
+        setDataDateBaseVersion(refreshedHierarchy.jobVersion);
+      }
       setConflict(false);
     } catch (reason: unknown) {
       setMessage(errorMessage(reason));
