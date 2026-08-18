@@ -46,6 +46,9 @@ test("virtualizes 1,000 logical rows without accessibility violations", async ({
 });
 
 test("announces visible constraint values and direct violations without color-only state", async ({ page }) => {
+  await page.locator(".gantt-schedule").evaluate((schedule) => {
+    (schedule as HTMLElement).style.setProperty("--font-heading", "system-ui, sans-serif");
+  });
   for (const width of [1100, 760]) {
     await page.setViewportSize({ width, height: 700 });
     if (width === 760) {
@@ -66,6 +69,7 @@ test("announces visible constraint values and direct violations without color-on
     await expect(visibleFacts.nth(2)).toHaveText("≥ 2026-08-18");
     await expect(constrainedRow.getByTestId("constraint-float-phase-1-task-1")).toHaveText(/Constraint\s*violated/);
     const factDimensions = await visibleFacts.evaluateAll((elements) => elements.map((element) => ({
+      fact: element.getAttribute("data-testid") ?? element.className,
       clientWidth: element.clientWidth,
       scrollWidth: element.scrollWidth,
       clientHeight: element.clientHeight,
@@ -74,8 +78,8 @@ test("announces visible constraint values and direct violations without color-on
     })));
     for (const dimensions of factDimensions) {
       expect(dimensions.visible).toBe(true);
-      expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.clientWidth);
-      expect(dimensions.scrollHeight).toBeLessThanOrEqual(dimensions.clientHeight);
+      expect(dimensions.scrollWidth, `${dimensions.fact} horizontal fit`).toBeLessThanOrEqual(dimensions.clientWidth);
+      expect(dimensions.scrollHeight, `${dimensions.fact} vertical fit`).toBeLessThanOrEqual(dimensions.clientHeight);
     }
   }
 
@@ -97,13 +101,13 @@ test("keeps compact density synchronized with the virtual scroll model", async (
         actual: grid.querySelector<HTMLElement>("tr[data-task-id]")?.getBoundingClientRect().height,
       })),
     )
-    .toEqual({ configured: 36, actual: 36 });
+    .toEqual({ configured: 40, actual: 40 });
 
   const geometry = await page.locator(".gantt-treegrid-scrollport").evaluate((scrollport) => ({
     scrollHeight: scrollport.scrollHeight,
     headerHeight: scrollport.querySelector<HTMLElement>("thead")?.getBoundingClientRect().height ?? 0,
   }));
-  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(36_000, 0);
+  expect(geometry.scrollHeight - geometry.headerHeight).toBeCloseTo(40_000, 0);
 });
 
 test("moves cell focus and recovers it after an offscreen jump", async ({ page }) => {
@@ -312,7 +316,8 @@ function centerMinute(element: HTMLElement): number {
 test("clips a long-distance predecessor path into the mounted successor window", async ({ page }) => {
   const scrollport = page.getByTestId("gantt-scrollport");
   await scrollport.evaluate((element) => {
-    element.scrollTop = 1_300;
+    const rowHeight = Number.parseFloat(getComputedStyle(element).getPropertyValue("--row-h"));
+    element.scrollTop = rowHeight * 42;
   });
   await expect(page.locator('[data-dependency="phase-1-task-1->phase-1-task-51"]')).toHaveCount(1);
   await expect(page.locator('tr[data-task-id="phase-1-task-1"]')).toHaveCount(0);

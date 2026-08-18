@@ -203,7 +203,7 @@
 }
 
 .gantt-treegrid__name-column {
-  width: 19%;
+  width: 16%;
 }
 
 .gantt-treegrid__duration-column {
@@ -211,7 +211,7 @@
 }
 
 .gantt-treegrid__float-column {
-  width: 12%;
+  width: 15%;
 }
 
 .gantt-treegrid__date-column {
@@ -345,16 +345,17 @@
 @media (min-width: 1000px) {
   .gantt-schedule {
     --gantt-wbs-width: 720px;
-    --row-h: 40px;
-    --row-h-compact: 36px;
+    --row-h: 44px;
+    --row-h-compact: 40px;
   }
 
   .gantt-treegrid__date--detail {
-    grid-template-rows: repeat(3, 12px);
+    grid-template-rows: 10px 20px 10px;
   }
 
-  .gantt-treegrid__date--detail .gantt-treegrid__secondary {
-    white-space: nowrap;
+  .gantt-treegrid__date--detail > span {
+    min-height: 10px;
+    line-height: 10px;
   }
 }
 
