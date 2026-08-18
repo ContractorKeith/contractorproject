@@ -1125,6 +1125,10 @@ describe("job workspace", () => {
     await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
       jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
     }));
+
+    // The successful save must not re-raise the schedule conflict banner.
+    expect(await screen.findByText("Data date saved.")).toBeVisible();
+    expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
   });
 });
 

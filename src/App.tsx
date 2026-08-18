@@ -1255,6 +1255,9 @@ function ScheduleSettings({
       onJobChange(snapshot.job);
       onHierarchyChange(snapshot.hierarchy);
       setDataDateBaseVersion(null);
+      // The save advanced the job version; re-baseline a dirty schedule draft so
+      // the effect does not re-raise the conflict banner on the fresh version.
+      setBaseVersion((current) => (current === null ? null : snapshot.hierarchy.jobVersion));
       setConflict(false);
       setMessage("Data date saved.");
     } catch (reason: unknown) {
