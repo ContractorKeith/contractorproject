@@ -39,6 +39,33 @@ fn working_calendar() -> WorkingCalendar {
     }
 }
 
+fn seven_day_calendar() -> WorkingCalendar {
+    WorkingCalendar {
+        working_weekdays: vec![
+            CalendarWeekday::Monday,
+            CalendarWeekday::Tuesday,
+            CalendarWeekday::Wednesday,
+            CalendarWeekday::Thursday,
+            CalendarWeekday::Friday,
+            CalendarWeekday::Saturday,
+            CalendarWeekday::Sunday,
+        ],
+        workday_start_minute: 480,
+        workday_duration_minutes: 480,
+    }
+}
+
+fn job_calendar_and_version(path: &std::path::Path, job_id: &str) -> (String, i64) {
+    Connection::open(path)
+        .expect("open job database")
+        .query_row(
+            "SELECT calendar_json, version FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read job calendar and version")
+}
+
 fn command_log_count(path: &std::path::Path) -> i64 {
     Connection::open(path)
         .expect("open audit database")
@@ -865,6 +892,278 @@ fn milestone_conversion_allows_a_complete_leaf_with_equal_actuals() {
     assert_eq!(row.0, Some(100));
     assert_eq!(row.1.as_deref(), Some("2026-08-17"));
     assert_eq!(row.2.as_deref(), Some("2026-08-17"));
+}
+
+#[test]
+fn calendar_narrowing_under_persisted_weekend_actuals_is_rejected_atomically() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Weekend work".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    // A seven-day calendar makes Saturday/Sunday valid working days.
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: seven_day_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("seven-day schedule");
+    let task = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Weekend leaf".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("task");
+    let duration = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: task.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: task.task.version,
+                expected_job_version: task.job_version,
+            },
+        )
+        .expect("duration");
+    let job = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-17".into()),
+                expected_job_version: duration.job_version,
+            },
+        )
+        .expect("data date");
+    // A leaf completed across the weekend has Saturday/Sunday actuals.
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: task.task.id.clone(),
+                clear: false,
+                percent_complete: Some(100),
+                actual_start: Some("2026-08-15".into()),
+                actual_finish: Some("2026-08-16".into()),
+                expected_version: duration.task.version,
+                expected_job_version: job.version,
+            },
+        )
+        .expect("weekend completion");
+
+    // Narrowing to Monday-Friday inverts the normalized actual window and the
+    // scheduler rejects it; the calendar, version, and audit log are untouched.
+    let (calendar_before, version_before) = job_calendar_and_version(&path, &job.id);
+    let audit_before = command_log_count(&path);
+    let error = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect_err("weekday narrowing rejected");
+    assert_eq!(error.kind(), "validation_failed");
+    assert_eq!(
+        job_calendar_and_version(&path, &job.id),
+        (calendar_before, version_before)
+    );
+    assert_eq!(command_log_count(&path), audit_before);
+}
+
+#[test]
+fn a_still_valid_calendar_change_commits_with_progress_present() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job, leaf) = seed_scheduled_leaf(&path);
+    let job = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("data date");
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: leaf.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: leaf.task.version,
+                expected_job_version: job.version,
+            },
+        )
+        .expect("progress");
+    // An earlier start time keeps every actual and the data date valid.
+    let updated = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: WorkingCalendar {
+                    working_weekdays: working_calendar().working_weekdays,
+                    workday_start_minute: 420,
+                    workday_duration_minutes: 480,
+                },
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect("valid calendar change commits");
+    assert_eq!(updated.version, progress.job_version + 1);
+    assert_eq!(updated.data_date.as_deref(), Some("2026-08-18"));
+    let row = task_progress_row(&path, &leaf.task.id);
+    assert_eq!(row.0, Some(50));
+    assert_eq!(row.1.as_deref(), Some("2026-08-17"));
+}
+
+#[test]
+fn clearing_the_schedule_start_with_persisted_progress_is_rejected_atomically() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job, leaf) = seed_scheduled_leaf(&path);
+    let job = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("data date");
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: leaf.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: leaf.task.version,
+                expected_job_version: job.version,
+            },
+        )
+        .expect("progress");
+    let (calendar_before, version_before) = job_calendar_and_version(&path, &job.id);
+    let audit_before = command_log_count(&path);
+    let error = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: None,
+                calendar: working_calendar(),
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect_err("cannot clear schedule start with progress present");
+    assert_eq!(error.kind(), "validation_failed");
+    assert_eq!(
+        error.to_string(),
+        "clear task progress and the data date before clearing the schedule start"
+    );
+    let schedule_start: Option<String> = Connection::open(&path)
+        .expect("open")
+        .query_row(
+            "SELECT schedule_start FROM jobs WHERE id = ?1",
+            [&job.id],
+            |row| row.get(0),
+        )
+        .expect("schedule start");
+    assert_eq!(schedule_start.as_deref(), Some("2026-08-17"));
+    assert_eq!(
+        job_calendar_and_version(&path, &job.id),
+        (calendar_before, version_before)
+    );
+    assert_eq!(command_log_count(&path), audit_before);
+}
+
+#[test]
+fn progress_on_a_duration_less_leaf_reports_duration_required() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "No duration".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("schedule");
+    // A freshly created leaf carries no duration yet.
+    let leaf = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Unsized".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("task");
+    let audit_before = command_log_count(&path);
+    let error = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: leaf.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: leaf.task.version,
+                expected_job_version: leaf.job_version,
+            },
+        )
+        .expect_err("duration required");
+    assert_eq!(error.kind(), "validation_failed");
+    assert_eq!(
+        error.to_string(),
+        "set a duration before reporting progress"
+    );
+    assert_eq!(command_log_count(&path), audit_before);
 }
 
 /// Writes an exact-v5 schema (migrations 1..5) with one leaf task, matching the

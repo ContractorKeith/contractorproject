@@ -56,11 +56,15 @@ Summary tasks are ordinary tasks with children. Their calculated dates, duration
 Persisted input rules: leaf duration is either zero (milestone) or positive
 (normal work); `NULL` is used by summaries and permitted while schedule setup
 is incomplete. Finish-to-start dependency endpoints must be scheduled leaves.
-Summary tasks cannot carry constraints or progress. Constraint, data-date, and
-task-progress edits all validate the complete proposed schedule (including every
-persisted constraint and progress entry plus the job data date) through the pure
+Summary tasks cannot carry constraints or progress. Schedule-setting,
+constraint, data-date, and task-progress edits all validate the complete
+proposed schedule (including every persisted constraint and progress entry plus
+the job data date, with the candidate edit substituted) through the pure
 scheduler before commit; failed validation leaves canonical rows, versions, and
-`command_log` unchanged.
+`command_log` unchanged. Progress requires a duration, so reporting progress on a
+duration-less leaf is rejected. A schedule start may be left unset only while no
+data date or task progress is stranded behind it; clearing the schedule start
+under persisted progress or a data date is rejected.
 
 Progress rules: progress applies only to leaf tasks and is supplied as a
 `percent_complete` with optional `actual_start`/`actual_finish`. A cleared or

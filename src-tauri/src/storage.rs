@@ -21,7 +21,7 @@ use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
 use crate::scheduling::{
     calculate_schedule_with_progress, FinishStartDependency as ScheduleDependency, ScheduleInput,
-    ScheduleProgress, ScheduleTask, TaskConstraint, TaskProgress,
+    ScheduleProgress, ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
@@ -606,12 +606,15 @@ impl SqliteStore {
             if parent.duration_minutes.is_some()
                 || parent.start_no_earlier_than.is_some()
                 || parent.finish_no_later_than.is_some()
+                || parent.percent_complete.is_some()
+                || parent.actual_start.is_some()
+                || parent.actual_finish.is_some()
                 || task_has_dependencies(&transaction, parent_id)?
             {
                 return Err(ApplicationError::ValidationFailed {
                     code: "summary_conversion_requires_cleanup",
                     field: "newParentTaskId",
-                    message: "clear the parent duration, constraints, and dependencies before moving a child under it".into(),
+                    message: "clear the parent duration, constraints, progress, and dependencies before moving a child under it".into(),
                 });
             }
         }
@@ -729,6 +732,14 @@ impl SqliteStore {
             &transaction,
             &request.job_id,
             Some(request.expected_job_version),
+        )?;
+        validate_proposed_schedule(
+            &transaction,
+            &request.job_id,
+            &ProposedEdit::Schedule {
+                schedule_start: request.schedule_start.as_deref(),
+                calendar: &request.calendar,
+            },
         )?;
         let calendar = serde_json::to_string(&request.calendar)
             .map_err(|error| ApplicationError::InvalidStoredData(error.to_string()))?;
@@ -992,6 +1003,16 @@ impl SqliteStore {
                 code: "summary_progress",
                 field: "taskId",
                 message: "progress applies only to leaf tasks".into(),
+            });
+        }
+        // A duration-less leaf cannot be scheduled, so report a clear input error
+        // rather than surfacing the scheduler's summary rejection. A clear stays
+        // valid because it removes progress from such a task.
+        if !request.clear && task.duration_minutes.is_none() {
+            return Err(ApplicationError::ValidationFailed {
+                code: "duration_required",
+                field: "durationMinutes",
+                message: "set a duration before reporting progress".into(),
             });
         }
         // A clear nulls every progress column; otherwise the request values are
@@ -2540,6 +2561,12 @@ struct ProposedProgress {
 enum ProposedEdit<'a> {
     /// A leaf constraint or duration change; the candidate carries the new values.
     Task(&'a Task),
+    /// A job schedule-start/calendar change; `schedule_start` `None` leaves the
+    /// job without a schedule start.
+    Schedule {
+        schedule_start: Option<&'a str>,
+        calendar: &'a WorkingCalendar,
+    },
     /// A job data-date change; `None` clears the data date.
     DataDate(Option<&'a str>),
     /// A leaf progress change; `None` clears the row back to unstatused.
@@ -2558,7 +2585,7 @@ fn validate_proposed_schedule(
     job_id: &str,
     edit: &ProposedEdit,
 ) -> Result<(), ApplicationError> {
-    let (schedule_start, calendar_json, stored_data_date): (
+    let (stored_schedule_start, calendar_json, stored_data_date): (
         Option<String>,
         String,
         Option<String>,
@@ -2567,25 +2594,60 @@ fn validate_proposed_schedule(
         [job_id],
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    let schedule_start = schedule_start.ok_or(ApplicationError::ValidationFailed {
-        code: "schedule_start_required",
-        field: "scheduleStart",
-        message: "set a schedule start before updating the schedule".into(),
-    })?;
-    let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
-        ApplicationError::InvalidStoredData("job has invalid schedule start".into())
-    })?;
-    let calendar = serde_json::from_str(&calendar_json)
-        .map_err(|_| ApplicationError::InvalidStoredData("job has invalid calendar".into()))?;
+
+    // Resolve the proposed calendar and schedule start: a Schedule edit overrides
+    // both; every other edit reads the stored values.
+    let (proposed_schedule_start, calendar): (Option<String>, WorkingCalendar) = match edit {
+        ProposedEdit::Schedule {
+            schedule_start,
+            calendar,
+        } => (schedule_start.map(str::to_owned), (*calendar).clone()),
+        _ => {
+            let calendar = serde_json::from_str(&calendar_json).map_err(|_| {
+                ApplicationError::InvalidStoredData("job has invalid calendar".into())
+            })?;
+            (stored_schedule_start, calendar)
+        }
+    };
 
     // Resolve the proposed data date: the DataDate edit overrides the stored value.
     let data_date_value = match edit {
         ProposedEdit::DataDate(value) => value.map(str::to_owned),
         _ => stored_data_date,
     };
+
+    // Without a schedule start the pure scheduler cannot run. A Schedule edit may
+    // legally leave the job unset during setup, but only while no data date or
+    // task progress is stranded behind the missing schedule start.
+    let Some(schedule_start) = proposed_schedule_start else {
+        let has_progress: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE job_id = ?1 AND (percent_complete IS NOT NULL OR actual_start IS NOT NULL OR actual_finish IS NOT NULL))",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        if data_date_value.is_some() || has_progress {
+            return Err(ApplicationError::ValidationFailed {
+                code: "schedule_start_required",
+                field: "scheduleStart",
+                message: "clear task progress and the data date before clearing the schedule start"
+                    .into(),
+            });
+        }
+        return match edit {
+            ProposedEdit::Schedule { .. } => Ok(()),
+            _ => Err(ApplicationError::ValidationFailed {
+                code: "schedule_start_required",
+                field: "scheduleStart",
+                message: "set a schedule start before updating the schedule".into(),
+            }),
+        };
+    };
+    let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidStoredData("job has invalid schedule start".into())
+    })?;
     let data_date = data_date_value
         .as_deref()
-        .map(parse_stored_constraint)
+        .map(parse_stored_data_date)
         .transpose()?;
 
     let mut tasks = Vec::new();
@@ -2706,6 +2768,11 @@ fn validate_proposed_schedule(
 fn parse_stored_constraint(value: &str) -> Result<NaiveDate, ApplicationError> {
     parse_canonical_constraint_date(value)
         .map_err(|_| ApplicationError::InvalidStoredData("task has invalid constraint".into()))
+}
+
+fn parse_stored_data_date(value: &str) -> Result<NaiveDate, ApplicationError> {
+    parse_canonical_constraint_date(value)
+        .map_err(|_| ApplicationError::InvalidStoredData("job has an invalid data date".into()))
 }
 
 fn parse_canonical_constraint_date(value: &str) -> Result<NaiveDate, ()> {
