@@ -12,15 +12,16 @@ use uuid::Uuid;
 
 use crate::application::{
     AddDependencyRequest, BackupResult, CommandContext, RemoveDependencyRequest,
-    ReorderTaskRequest, RestoreVerificationResult, TaskConstraintKind, UpdateScheduleRequest,
-    UpdateTaskConstraintRequest, UpdateTaskDurationRequest, MAX_AUDIT_SUMMARY_CHARACTERS,
-    MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
+    ReorderTaskRequest, RestoreVerificationResult, TaskConstraintKind, UpdateJobDataDateRequest,
+    UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
+    UpdateTaskProgressRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
+    MAX_COMMAND_ID_CHARACTERS,
 };
 use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
 use crate::scheduling::{
-    calculate_schedule_with_constraints, FinishStartDependency as ScheduleDependency,
-    ScheduleInput, ScheduleTask, TaskConstraint,
+    calculate_schedule_with_progress, FinishStartDependency as ScheduleDependency, ScheduleInput,
+    ScheduleProgress, ScheduleTask, TaskConstraint, TaskProgress,
 };
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
@@ -125,7 +126,7 @@ impl SqliteStore {
     {
         let connection = self.connection()?;
         let mut statement = connection.prepare(&format!(
-            "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version
+            "SELECT id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version
              FROM jobs {predicate}
              ORDER BY created_at DESC, id DESC"
         ))?;
@@ -138,9 +139,10 @@ impl SqliteStore {
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(6)?,
                     row.get::<_, String>(7)?,
-                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, i64>(9)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -154,6 +156,7 @@ impl SqliteStore {
                     timezone,
                     schedule_start,
                     calendar_json,
+                    data_date,
                     created_at,
                     updated_at,
                     version,
@@ -174,6 +177,7 @@ impl SqliteStore {
                                 "job {id} has invalid calendar"
                             ))
                         })?,
+                        data_date,
                         created_at,
                         updated_at,
                         version,
@@ -296,12 +300,15 @@ impl SqliteStore {
             if parent.duration_minutes.is_some()
                 || parent.start_no_earlier_than.is_some()
                 || parent.finish_no_later_than.is_some()
+                || parent.percent_complete.is_some()
+                || parent.actual_start.is_some()
+                || parent.actual_finish.is_some()
                 || task_has_dependencies(&transaction, parent_id)?
             {
                 return Err(ApplicationError::ValidationFailed {
                     code: "summary_conversion_requires_cleanup",
                     field: "parentTaskId",
-                    message: "clear the parent duration, constraints, and dependencies before adding a child".into(),
+                    message: "clear the parent duration, constraints, progress, and dependencies before adding a child".into(),
                 });
             }
         }
@@ -527,7 +534,7 @@ impl SqliteStore {
         ensure_command_is_new(&transaction, context)?;
         let mut task = transaction
             .query_row(
-                "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
+                "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version
                  FROM tasks WHERE id = ?1",
                 [task_id],
                 task_from_row,
@@ -794,6 +801,34 @@ impl SqliteStore {
                 message: "clear task constraints before clearing a leaf duration".into(),
             });
         }
+        if request.duration_minutes.is_none()
+            && (task.percent_complete.is_some()
+                || task.actual_start.is_some()
+                || task.actual_finish.is_some())
+        {
+            return Err(ApplicationError::ValidationFailed {
+                code: "summary_progress",
+                field: "durationMinutes",
+                message: "clear task progress before clearing a leaf duration".into(),
+            });
+        }
+        // Converting to a milestone (zero duration) must not strand persisted
+        // progress the scheduler would reject: a milestone accepts only 0 or 100
+        // percent, and a complete milestone requires equal actual dates.
+        if request.duration_minutes == Some(0) {
+            let partial =
+                matches!(task.percent_complete, Some(percent) if (1..=99).contains(&percent));
+            let complete_unequal =
+                task.percent_complete == Some(100) && task.actual_start != task.actual_finish;
+            if partial || complete_unequal {
+                return Err(ApplicationError::ValidationFailed {
+                    code: "milestone_progress",
+                    field: "durationMinutes",
+                    message: "clear or complete task progress before converting to a milestone"
+                        .into(),
+                });
+            }
+        }
         task.duration_minutes = request.duration_minutes;
         task.updated_at = updated_at.into();
         task.version += 1;
@@ -863,7 +898,7 @@ impl SqliteStore {
                 task.finish_no_later_than = request.value.clone()
             }
         }
-        validate_proposed_schedule(&transaction, &task)?;
+        validate_proposed_schedule(&transaction, &task.job_id, &ProposedEdit::Task(&task))?;
         task.updated_at = updated_at.into();
         task.version += 1;
         transaction.execute(
@@ -875,6 +910,139 @@ impl SqliteStore {
             params![updated_at, job_version + 1, task.job_id],
         )?;
         write_audit_record(&transaction, context, updated_at, "updated task constraint")?;
+        transaction.commit()?;
+        Ok((task, job_version + 1))
+    }
+
+    /// Sets or clears the job data date. The whole proposed schedule (including
+    /// persisted progress) is validated before commit, so clearing a data date
+    /// while any task still carries progress is rejected by the scheduler.
+    pub(crate) fn update_job_data_date(
+        &self,
+        request: &UpdateJobDataDateRequest,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job_version = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
+        validate_proposed_schedule(
+            &transaction,
+            &request.job_id,
+            &ProposedEdit::DataDate(request.data_date.as_deref()),
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET data_date = ?1, updated_at = ?2, version = ?3 WHERE id = ?4",
+            params![
+                request.data_date,
+                updated_at,
+                job_version + 1,
+                request.job_id
+            ],
+        )?;
+        write_audit_record(&transaction, context, updated_at, "updated job data date")?;
+        let job = read_job(&transaction, &request.job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Sets or clears leaf task progress. Summary tasks are rejected and the
+    /// complete proposed schedule is validated before commit; a clear nulls all
+    /// three progress columns back to unstatused.
+    pub(crate) fn update_task_progress(
+        &self,
+        request: &UpdateTaskProgressRequest,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<(Task, i64), ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let mut task = find_task(&transaction, &request.task_id)?.ok_or_else(|| {
+            ApplicationError::NotFound {
+                resource: "task",
+                id: request.task_id.clone(),
+            }
+        })?;
+        if task.version != request.expected_version {
+            return Err(ApplicationError::VersionConflict {
+                resource: "task",
+                id: task.id.clone(),
+                expected: request.expected_version,
+                current: task.version,
+            });
+        }
+        let job_version = require_draft_job(
+            &transaction,
+            &task.job_id,
+            Some(request.expected_job_version),
+        )?;
+        let is_summary: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM tasks WHERE parent_task_id = ?1)",
+            [&task.id],
+            |row| row.get(0),
+        )?;
+        if is_summary {
+            return Err(ApplicationError::ValidationFailed {
+                code: "summary_progress",
+                field: "taskId",
+                message: "progress applies only to leaf tasks".into(),
+            });
+        }
+        // A clear nulls every progress column; otherwise the request values are
+        // proposed as-is and validated as a whole schedule before commit.
+        let values = (!request.clear).then(|| ProposedProgress {
+            percent_complete: request.percent_complete,
+            actual_start: request.actual_start.clone(),
+            actual_finish: request.actual_finish.clone(),
+        });
+        validate_proposed_schedule(
+            &transaction,
+            &task.job_id,
+            &ProposedEdit::Progress {
+                task_id: &task.id,
+                values: values.as_ref().map(|values| ProposedProgress {
+                    percent_complete: values.percent_complete,
+                    actual_start: values.actual_start.clone(),
+                    actual_finish: values.actual_finish.clone(),
+                }),
+            },
+        )?;
+        match values {
+            Some(values) => {
+                task.percent_complete = values.percent_complete;
+                task.actual_start = values.actual_start;
+                task.actual_finish = values.actual_finish;
+            }
+            None => {
+                task.percent_complete = None;
+                task.actual_start = None;
+                task.actual_finish = None;
+            }
+        }
+        task.updated_at = updated_at.into();
+        task.version += 1;
+        transaction.execute(
+            "UPDATE tasks SET percent_complete = ?1, actual_start = ?2, actual_finish = ?3, updated_at = ?4, version = ?5 WHERE id = ?6",
+            params![
+                task.percent_complete,
+                task.actual_start,
+                task.actual_finish,
+                task.updated_at,
+                task.version,
+                task.id
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![updated_at, job_version + 1, task.job_id],
+        )?;
+        write_audit_record(&transaction, context, updated_at, "updated task progress")?;
         transaction.commit()?;
         Ok((task, job_version + 1))
     }
@@ -1158,6 +1326,24 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 6)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 6)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Nullable data-date/progress columns. NULL percent means unstatused (0
+            // with no actuals); canonical YYYY-MM-DD text is validated on write.
+            transaction.execute_batch(
+                "ALTER TABLE jobs ADD COLUMN data_date TEXT;
+                 ALTER TABLE tasks ADD COLUMN percent_complete INTEGER;
+                 ALTER TABLE tasks ADD COLUMN actual_start TEXT;
+                 ALTER TABLE tasks ADD COLUMN actual_finish TEXT;
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (6, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1266,6 +1452,23 @@ const JOB_COLUMNS: [ColumnSpec; 9] = [
         name: "calendar_json",
         data_type: "TEXT",
         not_null: true,
+        primary_key_position: 0,
+    },
+];
+const JOB_V6_COLUMNS: [ColumnSpec; 10] = [
+    JOB_COLUMNS[0],
+    JOB_COLUMNS[1],
+    JOB_COLUMNS[2],
+    JOB_COLUMNS[3],
+    JOB_COLUMNS[4],
+    JOB_COLUMNS[5],
+    JOB_COLUMNS[6],
+    JOB_COLUMNS[7],
+    JOB_COLUMNS[8],
+    ColumnSpec {
+        name: "data_date",
+        data_type: "TEXT",
+        not_null: false,
         primary_key_position: 0,
     },
 ];
@@ -1388,6 +1591,37 @@ const TASK_V5_COLUMNS: [ColumnSpec; 11] = [
     },
     ColumnSpec {
         name: "finish_no_later_than",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+];
+const TASK_V6_COLUMNS: [ColumnSpec; 14] = [
+    TASK_V5_COLUMNS[0],
+    TASK_V5_COLUMNS[1],
+    TASK_V5_COLUMNS[2],
+    TASK_V5_COLUMNS[3],
+    TASK_V5_COLUMNS[4],
+    TASK_V5_COLUMNS[5],
+    TASK_V5_COLUMNS[6],
+    TASK_V5_COLUMNS[7],
+    TASK_V5_COLUMNS[8],
+    TASK_V5_COLUMNS[9],
+    TASK_V5_COLUMNS[10],
+    ColumnSpec {
+        name: "percent_complete",
+        data_type: "INTEGER",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "actual_start",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "actual_finish",
         data_type: "TEXT",
         not_null: false,
         primary_key_position: 0,
@@ -1686,7 +1920,7 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if !matches!(schema_version, 4 | 5) {
+    if !matches!(schema_version, 4..=6) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
     let required_table_count: i64 = connection
@@ -1707,8 +1941,11 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
         return Err(ApplicationError::BackupVerificationFailed);
     }
     verify_supported_schema(&connection, schema_version)?;
-    if schema_version == 5 {
+    if schema_version >= 5 {
         verify_v5_constraint_domain(&connection)?;
+    }
+    if schema_version == 6 {
+        verify_v6_progress_domain(&connection)?;
     }
 
     // These bounded counts prove the core domain tables are readable without
@@ -1737,24 +1974,32 @@ fn verify_supported_schema(
                 .collect::<rusqlite::Result<Vec<_>>>()
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    let expected_migrations: &[i64] = if schema_version == 4 {
-        &[1, 2, 3, 4]
-    } else {
-        &[1, 2, 3, 4, 5]
+    let expected_migrations: &[i64] = match schema_version {
+        4 => &[1, 2, 3, 4],
+        5 => &[1, 2, 3, 4, 5],
+        _ => &[1, 2, 3, 4, 5, 6],
     };
     if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
     }
 
     verify_table_columns(connection, "schema_migrations", &SCHEMA_MIGRATION_COLUMNS)?;
-    verify_table_columns(connection, "jobs", &JOB_COLUMNS)?;
+    verify_table_columns(
+        connection,
+        "jobs",
+        if schema_version == 6 {
+            &JOB_V6_COLUMNS[..]
+        } else {
+            &JOB_COLUMNS[..]
+        },
+    )?;
     verify_table_columns(
         connection,
         "tasks",
-        if schema_version == 4 {
-            &TASK_COLUMNS
-        } else {
-            &TASK_V5_COLUMNS
+        match schema_version {
+            4 => &TASK_COLUMNS[..],
+            5 => &TASK_V5_COLUMNS[..],
+            _ => &TASK_V6_COLUMNS[..],
         },
     )?;
     verify_table_columns(connection, "command_log", &COMMAND_LOG_COLUMNS)?;
@@ -1815,14 +2060,18 @@ fn verify_supported_schema(
         ),
         (
             "jobs",
-            "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefault",
+            if schema_version == 6 {
+                "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefaultdata_datetext"
+            } else {
+                "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefault"
+            },
         ),
         (
             "tasks",
-            if schema_version == 4 {
-                "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0uniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict"
-            } else {
-                "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0start_no_earlier_thantextfinish_no_later_thantextuniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict"
+            match schema_version {
+                4 => "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0uniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict",
+                5 => "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0start_no_earlier_thantextfinish_no_later_thantextuniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict",
+                _ => "createtabletasksidtextprimarykeyjob_idtextnotnullparent_task_idtextsort_keyintegernotnullchecksort_key>=0nametextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0duration_minutesintegercheckduration_minutes>=0start_no_earlier_thantextfinish_no_later_thantextpercent_completeintegeractual_starttextactual_finishtextuniquejob_ididforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idparent_task_idreferencestasksjob_ididondeleterestrict",
             },
         ),
         (
@@ -1845,13 +2094,18 @@ fn verify_supported_schema(
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
-    let task_query = if schema_version == 4 {
-        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1"
+    let task_query = match schema_version {
+        4 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
+        5 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
+        _ => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
+    };
+    let job_query = if schema_version == 6 {
+        "SELECT id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1"
     } else {
-        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1"
+        "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1"
     };
     for query in [
-        "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1",
+        job_query,
         task_query,
         "SELECT job_id, predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id LIMIT 1",
         "SELECT command_id, actor, client_name, created_at, summary FROM command_log ORDER BY command_id LIMIT 1",
@@ -1897,6 +2151,65 @@ fn verify_v5_constraint_domain(connection: &Connection) -> Result<(), Applicatio
             .into_iter()
             .flatten()
         {
+            parse_canonical_constraint_date(&value)
+                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read-only v6 preflight for the data-date/progress columns. It checks that a
+/// statused row is a leaf with a duration, its percent (when present) is in
+/// `[0, 100]`, and every stored date parses canonically. Deeper cross-field
+/// scheduler semantics stay owned by the pure scheduler.
+fn verify_v6_progress_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let data_date: Option<String> = connection
+        .query_row(
+            "SELECT data_date FROM jobs WHERE data_date IS NOT NULL LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?
+        .flatten();
+    if let Some(value) = data_date {
+        parse_canonical_constraint_date(&value)
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT task.duration_minutes, task.percent_complete, task.actual_start,
+                    task.actual_finish,
+                    EXISTS(SELECT 1 FROM tasks child WHERE child.parent_task_id = task.id)
+             FROM tasks task
+             WHERE task.percent_complete IS NOT NULL
+                OR task.actual_start IS NOT NULL
+                OR task.actual_finish IS NOT NULL",
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, Option<i64>>(0)?,
+                row.get::<_, Option<i64>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, bool>(4)?,
+            ))
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    for row in rows {
+        let (duration, percent, actual_start, actual_finish, has_children) =
+            row.map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if duration.is_none() || has_children {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+        if let Some(percent) = percent {
+            if !(0..=100).contains(&percent) {
+                return Err(ApplicationError::BackupVerificationFailed);
+            }
+        }
+        for value in [actual_start, actual_finish].into_iter().flatten() {
             parse_canonical_constraint_date(&value)
                 .map_err(|_| ApplicationError::BackupVerificationFailed)?;
         }
@@ -2094,17 +2407,20 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
         duration_minutes: row.get(5)?,
         start_no_earlier_than: row.get(6)?,
         finish_no_later_than: row.get(7)?,
-        created_at: row.get(8)?,
-        updated_at: row.get(9)?,
-        version: row.get(10)?,
+        percent_complete: row.get(8)?,
+        actual_start: row.get(9)?,
+        actual_finish: row.get(10)?,
+        created_at: row.get(11)?,
+        updated_at: row.get(12)?,
+        version: row.get(13)?,
     })
 }
 
 fn read_job(connection: &Connection, job_id: &str) -> Result<Job, ApplicationError> {
-    let (id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version) = connection.query_row(
-        "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs WHERE id = ?1",
+    let (id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version) = connection.query_row(
+        "SELECT id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version FROM jobs WHERE id = ?1",
         [job_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, String>(6)?, row.get::<_, String>(7)?, row.get::<_, i64>(8)?)),
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, String>(8)?, row.get::<_, i64>(9)?)),
     ).optional()?.ok_or_else(|| ApplicationError::NotFound { resource: "job", id: job_id.into() })?;
     Ok(Job {
         id: id.clone(),
@@ -2117,6 +2433,7 @@ fn read_job(connection: &Connection, job_id: &str) -> Result<Job, ApplicationErr
         calendar: serde_json::from_str(&calendar_json).map_err(|_| {
             ApplicationError::InvalidStoredData(format!("job {id} has invalid calendar"))
         })?,
+        data_date,
         created_at,
         updated_at,
         version,
@@ -2143,21 +2460,21 @@ fn read_task_hierarchy(
     )?;
     let mut statement = connection.prepare(
         "WITH RECURSIVE task_tree(
-            id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version, path
+            id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version, path
          ) AS (
-            SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version,
+            SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version,
                    printf('%020d:%s', sort_key, id)
             FROM tasks
             WHERE job_id = ?1 AND parent_task_id IS NULL
             UNION ALL
             SELECT child.id, child.job_id, child.parent_task_id, child.sort_key, child.name,
-                   child.duration_minutes, child.start_no_earlier_than, child.finish_no_later_than, child.created_at, child.updated_at, child.version,
+                   child.duration_minutes, child.start_no_earlier_than, child.finish_no_later_than, child.percent_complete, child.actual_start, child.actual_finish, child.created_at, child.updated_at, child.version,
                    parent.path || '/' || printf('%020d:%s', child.sort_key, child.id)
             FROM tasks child
             JOIN task_tree parent ON child.parent_task_id = parent.id
             WHERE child.job_id = ?1
          )
-         SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
+         SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version
          FROM task_tree
          ORDER BY path",
     )?;
@@ -2188,7 +2505,7 @@ fn find_task(
 ) -> Result<Option<Task>, ApplicationError> {
     transaction
         .query_row(
-            "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
+            "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version
              FROM tasks WHERE id = ?1",
             [task_id],
             task_from_row,
@@ -2210,47 +2527,117 @@ fn task_has_dependencies(
         .map_err(Into::into)
 }
 
-/// Validates the candidate task as if it were stored, before any canonical row
-/// is changed. This keeps constraint writes atomic with the complete schedule.
+/// Progress column values proposed for one task before they are persisted.
+struct ProposedProgress {
+    percent_complete: Option<i64>,
+    actual_start: Option<String>,
+    actual_finish: Option<String>,
+}
+
+/// The single canonical edit substituted into the proposed schedule. Every write
+/// path validates the complete job through this seam so no committed edit can
+/// leave a schedule the pure scheduler would reject.
+enum ProposedEdit<'a> {
+    /// A leaf constraint or duration change; the candidate carries the new values.
+    Task(&'a Task),
+    /// A job data-date change; `None` clears the data date.
+    DataDate(Option<&'a str>),
+    /// A leaf progress change; `None` clears the row back to unstatused.
+    Progress {
+        task_id: &'a str,
+        values: Option<ProposedProgress>,
+    },
+}
+
+/// Builds the complete proposed schedule from persisted constraints, progress,
+/// and the job data date, substituting a single candidate edit, and runs the
+/// pure scheduler before any canonical row is written. This keeps every
+/// scheduling-input write atomic with the full schedule the scheduler accepts.
 fn validate_proposed_schedule(
     transaction: &Transaction<'_>,
-    candidate: &Task,
+    job_id: &str,
+    edit: &ProposedEdit,
 ) -> Result<(), ApplicationError> {
-    let (schedule_start, calendar_json): (Option<String>, String) = transaction.query_row(
-        "SELECT schedule_start, calendar_json FROM jobs WHERE id = ?1",
-        [&candidate.job_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+    let (schedule_start, calendar_json, stored_data_date): (
+        Option<String>,
+        String,
+        Option<String>,
+    ) = transaction.query_row(
+        "SELECT schedule_start, calendar_json, data_date FROM jobs WHERE id = ?1",
+        [job_id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     let schedule_start = schedule_start.ok_or(ApplicationError::ValidationFailed {
         code: "schedule_start_required",
         field: "scheduleStart",
-        message: "set a schedule start before changing task constraints".into(),
+        message: "set a schedule start before updating the schedule".into(),
     })?;
     let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
         ApplicationError::InvalidStoredData("job has invalid schedule start".into())
     })?;
     let calendar = serde_json::from_str(&calendar_json)
         .map_err(|_| ApplicationError::InvalidStoredData("job has invalid calendar".into()))?;
+
+    // Resolve the proposed data date: the DataDate edit overrides the stored value.
+    let data_date_value = match edit {
+        ProposedEdit::DataDate(value) => value.map(str::to_owned),
+        _ => stored_data_date,
+    };
+    let data_date = data_date_value
+        .as_deref()
+        .map(parse_stored_constraint)
+        .transpose()?;
+
     let mut tasks = Vec::new();
     let mut constraints = Vec::new();
+    let mut entries = Vec::new();
     let mut statement = transaction.prepare(
-        "SELECT id, parent_task_id, duration_minutes, start_no_earlier_than, finish_no_later_than
+        "SELECT id, parent_task_id, duration_minutes, start_no_earlier_than, finish_no_later_than,
+                percent_complete, actual_start, actual_finish
          FROM tasks WHERE job_id = ?1 ORDER BY id",
     )?;
-    let rows = statement.query_map([&candidate.job_id], |row| {
+    let rows = statement.query_map([job_id], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, Option<String>>(1)?,
             row.get::<_, Option<i64>>(2)?,
             row.get::<_, Option<String>>(3)?,
             row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
         ))
     })?;
     for row in rows {
-        let (id, parent_task_id, duration_minutes, mut snet, mut fnlt) = row?;
-        if id == candidate.id {
-            snet = candidate.start_no_earlier_than.clone();
-            fnlt = candidate.finish_no_later_than.clone();
+        let (
+            id,
+            parent_task_id,
+            mut duration_minutes,
+            mut snet,
+            mut fnlt,
+            mut percent,
+            mut actual_start,
+            mut actual_finish,
+        ) = row?;
+        match edit {
+            ProposedEdit::Task(candidate) if candidate.id == id => {
+                duration_minutes = candidate.duration_minutes;
+                snet = candidate.start_no_earlier_than.clone();
+                fnlt = candidate.finish_no_later_than.clone();
+            }
+            ProposedEdit::Progress { task_id, values } if *task_id == id => match values {
+                Some(values) => {
+                    percent = values.percent_complete;
+                    actual_start = values.actual_start.clone();
+                    actual_finish = values.actual_finish.clone();
+                }
+                None => {
+                    percent = None;
+                    actual_start = None;
+                    actual_finish = None;
+                }
+            },
+            _ => {}
         }
         tasks.push(ScheduleTask {
             id: id.clone(),
@@ -2259,9 +2646,30 @@ fn validate_proposed_schedule(
         });
         if snet.is_some() || fnlt.is_some() {
             constraints.push(TaskConstraint {
-                task_id: id,
+                task_id: id.clone(),
                 start_no_earlier_than: snet.as_deref().map(parse_stored_constraint).transpose()?,
                 finish_no_later_than: fnlt.as_deref().map(parse_stored_constraint).transpose()?,
+            });
+        }
+        // Canonical mapping: unstatused rows (percent NULL/0 with no actuals) are
+        // omitted, matching the scheduler's treatment of absent progress.
+        let has_signal =
+            percent.unwrap_or(0) != 0 || actual_start.is_some() || actual_finish.is_some();
+        if has_signal {
+            let percent_complete = u8::try_from(percent.unwrap_or(0)).map_err(|_| {
+                ApplicationError::InvalidStoredData("task has invalid percent complete".into())
+            })?;
+            entries.push(TaskProgress {
+                task_id: id,
+                percent_complete,
+                actual_start: actual_start
+                    .as_deref()
+                    .map(parse_stored_constraint)
+                    .transpose()?,
+                actual_finish: actual_finish
+                    .as_deref()
+                    .map(parse_stored_constraint)
+                    .transpose()?,
             });
         }
     }
@@ -2269,7 +2677,7 @@ fn validate_proposed_schedule(
         "SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id",
     )?;
     let dependencies = statement
-        .query_map([&candidate.job_id], |row| {
+        .query_map([job_id], |row| {
             Ok(ScheduleDependency {
                 predecessor_task_id: row.get(0)?,
                 successor_task_id: row.get(1)?,
@@ -2277,7 +2685,7 @@ fn validate_proposed_schedule(
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    calculate_schedule_with_constraints(
+    calculate_schedule_with_progress(
         &ScheduleInput {
             schedule_start,
             calendar,
@@ -2285,6 +2693,7 @@ fn validate_proposed_schedule(
             dependencies,
         },
         &constraints,
+        &ScheduleProgress { data_date, entries },
     )
     .map_err(|error| ApplicationError::ValidationFailed {
         code: error.code(),
@@ -2312,7 +2721,7 @@ fn load_siblings(
     parent_task_id: Option<&str>,
 ) -> Result<Vec<Task>, ApplicationError> {
     let mut statement = transaction.prepare(
-        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version
+        "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version
          FROM tasks
          WHERE job_id = ?1 AND parent_task_id IS ?2
          ORDER BY sort_key, id",

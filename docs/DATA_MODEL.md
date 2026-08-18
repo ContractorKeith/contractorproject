@@ -1,7 +1,7 @@
 # Initial data model
 
 Status: planning baseline
-Updated: 2026-08-14
+Updated: 2026-08-18
 
 ## Domain language
 
@@ -29,7 +29,8 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 - `start_constraint`
  - `schedule_start` nullable ISO date; incomplete setup remains valid
  - default working calendar: Monday-Friday, 08:00, 480 continuous working minutes
-- `data_date`
+- `data_date` nullable canonical `YYYY-MM-DD`; `NULL` while the job is
+  unstatused. Set and cleared through an audited, job-version-checked command.
 - `currency_code`
 - `created_at`, `updated_at`, `version`
 
@@ -44,7 +45,9 @@ Use `job` in the product and schema. Reserve `project` for the ContractorProject
 - `duration_minutes`
 - `start_no_earlier_than` and `finish_no_later_than`, independently nullable
   ISO date-only inputs for leaf tasks
-- `percent_complete`
+- `percent_complete` nullable integer in `[0, 100]`; `NULL` is unstatused
+- `actual_start` and `actual_finish`, independently nullable canonical
+  `YYYY-MM-DD` inputs for leaf tasks
 - calculated start, finish, total float, and critical flag as a replaceable projection
 - `created_at`, `updated_at`, `version`
 
@@ -53,13 +56,28 @@ Summary tasks are ordinary tasks with children. Their calculated dates, duration
 Persisted input rules: leaf duration is either zero (milestone) or positive
 (normal work); `NULL` is used by summaries and permitted while schedule setup
 is incomplete. Finish-to-start dependency endpoints must be scheduled leaves.
-Summary tasks cannot carry constraints. Constraint edits validate the complete
-proposed schedule before commit; failed validation leaves canonical rows,
-versions, and `command_log` unchanged.
+Summary tasks cannot carry constraints or progress. Constraint, data-date, and
+task-progress edits all validate the complete proposed schedule (including every
+persisted constraint and progress entry plus the job data date) through the pure
+scheduler before commit; failed validation leaves canonical rows, versions, and
+`command_log` unchanged.
 
-Migration v5 adds the two nullable constraint columns. Existing null values
-retain their unconstrained meaning. Verified-backup preflight accepts exact v4
-or v5 snapshots without migration; new databases and verified backups use v5.
+Progress rules: progress applies only to leaf tasks and is supplied as a
+`percent_complete` with optional `actual_start`/`actual_finish`. A cleared or
+unstatused row nulls all three columns. The canonical scheduling mapping omits
+unstatused rows entirely: a persisted row with `percent_complete` `NULL` or `0`
+and no actuals is equivalent to an absent progress entry, matching how the
+scheduler treats absent and zero-without-actuals progress identically. Every
+other cross-field rule (progress requires a data date, actuals must be on or
+before it, milestone percents, actual ordering, and complete-milestone equality)
+is owned by the scheduler and surfaced at the persistence boundary rather than
+duplicated in storage.
+
+Migration v5 adds the two nullable constraint columns. Migration v6 adds the
+nullable `jobs.data_date` and the nullable `tasks.percent_complete`,
+`tasks.actual_start`, and `tasks.actual_finish` columns. Existing null values
+retain their unstatused meaning. Verified-backup preflight accepts exact v4, v5,
+or v6 snapshots without migration; new databases and verified backups use v6.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in
@@ -127,8 +145,9 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
 - A baseline is immutable.
 - Calculated schedule fields are reproducible from canonical inputs.
 - The schedule read projection is rebuilt from one SQLite snapshot of the job,
-  weekly calendar, ordered hierarchy, leaf durations, and FS dependencies; it
-  is not persisted and reads never mutate the canonical inputs.
+  weekly calendar, ordered hierarchy, leaf durations, FS dependencies, leaf
+  constraints, the job data date, and leaf progress; it is not persisted and
+  reads never mutate the canonical inputs.
 - Imports use stable external IDs or an explicit mapping table so retries do not duplicate records.
 
 ### Recoverable job archive
@@ -155,9 +174,10 @@ modified and backup creation is not a domain command, so it has no
 
 Before reporting success, the completed snapshot is opened read-only without
 running migrations. Verification requires `integrity_check` to return exactly
-`ok`, no `foreign_key_check` rows, schema migration version 4, the required
-canonical tables, and bounded count reads from the job, task, dependency, and
-audit tables. A failed backup removes only the newly reserved incomplete
+`ok`, no `foreign_key_check` rows, an exact supported schema migration version
+(4, 5, or 6), the required canonical tables, and bounded count reads from the
+job, task, dependency, and audit tables. For v5 and v6 the preflight also
+read-checks that constraint and progress values are canonical leaf inputs. A failed backup removes only the newly reserved incomplete
 destination; it never changes the live database or an existing file.
 
 ### Clean-directory restore verification
@@ -165,8 +185,9 @@ destination; it never changes the live database or an existing file.
 Restore verification is a developer-facing recovery check, not a normal-app
 import flow. It first opens the selected backup read-only and applies the same
 integrity, foreign-key, schema-version, required-table, and bounded domain-read
-checks as backup creation. The verifier requires the complete v4 migration
-sequence, supported column/type/nullability/primary-key layouts, required
+checks as backup creation. The verifier requires a complete supported migration
+sequence (through v4, v5, or v6), supported
+column/type/nullability/primary-key layouts, required
 foreign keys, and exact normalized supported DDL signatures for every required
 table and named index, including constraints and partial-index predicates. It
 also executes canonical read queries; a database that merely reuses table names
