@@ -2772,8 +2772,12 @@ fn validate_proposed_schedule(
         };
 
     // For a Schedule edit, do not blame the edit for pre-existing invalidity
-    // (e.g. duration-less leaves mid-setup): only reject when the current stored
-    // inputs validate but the proposed ones do not.
+    // (e.g. duration-less leaves mid-setup). When the current stored inputs
+    // already fail, the full proposed run would just short-circuit on the same
+    // structural defect, so probe the statused leaves in isolation: they always
+    // have durations and stand alone, so the scheduler reaches its progress
+    // normalization. A progress-class failure there is caused only by the
+    // calendar/schedule-start the edit chooses, so it is still rejected.
     if let ProposedEdit::Schedule { .. } = edit {
         let current_valid = stored_schedule_start
             .as_deref()
@@ -2792,7 +2796,41 @@ fn validate_proposed_schedule(
                 }
             });
         if !current_valid {
-            return Ok(());
+            let statused: HashSet<&str> =
+                entries.iter().map(|entry| entry.task_id.as_str()).collect();
+            let probe_tasks: Vec<ScheduleTask> = tasks
+                .iter()
+                .filter(|task| statused.contains(task.id.as_str()))
+                .map(|task| ScheduleTask {
+                    id: task.id.clone(),
+                    parent_task_id: None,
+                    duration_minutes: task.duration_minutes,
+                })
+                .collect();
+            let probe_constraints: Vec<TaskConstraint> = constraints
+                .iter()
+                .filter(|constraint| statused.contains(constraint.task_id.as_str()))
+                .cloned()
+                .collect();
+            return match calculate_schedule_with_progress(
+                &ScheduleInput {
+                    schedule_start,
+                    calendar,
+                    tasks: probe_tasks,
+                    dependencies: Vec::new(),
+                },
+                &probe_constraints,
+                &ScheduleProgress { data_date, entries },
+            ) {
+                Err(error) if error.code().starts_with("progress_") => {
+                    Err(ApplicationError::ValidationFailed {
+                        code: error.code(),
+                        field: "schedule",
+                        message: error.to_string(),
+                    })
+                }
+                _ => Ok(()),
+            };
         }
     }
 

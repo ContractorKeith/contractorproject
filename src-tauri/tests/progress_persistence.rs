@@ -1,13 +1,13 @@
 // Integration coverage for issue #38: durable audited data-date and task
 // progress persistence, validated through the pure scheduler before commit.
 
+use contractorproject_lib::application::{ApplicationError, Job, TaskConstraintKind, TaskMutation};
 use contractorproject_lib::application::{
     ApplicationService, CommandActor, CommandContext, CreateBackupRequest, CreateJobRequest,
     CreateTaskRequest, UpdateJobDataDateRequest, UpdateScheduleRequest,
     UpdateTaskConstraintRequest, UpdateTaskDurationRequest, UpdateTaskProgressRequest,
     VerifyRestoreRequest,
 };
-use contractorproject_lib::application::{Job, TaskConstraintKind, TaskMutation};
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1162,6 +1162,121 @@ fn progress_on_a_duration_less_leaf_reports_duration_required() {
     assert_eq!(
         error.to_string(),
         "set a duration before reporting progress"
+    );
+    assert_eq!(command_log_count(&path), audit_before);
+}
+
+#[test]
+fn calendar_narrowing_is_rejected_even_with_a_pre_existing_duration_less_task() {
+    // Abuse case: a valid statused seven-day job with weekend actuals, plus a
+    // fresh duration-less WBS row. Narrowing to Monday-Friday must still be
+    // rejected for the progress-class failure it causes, not silently accepted
+    // because an unrelated structural defect makes the current state invalid.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Weekend abuse".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: seven_day_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("seven-day schedule");
+    let leaf = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Weekend leaf".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("leaf");
+    let duration = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: leaf.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: leaf.task.version,
+                expected_job_version: leaf.job_version,
+            },
+        )
+        .expect("duration");
+    let job = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-17".into()),
+                expected_job_version: duration.job_version,
+            },
+        )
+        .expect("data date");
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: leaf.task.id.clone(),
+                clear: false,
+                percent_complete: Some(100),
+                actual_start: Some("2026-08-15".into()),
+                actual_finish: Some("2026-08-16".into()),
+                expected_version: duration.task.version,
+                expected_job_version: job.version,
+            },
+        )
+        .expect("weekend completion");
+    // A fresh duration-less WBS row makes the current stored schedule invalid.
+    let unsized_row = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Unsized".into(),
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect("unsized task");
+
+    let (calendar_before, version_before) = job_calendar_and_version(&path, &job.id);
+    let audit_before = command_log_count(&path);
+    let error = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: unsized_row.job_version,
+            },
+        )
+        .expect_err("progress-class failure blocks the narrowing");
+    assert_eq!(error.kind(), "validation_failed");
+    match &error {
+        ApplicationError::ValidationFailed { code, .. } => {
+            assert_eq!(*code, "progress_normalized_order")
+        }
+        other => panic!("unexpected error: {other:?}"),
+    }
+    assert_eq!(
+        job_calendar_and_version(&path, &job.id),
+        (calendar_before, version_before)
     );
     assert_eq!(command_log_count(&path), audit_before);
 }
