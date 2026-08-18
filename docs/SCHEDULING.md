@@ -158,15 +158,26 @@ Scheduling retains the remaining work:
   its early finish at the end of remaining work scheduled from `max(data-date
   instant, predecessor early finishes + lag, SNET)`. The backward pass and float
   are computed over remaining work; negative-float and FNLT reporting are
-  otherwise unchanged.
+  otherwise unchanged. Float is measured from the remaining-work start, which is
+  not surfaced as a date, so consumers must not derive float by differencing the
+  reported early and late starts.
+- The project finish that anchors the backward pass is the latest early finish
+  over incomplete leaves, falling back to the latest actual finish only when
+  every leaf is complete.
 - The driving path traces incomplete leaves only. When every leaf is complete
   the path is empty.
 
+Schedule start no longer bounds the projection: a complete leaf whose actuals
+fall before schedule start reports an early start before the schedule-start
+instant.
+
 Summary percent is the floor of the duration-weighted percent over the
 positive-duration leaf descendants. When every leaf descendant is zero-duration
-the summary reports 100 if all are complete and 0 otherwise. Summaries do not
-fabricate actual dates; they expose only the derived percent. Existing date,
-float, critical, and violation rollups are unchanged.
+the summary reports 100 if all are complete and 0 otherwise. Summary float and
+criticality derive from incomplete descendants only: a summary whose descendants
+are all complete reports zero float and is not critical, mirroring the
+complete-leaf rule. Summaries do not fabricate actual dates; they expose only the
+derived percent. Existing date and violation rollups are unchanged.
 
 ## Executable examples
 
@@ -192,6 +203,11 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 | Summary over two milestones | Reports 100 percent when both are complete, 0 percent otherwise. |
 | All-complete `A(480) -> B(480)` | The driving path and critical-task list are empty. |
 | Complete `A` with a Saturday data date and Friday/Saturday actuals | The data date rolls to Monday 08:00 and the actuals normalize onto Friday's boundaries. |
+| Complete milestone with Friday actuals before a Monday schedule start | It anchors at Friday 16:00, before the schedule-start instant. |
+| Complete `A(480)` finishing Wednesday and 90% `B(480)` (48 remaining) | The project finish ignores A; B has zero float and is the sole driving leaf. |
+| Summary over complete `A(480)` and not-started `B(480)` beside a long chain | The summary reports B's 2400 float; an all-complete summary reports zero float and is not critical. |
+| Complete `A` with equal Saturday actuals under a Monday-Friday calendar | Normalization inverts the civil window and returns `progress_normalized_order`. |
+| Data date before schedule start | It clamps to the first working day's start. |
 
 ## Deferred semantics
 

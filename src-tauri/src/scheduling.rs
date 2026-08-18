@@ -241,7 +241,14 @@ pub fn calculate_schedule_with_progress(
         }
     }
 
-    let schedule_finish_offset = early_finish.iter().copied().max().unwrap_or(0);
+    // The project finish is driven by remaining (incomplete) work; only when
+    // every leaf is complete does it fall back to the latest actual finish.
+    let schedule_finish_offset = (0..task_count)
+        .filter(|&index| progress.status[index] != ProgressStatus::Complete)
+        .map(|index| early_finish[index])
+        .max()
+        .or_else(|| early_finish.iter().copied().max())
+        .unwrap_or(0);
     // Backward pass over remaining work. Complete leaves are fixed points that
     // neither receive nor impose remaining-work float.
     let mut late_finish = vec![schedule_finish_offset; task_count];
@@ -288,10 +295,9 @@ pub fn calculate_schedule_with_progress(
         };
         let milestone = graph.durations[index] == 0;
         let actual_finish = if progress.status[index] == ProgressStatus::Complete {
-            calendar.task_finish_instant(
-                progress.actual_finish_offset[index].expect("complete actual finish"),
-                milestone,
-            )?
+            // Anchor directly on the stored actual-finish instant; offsets are
+            // ambiguous at day boundaries and are not clamped to schedule start.
+            progress.actual_finish_instant[index].expect("complete actual finish")
         } else {
             let constrained_milestone_start = milestone
                 && constraints.normalized_start_dates[index].is_some()
@@ -352,7 +358,8 @@ pub fn calculate_schedule_with_progress(
             total_float_minutes: total_float[index],
             duration_minutes: duration,
             constraint_violated: directly_violated.contains(&index),
-            completed,
+            has_incomplete: !completed,
+            incomplete_total_float: if completed { 0 } else { total_float[index] },
             percent_complete: progress.percent[index],
             weighted_percent_numerator: weighted_num,
             positive_leaf_duration: positive_duration,
@@ -400,7 +407,7 @@ pub fn calculate_schedule_with_progress(
             late_start: task_instants.late_start,
             late_finish: task_instants.late_finish,
             total_float_minutes: offset.total_float_minutes,
-            critical: !offset.completed && offset.total_float_minutes <= 0,
+            critical: offset.has_incomplete && offset.total_float_minutes <= 0,
             constraint_violated: offset.constraint_violated,
             milestone: !summary && zero_span,
             summary,
@@ -451,8 +458,12 @@ struct OffsetTask {
     total_float_minutes: i64,
     duration_minutes: i64,
     constraint_violated: bool,
-    completed: bool,
     percent_complete: u8,
+    // True when this task or any descendant leaf is not complete. Float and
+    // criticality are derived from incomplete descendants only.
+    has_incomplete: bool,
+    // Minimum total float across incomplete descendant leaves; 0 when none.
+    incomplete_total_float: i64,
     // Duration-weighted percent rollup accumulators over leaf descendants.
     weighted_percent_numerator: i128,
     positive_leaf_duration: i128,
@@ -646,6 +657,20 @@ fn derive_summary(
     } else {
         0
     };
+    // Float and criticality derive from incomplete descendants only. A summary
+    // whose descendants are all complete reports zero float and is not critical.
+    let has_incomplete = calculated_children.iter().any(|task| task.has_incomplete);
+    let incomplete_total_float = calculated_children
+        .iter()
+        .filter(|task| task.has_incomplete)
+        .map(|task| task.incomplete_total_float)
+        .min()
+        .unwrap_or(0);
+    let total_float_minutes = if has_incomplete {
+        incomplete_total_float
+    } else {
+        0
+    };
     let calculated = OffsetTask {
         early_start,
         early_finish,
@@ -659,18 +684,15 @@ fn derive_summary(
             .map(|task| task.late_finish)
             .max()
             .expect("summary has children"),
-        total_float_minutes: calculated_children
-            .iter()
-            .map(|task| task.total_float_minutes)
-            .min()
-            .expect("summary has children"),
+        total_float_minutes,
         duration_minutes: early_finish
             .checked_sub(early_start)
             .ok_or(ScheduleError::ScheduleOutOfRange)?,
         constraint_violated: calculated_children
             .iter()
             .any(|task| task.constraint_violated),
-        completed: false,
+        has_incomplete,
+        incomplete_total_float,
         percent_complete,
         weighted_percent_numerator,
         positive_leaf_duration,
@@ -707,25 +729,14 @@ fn derive_task_instants(
         let milestone = offset.duration_minutes == 0;
         match progress.status[leaf_index] {
             ProgressStatus::Complete => {
-                // Anchor early and late instants at the normalized actuals.
-                let (early_start, early_finish) = if milestone {
-                    let instant = calendar.task_finish_instant(
-                        progress.actual_finish_offset[leaf_index].expect("complete actual finish"),
-                        true,
-                    )?;
-                    (instant, instant)
+                // Anchor early and late instants on the stored actual instants
+                // rather than re-deriving from ambiguous, unclamped offsets.
+                let early_finish =
+                    progress.actual_finish_instant[leaf_index].expect("complete actual finish");
+                let early_start = if milestone {
+                    early_finish
                 } else {
-                    (
-                        calendar.start_instant(
-                            progress.actual_start_offset[leaf_index]
-                                .expect("complete actual start"),
-                        )?,
-                        calendar.task_finish_instant(
-                            progress.actual_finish_offset[leaf_index]
-                                .expect("complete actual finish"),
-                            false,
-                        )?,
-                    )
+                    progress.actual_start_instant[leaf_index].expect("complete actual start")
                 };
                 TaskInstants {
                     early_start,
@@ -1117,8 +1128,11 @@ impl ProgressSet {
                     Some(calendar.finish_offset_for_working_date(normalized)?);
                 actual_finish_instant[index] = Some(calendar.working_day_finish(normalized)?);
             }
+            // Compare normalized civil instants: a start that rolls forward past
+            // a finish that rolls back (e.g. weekend actuals) is an inversion the
+            // raw-date check cannot see.
             if let (Some(start), Some(finish)) =
-                (actual_start_offset[index], actual_finish_offset[index])
+                (actual_start_instant[index], actual_finish_instant[index])
             {
                 if start > finish {
                     return Err(invalid_progress(

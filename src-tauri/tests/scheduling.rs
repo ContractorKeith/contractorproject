@@ -1088,3 +1088,133 @@ fn rejects_invalid_progress_inputs_stably() {
         );
     }
 }
+
+#[test]
+fn complete_milestone_before_schedule_start_anchors_at_its_actual_event() {
+    // Actuals fall on the working day before schedule start; anchoring must use
+    // the stored actual instant, not an offset that would land on the wrong day.
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("M", 0)], vec![]),
+        &[],
+        &status(
+            Some("2026-01-05"),
+            vec![progress("M", 100, Some("2026-01-02"), Some("2026-01-02"))],
+        ),
+    )
+    .expect("valid milestone progress");
+    let m = &result.tasks[0];
+    assert!(m.milestone);
+    assert_eq!(m.early_start, at("2026-01-02", "16:00"));
+    assert_eq!(m.early_finish, at("2026-01-02", "16:00"));
+    assert_eq!(m.late_start, at("2026-01-02", "16:00"));
+    assert_eq!(m.late_finish, at("2026-01-02", "16:00"));
+    assert_eq!(m.actual_start, Some(at("2026-01-02", "08:00")));
+    assert_eq!(m.actual_finish, Some(at("2026-01-02", "16:00")));
+    assert_eq!(m.total_float_minutes, 0);
+    assert!(!m.critical);
+    assert_eq!(result.data_date, Some(at("2026-01-05", "08:00")));
+}
+
+#[test]
+fn project_finish_ignores_complete_leaves_when_computing_float() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![
+                progress("A", 100, Some("2026-01-07"), Some("2026-01-07")),
+                progress("B", 90, Some("2026-01-06"), None),
+            ],
+        ),
+    )
+    .expect("valid progress");
+    // A's late actual finish must not inflate B's float: with 48 remaining
+    // minutes B is the sole driver.
+    let b = &result.tasks[1];
+    assert_eq!(b.percent_complete, 90);
+    assert_eq!(b.total_float_minutes, 0);
+    assert!(b.critical);
+    assert!(!result.tasks[0].critical);
+    assert_eq!(result.critical_task_ids, vec!["B"]);
+    assert_eq!(result.critical_path, vec!["B"]);
+}
+
+#[test]
+fn summary_float_and_critical_derive_from_incomplete_descendants() {
+    // A long independent chain gives the not-started leaf real float; the
+    // complete sibling must be excluded from the rollup.
+    let floating = calculate_schedule_with_progress(
+        &progress_input(
+            vec![
+                summary("S"),
+                child_task("A", "S", 480),
+                child_task("B", "S", 480),
+                task("C", 2880),
+            ],
+            vec![],
+        ),
+        &[],
+        &status(
+            Some("2026-01-05"),
+            vec![progress("A", 100, Some("2026-01-05"), Some("2026-01-05"))],
+        ),
+    )
+    .expect("valid progress");
+    let summary_row = &floating.tasks[0];
+    assert!(summary_row.summary);
+    assert_eq!(summary_row.total_float_minutes, 2400);
+    assert!(!summary_row.critical);
+
+    // Every descendant complete: the summary mirrors the complete-leaf rule.
+    let all_complete = calculate_schedule_with_progress(
+        &progress_input(
+            vec![
+                summary("S"),
+                child_task("A", "S", 480),
+                child_task("B", "S", 480),
+            ],
+            vec![],
+        ),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![
+                progress("A", 100, Some("2026-01-05"), Some("2026-01-05")),
+                progress("B", 100, Some("2026-01-06"), Some("2026-01-06")),
+            ],
+        ),
+    )
+    .expect("valid progress");
+    assert_eq!(all_complete.tasks[0].total_float_minutes, 0);
+    assert!(!all_complete.tasks[0].critical);
+}
+
+#[test]
+fn rejects_normalized_actual_date_inversion() {
+    // Saturday actuals roll the start forward to Monday and the finish back to
+    // the prior Friday, inverting the normalized civil window.
+    let error = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[],
+        &status(
+            Some("2026-01-12"),
+            vec![progress("A", 100, Some("2026-01-10"), Some("2026-01-10"))],
+        ),
+    )
+    .expect_err("normalized inversion must be rejected");
+    assert_eq!(error.code(), "progress_normalized_order");
+}
+
+#[test]
+fn data_date_before_schedule_start_is_clamped_to_the_first_working_day() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[],
+        &status(Some("2026-01-01"), vec![]),
+    )
+    .expect("valid empty status update");
+    assert_eq!(result.data_date, Some(at("2026-01-05", "08:00")));
+    assert_eq!(result.tasks[0].early_start, at("2026-01-05", "08:00"));
+    assert_eq!(result.tasks[0].early_finish, at("2026-01-05", "16:00"));
+}
