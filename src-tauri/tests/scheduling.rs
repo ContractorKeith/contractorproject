@@ -1,8 +1,8 @@
 use chrono::{Datelike, NaiveDate, NaiveDateTime, Weekday};
 use contractorproject_lib::scheduling::{
-    calculate_schedule, calculate_schedule_with_constraints, CalendarWeekday,
-    FinishStartDependency, ScheduleError, ScheduleInput, ScheduleTask, TaskConstraint,
-    WorkingCalendar,
+    calculate_schedule, calculate_schedule_with_constraints, calculate_schedule_with_progress,
+    CalendarWeekday, FinishStartDependency, ScheduleError, ScheduleInput, ScheduleProgress,
+    ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 
 fn at(date: &str, time: &str) -> NaiveDateTime {
@@ -80,6 +80,29 @@ fn constraint(task_id: &str, snet: Option<&str>, fnlt: Option<&str>) -> TaskCons
         task_id: task_id.into(),
         start_no_earlier_than: snet.map(date),
         finish_no_later_than: fnlt.map(date),
+    }
+}
+
+fn progress(
+    task_id: &str,
+    percent_complete: u8,
+    actual_start: Option<&str>,
+    actual_finish: Option<&str>,
+) -> TaskProgress {
+    let date = |value: &str| NaiveDate::parse_from_str(value, "%Y-%m-%d").expect("fixture date");
+    TaskProgress {
+        task_id: task_id.into(),
+        percent_complete,
+        actual_start: actual_start.map(date),
+        actual_finish: actual_finish.map(date),
+    }
+}
+
+fn status(data_date: Option<&str>, entries: Vec<TaskProgress>) -> ScheduleProgress {
+    let date = |value: &str| NaiveDate::parse_from_str(value, "%Y-%m-%d").expect("fixture date");
+    ScheduleProgress {
+        data_date: data_date.map(date),
+        entries,
     }
 }
 
@@ -688,4 +711,380 @@ fn rejects_a_hierarchy_deeper_than_the_supported_wbs_limit() {
     .expect_err("over-deep task hierarchy must be rejected");
 
     assert_eq!(error.code(), "task_hierarchy_too_deep");
+}
+
+fn progress_input(
+    tasks: Vec<ScheduleTask>,
+    dependencies: Vec<FinishStartDependency>,
+) -> ScheduleInput {
+    ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("fixture date"),
+        calendar: standard_calendar(),
+        tasks,
+        dependencies,
+    }
+}
+
+#[test]
+fn no_progress_reports_default_status_fields() {
+    let result = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 480)],
+        vec![fs("A", "B", 0)],
+    ))
+    .expect("valid schedule");
+    assert_eq!(result.data_date, None);
+    for scheduled in &result.tasks {
+        assert_eq!(scheduled.percent_complete, 0);
+        assert_eq!(scheduled.actual_start, None);
+        assert_eq!(scheduled.actual_finish, None);
+    }
+    // The widest seam with empty progress equals the constraint seam.
+    let via_progress = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &ScheduleProgress::default(),
+    )
+    .expect("valid schedule");
+    assert_eq!(via_progress, result);
+}
+
+#[test]
+fn data_date_without_entries_pushes_incomplete_work_to_the_data_date() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(Some("2026-01-07"), vec![]),
+    )
+    .expect("valid empty status update");
+    assert_eq!(result.data_date, Some(at("2026-01-07", "08:00")));
+    assert_eq!(result.tasks[0].early_start, at("2026-01-07", "08:00"));
+    assert_eq!(result.tasks[0].early_finish, at("2026-01-07", "16:00"));
+    assert_eq!(result.tasks[1].early_start, at("2026-01-08", "08:00"));
+    assert_eq!(result.tasks[1].early_finish, at("2026-01-08", "16:00"));
+    assert_eq!(result.tasks[0].percent_complete, 0);
+}
+
+#[test]
+fn complete_predecessor_anchors_and_in_progress_leaf_reschedules_remaining_work() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 960)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![
+                progress("A", 100, Some("2026-01-05"), Some("2026-01-05")),
+                progress("B", 50, Some("2026-01-06"), None),
+            ],
+        ),
+    )
+    .expect("valid progress");
+
+    assert_eq!(result.data_date, Some(at("2026-01-07", "08:00")));
+
+    let a = &result.tasks[0];
+    assert_eq!(a.percent_complete, 100);
+    assert_eq!(a.early_start, at("2026-01-05", "08:00"));
+    assert_eq!(a.early_finish, at("2026-01-05", "16:00"));
+    assert_eq!(a.actual_start, Some(at("2026-01-05", "08:00")));
+    assert_eq!(a.actual_finish, Some(at("2026-01-05", "16:00")));
+    assert_eq!(a.total_float_minutes, 0);
+    assert!(!a.critical);
+
+    let b = &result.tasks[1];
+    assert_eq!(b.percent_complete, 50);
+    // Reported early start is the actual start; remaining work is scheduled from
+    // the data date and finishes half a shift of 960 minutes later.
+    assert_eq!(b.early_start, at("2026-01-06", "08:00"));
+    assert_eq!(b.early_finish, at("2026-01-07", "16:00"));
+    assert_eq!(b.actual_start, Some(at("2026-01-06", "08:00")));
+    assert_eq!(b.actual_finish, None);
+    assert_eq!(b.total_float_minutes, 0);
+    assert!(b.critical);
+
+    assert_eq!(result.schedule_finish, at("2026-01-07", "16:00"));
+    assert_eq!(result.critical_task_ids, vec!["B"]);
+    // The complete predecessor is excluded from the primary driving path.
+    assert_eq!(result.critical_path, vec!["B"]);
+}
+
+#[test]
+fn predecessor_finish_pushes_a_successor_past_the_data_date() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 1440), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(Some("2026-01-06"), vec![]),
+    )
+    .expect("valid empty status update");
+    // A's remaining work starts at the data date and consumes three shifts.
+    assert_eq!(result.tasks[0].early_start, at("2026-01-06", "08:00"));
+    assert_eq!(result.tasks[0].early_finish, at("2026-01-08", "16:00"));
+    // B honors the predecessor finish, not just the data date.
+    assert_eq!(result.tasks[1].early_start, at("2026-01-09", "08:00"));
+    assert_eq!(result.tasks[1].early_finish, at("2026-01-09", "16:00"));
+}
+
+#[test]
+fn complete_leaf_reports_fnlt_violation_against_its_actual_finish() {
+    let violated = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[constraint("A", None, Some("2026-01-07"))],
+        &status(
+            Some("2026-01-09"),
+            vec![progress("A", 100, Some("2026-01-07"), Some("2026-01-08"))],
+        ),
+    )
+    .expect("valid progress");
+    let a = &violated.tasks[0];
+    assert_eq!(a.percent_complete, 100);
+    assert_eq!(a.early_finish, at("2026-01-08", "16:00"));
+    assert!(a.constraint_violated);
+    assert_eq!(a.total_float_minutes, 0);
+    assert!(!a.critical);
+    assert_eq!(violated.directly_violated_leaf_task_ids, vec!["A"]);
+
+    let clean = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[constraint("A", None, Some("2026-01-07"))],
+        &status(
+            Some("2026-01-09"),
+            vec![progress("A", 100, Some("2026-01-05"), Some("2026-01-06"))],
+        ),
+    )
+    .expect("valid progress");
+    assert!(!clean.tasks[0].constraint_violated);
+    assert!(clean.directly_violated_leaf_task_ids.is_empty());
+}
+
+#[test]
+fn complete_milestone_anchors_at_its_actual_event() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("M", 0)], vec![]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![progress("M", 100, Some("2026-01-06"), Some("2026-01-06"))],
+        ),
+    )
+    .expect("valid milestone progress");
+    let m = &result.tasks[0];
+    assert!(m.milestone);
+    assert_eq!(m.percent_complete, 100);
+    assert_eq!(m.early_start, at("2026-01-06", "16:00"));
+    assert_eq!(m.early_finish, m.early_start);
+    assert_eq!(m.total_float_minutes, 0);
+    assert!(!m.critical);
+    assert_eq!(m.actual_start, Some(at("2026-01-06", "08:00")));
+    assert_eq!(m.actual_finish, Some(at("2026-01-06", "16:00")));
+}
+
+#[test]
+fn summary_rolls_up_duration_weighted_percent_complete() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(
+            vec![
+                summary("S"),
+                child_task("A", "S", 480),
+                child_task("B", "S", 1440),
+            ],
+            vec![],
+        ),
+        &[],
+        &status(
+            Some("2026-01-12"),
+            vec![
+                progress("A", 100, Some("2026-01-05"), Some("2026-01-05")),
+                progress("B", 50, Some("2026-01-06"), None),
+            ],
+        ),
+    )
+    .expect("valid progress");
+    // floor((480*100 + 1440*50) / 1920) == 62.
+    assert!(result.tasks[0].summary);
+    assert_eq!(result.tasks[0].percent_complete, 62);
+    assert_eq!(result.tasks[1].percent_complete, 100);
+    assert_eq!(result.tasks[2].percent_complete, 50);
+}
+
+#[test]
+fn all_milestone_summary_rolls_up_completeness() {
+    let tasks = || {
+        vec![
+            summary("S"),
+            child_task("M1", "S", 0),
+            child_task("M2", "S", 0),
+        ]
+    };
+    let all_complete = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![
+                progress("M1", 100, Some("2026-01-05"), Some("2026-01-05")),
+                progress("M2", 100, Some("2026-01-06"), Some("2026-01-06")),
+            ],
+        ),
+    )
+    .expect("valid progress");
+    assert_eq!(all_complete.tasks[0].percent_complete, 100);
+
+    let partial = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![progress("M1", 100, Some("2026-01-05"), Some("2026-01-05"))],
+        ),
+    )
+    .expect("valid progress");
+    assert_eq!(partial.tasks[0].percent_complete, 0);
+}
+
+#[test]
+fn an_all_complete_schedule_has_an_empty_driving_path() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![
+                progress("A", 100, Some("2026-01-05"), Some("2026-01-05")),
+                progress("B", 100, Some("2026-01-06"), Some("2026-01-06")),
+            ],
+        ),
+    )
+    .expect("valid progress");
+    assert!(result.critical_path.is_empty());
+    assert!(result.critical_task_ids.is_empty());
+    assert!(!result.tasks[0].critical);
+    assert!(!result.tasks[1].critical);
+}
+
+#[test]
+fn normalizes_weekend_actuals_and_a_non_working_data_date() {
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[],
+        &status(
+            Some("2026-01-10"),
+            vec![progress("A", 100, Some("2026-01-09"), Some("2026-01-10"))],
+        ),
+    )
+    .expect("valid progress");
+    // The Saturday data date rolls forward to Monday's working start.
+    assert_eq!(result.data_date, Some(at("2026-01-12", "08:00")));
+    let a = &result.tasks[0];
+    // Actual start rolls forward to Friday's start; actual finish rolls back to
+    // Friday's finish.
+    assert_eq!(a.actual_start, Some(at("2026-01-09", "08:00")));
+    assert_eq!(a.actual_finish, Some(at("2026-01-09", "16:00")));
+    assert_eq!(a.early_start, at("2026-01-09", "08:00"));
+    assert_eq!(a.early_finish, at("2026-01-09", "16:00"));
+}
+
+#[test]
+fn rejects_invalid_progress_inputs_stably() {
+    let input = progress_input(
+        vec![
+            summary("S"),
+            child_task("C", "S", 480),
+            task("A", 480),
+            task("M", 0),
+        ],
+        vec![],
+    );
+    let cases = [
+        (
+            status(None, vec![progress("A", 50, Some("2026-01-05"), None)]),
+            "progress_data_date_required",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("", 0, None, None)]),
+            "progress_task_id_required",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("A", 0, None, None), progress("A", 0, None, None)],
+            ),
+            "progress_duplicate",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("missing", 0, None, None)]),
+            "progress_task_missing",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("S", 0, None, None)]),
+            "progress_summary",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("A", 150, None, None)]),
+            "progress_percent_out_of_range",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("A", 0, Some("2026-01-05"), None)],
+            ),
+            "progress_actuals_forbidden",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("A", 50, None, None)]),
+            "progress_actual_start_required",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("A", 50, Some("2026-01-05"), Some("2026-01-06"))],
+            ),
+            "progress_actual_finish_forbidden",
+        ),
+        (
+            status(Some("2026-01-09"), vec![progress("A", 100, None, None)]),
+            "progress_actual_start_required",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("A", 100, Some("2026-01-05"), None)],
+            ),
+            "progress_actual_finish_required",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("M", 50, Some("2026-01-05"), None)],
+            ),
+            "progress_milestone_percent",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("M", 100, Some("2026-01-05"), Some("2026-01-06"))],
+            ),
+            "progress_milestone_actuals_unequal",
+        ),
+        (
+            status(
+                Some("2026-01-09"),
+                vec![progress("A", 100, Some("2026-01-06"), Some("2026-01-05"))],
+            ),
+            "progress_actual_order",
+        ),
+        (
+            status(
+                Some("2026-01-06"),
+                vec![progress("A", 100, Some("2026-01-05"), Some("2026-01-08"))],
+            ),
+            "progress_actual_after_data_date",
+        ),
+    ];
+    for (update, code) in cases {
+        assert_eq!(
+            calculate_schedule_with_progress(&input, &[], &update)
+                .expect_err("invalid progress")
+                .code(),
+            code
+        );
+    }
 }

@@ -78,6 +78,26 @@ pub struct TaskConstraint {
 /// A compatibility name that makes the leaf-only constraint scope explicit.
 pub type LeafTaskConstraint = TaskConstraint;
 
+/// Reported progress for one leaf task, supplied separately from the task list.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskProgress {
+    pub task_id: String,
+    /// Integer percent complete in `[0, 100]`.
+    pub percent_complete: u8,
+    pub actual_start: Option<NaiveDate>,
+    pub actual_finish: Option<NaiveDate>,
+}
+
+/// A job data date and its per-leaf progress entries for a status update.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleProgress {
+    /// Job-local civil data date. Required when any progress entry is present.
+    pub data_date: Option<NaiveDate>,
+    pub entries: Vec<TaskProgress>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduledTask {
@@ -93,6 +113,12 @@ pub struct ScheduledTask {
     pub constraint_violated: bool,
     pub milestone: bool,
     pub summary: bool,
+    /// Percent complete: leaf value, or duration-weighted rollup for summaries.
+    pub percent_complete: u8,
+    /// Normalized actual start instant when the leaf has reported progress.
+    pub actual_start: Option<NaiveDateTime>,
+    /// Normalized actual finish instant when the leaf is complete.
+    pub actual_finish: Option<NaiveDateTime>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -104,6 +130,8 @@ pub struct ScheduleResult {
     pub critical_task_ids: Vec<String>,
     pub critical_path: Vec<String>,
     pub directly_violated_leaf_task_ids: Vec<String>,
+    /// Normalized data-date instant when the job carries a data date.
+    pub data_date: Option<NaiveDateTime>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -114,6 +142,8 @@ pub enum ScheduleError {
     InvalidTask { code: &'static str, message: String },
     #[error("{message}")]
     InvalidDependency { code: &'static str, message: String },
+    #[error("{message}")]
+    InvalidProgress { code: &'static str, message: String },
     #[error("finish-to-start dependencies contain a cycle")]
     DependencyCycle { task_ids: Vec<String> },
     #[error("the calculated schedule exceeds the supported date range")]
@@ -125,7 +155,8 @@ impl ScheduleError {
         match self {
             Self::InvalidCalendar { code, .. }
             | Self::InvalidTask { code, .. }
-            | Self::InvalidDependency { code, .. } => code,
+            | Self::InvalidDependency { code, .. }
+            | Self::InvalidProgress { code, .. } => code,
             Self::DependencyCycle { .. } => "dependency_cycle",
             Self::ScheduleOutOfRange => "schedule_out_of_range",
         }
@@ -142,87 +173,154 @@ pub fn calculate_schedule_with_constraints(
     input: &ScheduleInput,
     constraints: &[TaskConstraint],
 ) -> Result<ScheduleResult, ScheduleError> {
+    calculate_schedule_with_progress(input, constraints, &ScheduleProgress::default())
+}
+
+/// Calculates one deterministic finish-to-start schedule with optional leaf
+/// constraints and optional data-date/progress status.
+pub fn calculate_schedule_with_progress(
+    input: &ScheduleInput,
+    constraints: &[TaskConstraint],
+    progress: &ScheduleProgress,
+) -> Result<ScheduleResult, ScheduleError> {
     let calendar = CalendarMath::new(&input.calendar, input.schedule_start)?;
     let hierarchy = TaskHierarchy::new(&input.tasks)?;
     let graph = LeafGraph::new(&hierarchy, &input.dependencies)?;
     let constraints = ConstraintSet::new(constraints, &hierarchy, &graph, &calendar)?;
+    let progress = ProgressSet::new(progress, &hierarchy, &graph, &calendar)?;
     let task_count = graph.tasks.len();
-    let mut early_start = constraints
-        .start_no_earlier_than
-        .iter()
-        .map(|&offset| offset.max(0))
-        .collect::<Vec<_>>();
-    let mut early_finish = vec![0_i64; task_count];
 
+    // Forward pass over remaining work. Complete leaves anchor at their actuals;
+    // incomplete leaves lower-bound their remaining work by the data-date instant
+    // (when set), their own SNET, and predecessor finishes plus lag.
+    let mut early_bound = vec![0_i64; task_count];
+    for (index, bound) in early_bound.iter_mut().enumerate() {
+        if progress.status[index] != ProgressStatus::Complete {
+            *bound = constraints.start_no_earlier_than[index].max(0);
+            if let Some(data_date) = progress.data_date_offset {
+                *bound = (*bound).max(data_date);
+            }
+        }
+    }
+    let mut early_start = vec![0_i64; task_count];
+    let mut remaining_start = vec![0_i64; task_count];
+    let mut early_finish = vec![0_i64; task_count];
     for &task_index in &graph.topological_order {
-        early_finish[task_index] = early_start[task_index]
-            .checked_add(graph.durations[task_index])
-            .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        match progress.status[task_index] {
+            ProgressStatus::Complete => {
+                let start =
+                    progress.actual_start_offset[task_index].expect("complete actual start");
+                early_start[task_index] = start;
+                remaining_start[task_index] = start;
+                early_finish[task_index] =
+                    progress.actual_finish_offset[task_index].expect("complete actual finish");
+            }
+            status => {
+                let start = early_bound[task_index];
+                remaining_start[task_index] = start;
+                early_start[task_index] = if status == ProgressStatus::InProgress {
+                    progress.actual_start_offset[task_index].expect("in-progress actual start")
+                } else {
+                    start
+                };
+                early_finish[task_index] = start
+                    .checked_add(progress.remaining_duration[task_index])
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?;
+            }
+        }
         for &(successor, lag) in &graph.successors[task_index] {
-            let constrained_start = early_finish[task_index]
+            let mut contribution = early_finish[task_index]
                 .checked_add(lag)
                 .ok_or(ScheduleError::ScheduleOutOfRange)?;
-            early_start[successor] = early_start[successor].max(constrained_start);
+            if progress.status[task_index] == ProgressStatus::Complete {
+                if let Some(data_date) = progress.data_date_offset {
+                    contribution = contribution.max(data_date);
+                }
+            }
+            early_bound[successor] = early_bound[successor].max(contribution);
         }
     }
 
     let schedule_finish_offset = early_finish.iter().copied().max().unwrap_or(0);
+    // Backward pass over remaining work. Complete leaves are fixed points that
+    // neither receive nor impose remaining-work float.
     let mut late_finish = vec![schedule_finish_offset; task_count];
     let mut late_start = vec![0_i64; task_count];
     for &task_index in graph.topological_order.iter().rev() {
+        if progress.status[task_index] == ProgressStatus::Complete {
+            late_finish[task_index] = early_finish[task_index];
+            late_start[task_index] = early_start[task_index];
+            continue;
+        }
         late_finish[task_index] =
             late_finish[task_index].min(constraints.finish_no_later_than[task_index]);
-        if !graph.successors[task_index].is_empty() {
-            let mut earliest_successor_start = i64::MAX;
-            for &(successor, lag) in &graph.successors[task_index] {
-                earliest_successor_start = earliest_successor_start.min(
-                    late_start[successor]
-                        .checked_sub(lag)
-                        .ok_or(ScheduleError::ScheduleOutOfRange)?,
-                );
+        let mut earliest_successor_start = i64::MAX;
+        for &(successor, lag) in &graph.successors[task_index] {
+            if progress.status[successor] == ProgressStatus::Complete {
+                continue;
             }
+            earliest_successor_start = earliest_successor_start.min(
+                late_start[successor]
+                    .checked_sub(lag)
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+            );
+        }
+        if earliest_successor_start != i64::MAX {
             late_finish[task_index] = late_finish[task_index].min(earliest_successor_start);
         }
         late_start[task_index] = late_finish[task_index]
-            .checked_sub(graph.durations[task_index])
+            .checked_sub(progress.remaining_duration[task_index])
             .ok_or(ScheduleError::ScheduleOutOfRange)?;
     }
 
-    let total_float: Vec<i64> = early_start
-        .iter()
-        .zip(&late_start)
-        .map(|(early, late)| {
-            late.checked_sub(*early)
-                .ok_or(ScheduleError::ScheduleOutOfRange)
-        })
-        .collect::<Result<_, _>>()?;
+    let mut total_float = vec![0_i64; task_count];
+    for index in 0..task_count {
+        if progress.status[index] != ProgressStatus::Complete {
+            total_float[index] = late_start[index]
+                .checked_sub(remaining_start[index])
+                .ok_or(ScheduleError::ScheduleOutOfRange)?;
+        }
+    }
     let mut directly_violated = Vec::new();
     for index in 0..task_count {
         let Some(deadline_date) = constraints.normalized_finish_dates[index] else {
             continue;
         };
         let milestone = graph.durations[index] == 0;
-        let constrained_milestone_start = milestone
-            && constraints.normalized_start_dates[index].is_some()
-            && early_start[index] == constraints.start_no_earlier_than[index].max(0);
-        let actual_finish = if constrained_milestone_start {
-            calendar.working_day_start(
-                constraints.normalized_start_dates[index]
-                    .expect("constrained milestone start date"),
+        let actual_finish = if progress.status[index] == ProgressStatus::Complete {
+            calendar.task_finish_instant(
+                progress.actual_finish_offset[index].expect("complete actual finish"),
+                milestone,
             )?
         } else {
-            calendar.task_finish_instant(early_finish[index], milestone)?
+            let constrained_milestone_start = milestone
+                && constraints.normalized_start_dates[index].is_some()
+                && remaining_start[index] == constraints.start_no_earlier_than[index].max(0);
+            if constrained_milestone_start {
+                calendar.working_day_start(
+                    constraints.normalized_start_dates[index]
+                        .expect("constrained milestone start date"),
+                )?
+            } else {
+                calendar.task_finish_instant(early_finish[index], milestone)?
+            }
         };
         if actual_finish > calendar.working_day_finish(deadline_date)? {
             directly_violated.push(index);
         }
     }
+    let completed = progress
+        .status
+        .iter()
+        .map(|status| *status == ProgressStatus::Complete)
+        .collect::<Vec<_>>();
     let critical_path_indices = graph.critical_path(
-        &early_start,
+        &remaining_start,
         &early_finish,
         &total_float,
         schedule_finish_offset,
         &directly_violated,
+        &completed,
     );
     let critical_path = critical_path_indices
         .iter()
@@ -230,15 +328,36 @@ pub fn calculate_schedule_with_constraints(
         .collect();
 
     let mut offsets = vec![None; input.tasks.len()];
+    let mut leaf_of_original = vec![None; input.tasks.len()];
     for (index, &original_index) in graph.original_indices.iter().enumerate() {
+        leaf_of_original[original_index] = Some(index);
+        let duration = graph.durations[index];
+        let completed = progress.status[index] == ProgressStatus::Complete;
+        let (weighted_num, positive_duration, milestone_total, milestone_complete) = if duration > 0
+        {
+            (
+                i128::from(duration) * i128::from(progress.percent[index]),
+                i128::from(duration),
+                0,
+                0,
+            )
+        } else {
+            (0, 0, 1, u32::from(completed))
+        };
         offsets[original_index] = Some(OffsetTask {
             early_start: early_start[index],
             early_finish: early_finish[index],
             late_start: late_start[index],
             late_finish: late_finish[index],
             total_float_minutes: total_float[index],
-            duration_minutes: graph.durations[index],
+            duration_minutes: duration,
             constraint_violated: directly_violated.contains(&index),
+            completed,
+            percent_complete: progress.percent[index],
+            weighted_percent_numerator: weighted_num,
+            positive_leaf_duration: positive_duration,
+            milestone_leaf_count: milestone_total,
+            milestone_complete_count: milestone_complete,
         });
     }
     for index in 0..input.tasks.len() {
@@ -252,6 +371,7 @@ pub fn calculate_schedule_with_constraints(
             &hierarchy,
             &graph,
             &constraints,
+            &progress,
             &calendar,
             &offsets,
             &mut instants,
@@ -264,6 +384,13 @@ pub fn calculate_schedule_with_constraints(
         let task_instants = instants[index].as_ref().expect("validated task instants");
         let summary = !hierarchy.children[index].is_empty();
         let zero_span = offset.duration_minutes == 0;
+        let (actual_start, actual_finish) = match (summary, leaf_of_original[index]) {
+            (false, Some(leaf_index)) => (
+                progress.actual_start_instant[leaf_index],
+                progress.actual_finish_instant[leaf_index],
+            ),
+            _ => (None, None),
+        };
         tasks.push(ScheduledTask {
             id: task.id.clone(),
             parent_task_id: task.parent_task_id.clone(),
@@ -273,10 +400,13 @@ pub fn calculate_schedule_with_constraints(
             late_start: task_instants.late_start,
             late_finish: task_instants.late_finish,
             total_float_minutes: offset.total_float_minutes,
-            critical: offset.total_float_minutes <= 0,
+            critical: !offset.completed && offset.total_float_minutes <= 0,
             constraint_violated: offset.constraint_violated,
             milestone: !summary && zero_span,
             summary,
+            percent_complete: offset.percent_complete,
+            actual_start,
+            actual_finish,
         });
     }
 
@@ -307,6 +437,7 @@ pub fn calculate_schedule_with_constraints(
             ids.sort();
             ids
         },
+        data_date: progress.data_date_instant,
         tasks,
     })
 }
@@ -320,6 +451,13 @@ struct OffsetTask {
     total_float_minutes: i64,
     duration_minutes: i64,
     constraint_violated: bool,
+    completed: bool,
+    percent_complete: u8,
+    // Duration-weighted percent rollup accumulators over leaf descendants.
+    weighted_percent_numerator: i128,
+    positive_leaf_duration: i128,
+    milestone_leaf_count: u32,
+    milestone_complete_count: u32,
 }
 
 #[derive(Clone)]
@@ -483,6 +621,31 @@ fn derive_summary(
         .map(|task| task.early_finish)
         .max()
         .expect("summary has children");
+    let weighted_percent_numerator = calculated_children
+        .iter()
+        .map(|task| task.weighted_percent_numerator)
+        .sum();
+    let positive_leaf_duration: i128 = calculated_children
+        .iter()
+        .map(|task| task.positive_leaf_duration)
+        .sum();
+    let milestone_leaf_count = calculated_children
+        .iter()
+        .map(|task| task.milestone_leaf_count)
+        .sum();
+    let milestone_complete_count = calculated_children
+        .iter()
+        .map(|task| task.milestone_complete_count)
+        .sum();
+    // Duration-weighted percent over positive-duration leaves; fall back to
+    // all-milestone completeness when no positive-duration leaf exists.
+    let percent_complete = if positive_leaf_duration > 0 {
+        (weighted_percent_numerator / positive_leaf_duration) as u8
+    } else if milestone_leaf_count > 0 && milestone_complete_count == milestone_leaf_count {
+        100
+    } else {
+        0
+    };
     let calculated = OffsetTask {
         early_start,
         early_finish,
@@ -507,16 +670,26 @@ fn derive_summary(
         constraint_violated: calculated_children
             .iter()
             .any(|task| task.constraint_violated),
+        completed: false,
+        percent_complete,
+        weighted_percent_numerator,
+        positive_leaf_duration,
+        milestone_leaf_count,
+        milestone_complete_count,
     };
     offsets[index] = Some(calculated.clone());
     Ok(calculated)
 }
 
+// Recursively resolves civil instants; the wide argument list threads the
+// validated leaf context without hiding it behind a bundle struct.
+#[allow(clippy::too_many_arguments)]
 fn derive_task_instants(
     index: usize,
     hierarchy: &TaskHierarchy<'_>,
     graph: &LeafGraph<'_>,
     constraints: &ConstraintSet,
+    progress: &ProgressSet,
     calendar: &CalendarMath,
     offsets: &[Option<OffsetTask>],
     instants: &mut [Option<TaskInstants>],
@@ -532,41 +705,79 @@ fn derive_task_instants(
             .position(|&original_index| original_index == index)
             .expect("validated leaf index");
         let milestone = offset.duration_minutes == 0;
-        let constrained_milestone_start = milestone
-            && constraints.normalized_start_dates[leaf_index].is_some()
-            && offset.early_start == constraints.start_no_earlier_than[leaf_index].max(0);
-        let (early_start, early_finish) = if constrained_milestone_start {
-            let instant = calendar.working_day_start(
-                constraints.normalized_start_dates[leaf_index]
-                    .expect("constrained milestone start date"),
-            )?;
-            (instant, instant)
-        } else {
-            (
-                calendar.task_start_instant(offset.early_start, milestone)?,
-                calendar.task_finish_instant(offset.early_finish, milestone)?,
-            )
-        };
-        let constrained_milestone_finish = milestone
-            && constraints.normalized_finish_dates[leaf_index].is_some()
-            && offset.late_finish == constraints.finish_no_later_than[leaf_index];
-        let (late_start, late_finish) = if constrained_milestone_finish {
-            let instant = calendar.working_day_finish(
-                constraints.normalized_finish_dates[leaf_index]
-                    .expect("constrained milestone finish date"),
-            )?;
-            (instant, instant)
-        } else {
-            (
-                calendar.task_start_instant(offset.late_start, milestone)?,
-                calendar.task_finish_instant(offset.late_finish, milestone)?,
-            )
-        };
-        TaskInstants {
-            early_start,
-            early_finish,
-            late_start,
-            late_finish,
+        match progress.status[leaf_index] {
+            ProgressStatus::Complete => {
+                // Anchor early and late instants at the normalized actuals.
+                let (early_start, early_finish) = if milestone {
+                    let instant = calendar.task_finish_instant(
+                        progress.actual_finish_offset[leaf_index].expect("complete actual finish"),
+                        true,
+                    )?;
+                    (instant, instant)
+                } else {
+                    (
+                        calendar.start_instant(
+                            progress.actual_start_offset[leaf_index]
+                                .expect("complete actual start"),
+                        )?,
+                        calendar.task_finish_instant(
+                            progress.actual_finish_offset[leaf_index]
+                                .expect("complete actual finish"),
+                            false,
+                        )?,
+                    )
+                };
+                TaskInstants {
+                    early_start,
+                    early_finish,
+                    late_start: early_start,
+                    late_finish: early_finish,
+                }
+            }
+            ProgressStatus::InProgress => TaskInstants {
+                early_start: calendar.start_instant(offset.early_start)?,
+                early_finish: calendar.task_finish_instant(offset.early_finish, false)?,
+                late_start: calendar.task_start_instant(offset.late_start, false)?,
+                late_finish: calendar.task_finish_instant(offset.late_finish, false)?,
+            },
+            ProgressStatus::NotStarted => {
+                let constrained_milestone_start = milestone
+                    && constraints.normalized_start_dates[leaf_index].is_some()
+                    && offset.early_start == constraints.start_no_earlier_than[leaf_index].max(0);
+                let (early_start, early_finish) = if constrained_milestone_start {
+                    let instant = calendar.working_day_start(
+                        constraints.normalized_start_dates[leaf_index]
+                            .expect("constrained milestone start date"),
+                    )?;
+                    (instant, instant)
+                } else {
+                    (
+                        calendar.task_start_instant(offset.early_start, milestone)?,
+                        calendar.task_finish_instant(offset.early_finish, milestone)?,
+                    )
+                };
+                let constrained_milestone_finish = milestone
+                    && constraints.normalized_finish_dates[leaf_index].is_some()
+                    && offset.late_finish == constraints.finish_no_later_than[leaf_index];
+                let (late_start, late_finish) = if constrained_milestone_finish {
+                    let instant = calendar.working_day_finish(
+                        constraints.normalized_finish_dates[leaf_index]
+                            .expect("constrained milestone finish date"),
+                    )?;
+                    (instant, instant)
+                } else {
+                    (
+                        calendar.task_start_instant(offset.late_start, milestone)?,
+                        calendar.task_finish_instant(offset.late_finish, milestone)?,
+                    )
+                };
+                TaskInstants {
+                    early_start,
+                    early_finish,
+                    late_start,
+                    late_finish,
+                }
+            }
         }
     } else {
         let calculated_children = hierarchy.children[index]
@@ -577,6 +788,7 @@ fn derive_task_instants(
                     hierarchy,
                     graph,
                     constraints,
+                    progress,
                     calendar,
                     offsets,
                     instants,
@@ -698,6 +910,251 @@ impl ConstraintSet {
     }
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum ProgressStatus {
+    NotStarted,
+    InProgress,
+    Complete,
+}
+
+/// Validated and normalized per-leaf progress plus the job data-date instant.
+struct ProgressSet {
+    data_date_offset: Option<i64>,
+    data_date_instant: Option<NaiveDateTime>,
+    status: Vec<ProgressStatus>,
+    percent: Vec<u8>,
+    remaining_duration: Vec<i64>,
+    actual_start_offset: Vec<Option<i64>>,
+    actual_finish_offset: Vec<Option<i64>>,
+    actual_start_instant: Vec<Option<NaiveDateTime>>,
+    actual_finish_instant: Vec<Option<NaiveDateTime>>,
+}
+
+impl ProgressSet {
+    fn new(
+        progress: &ScheduleProgress,
+        hierarchy: &TaskHierarchy<'_>,
+        graph: &LeafGraph<'_>,
+        calendar: &CalendarMath,
+    ) -> Result<Self, ScheduleError> {
+        let leaf_count = graph.tasks.len();
+        let mut leaf_indices = HashMap::new();
+        for (index, task) in graph.tasks.iter().enumerate() {
+            leaf_indices.insert(task.id.as_str(), index);
+        }
+
+        // Progress entries require an explicit data date; a data date with no
+        // entries is a valid empty status update.
+        let data_date = progress.data_date;
+        if !progress.entries.is_empty() && data_date.is_none() {
+            return Err(invalid_progress(
+                "progress_data_date_required",
+                "progress entries require a job data date",
+            ));
+        }
+        let (data_date_offset, data_date_instant) = match data_date {
+            Some(date) => {
+                let normalized = calendar
+                    .working_date_on_or_after(date)?
+                    .max(calendar.first_working_date);
+                (
+                    Some(calendar.start_offset_for_working_date(normalized)?),
+                    Some(calendar.working_day_start(normalized)?),
+                )
+            }
+            None => (None, None),
+        };
+
+        let mut status = vec![ProgressStatus::NotStarted; leaf_count];
+        let mut percent = vec![0_u8; leaf_count];
+        let mut actual_start_offset = vec![None; leaf_count];
+        let mut actual_finish_offset = vec![None; leaf_count];
+        let mut actual_start_instant = vec![None; leaf_count];
+        let mut actual_finish_instant = vec![None; leaf_count];
+        let mut seen = HashSet::new();
+
+        for entry in &progress.entries {
+            if entry.task_id.trim().is_empty() {
+                return Err(invalid_progress(
+                    "progress_task_id_required",
+                    "progress entries require a task ID",
+                ));
+            }
+            if !seen.insert(entry.task_id.as_str()) {
+                return Err(invalid_progress(
+                    "progress_duplicate",
+                    format!("task {} has more than one progress entry", entry.task_id),
+                ));
+            }
+            let original_index = hierarchy
+                .task_indices
+                .get(entry.task_id.as_str())
+                .copied()
+                .ok_or_else(|| {
+                    invalid_progress(
+                        "progress_task_missing",
+                        format!("progress task {} does not exist", entry.task_id),
+                    )
+                })?;
+            if hierarchy.is_summary(original_index) {
+                return Err(invalid_progress(
+                    "progress_summary",
+                    format!("summary task {} cannot report progress", entry.task_id),
+                ));
+            }
+            if entry.percent_complete > 100 {
+                return Err(invalid_progress(
+                    "progress_percent_out_of_range",
+                    format!("task {} percent complete exceeds 100", entry.task_id),
+                ));
+            }
+            let index = leaf_indices[entry.task_id.as_str()];
+            let milestone = graph.durations[index] == 0;
+            let data_date = data_date.expect("entries validated against a data date");
+
+            // Percent/actual-date combination rules.
+            match entry.percent_complete {
+                0 => {
+                    if entry.actual_start.is_some() || entry.actual_finish.is_some() {
+                        return Err(invalid_progress(
+                            "progress_actuals_forbidden",
+                            format!("task {} at 0 percent cannot carry actuals", entry.task_id),
+                        ));
+                    }
+                    status[index] = ProgressStatus::NotStarted;
+                }
+                100 => {
+                    if entry.actual_start.is_none() {
+                        return Err(invalid_progress(
+                            "progress_actual_start_required",
+                            format!("complete task {} requires an actual start", entry.task_id),
+                        ));
+                    }
+                    if entry.actual_finish.is_none() {
+                        return Err(invalid_progress(
+                            "progress_actual_finish_required",
+                            format!("complete task {} requires an actual finish", entry.task_id),
+                        ));
+                    }
+                    status[index] = ProgressStatus::Complete;
+                }
+                _ => {
+                    if milestone {
+                        return Err(invalid_progress(
+                            "progress_milestone_percent",
+                            format!("milestone {} accepts only 0 or 100 percent", entry.task_id),
+                        ));
+                    }
+                    if entry.actual_start.is_none() {
+                        return Err(invalid_progress(
+                            "progress_actual_start_required",
+                            format!(
+                                "in-progress task {} requires an actual start",
+                                entry.task_id
+                            ),
+                        ));
+                    }
+                    if entry.actual_finish.is_some() {
+                        return Err(invalid_progress(
+                            "progress_actual_finish_forbidden",
+                            format!(
+                                "in-progress task {} cannot carry an actual finish",
+                                entry.task_id
+                            ),
+                        ));
+                    }
+                    status[index] = ProgressStatus::InProgress;
+                }
+            }
+
+            // Civil-date ordering: actuals precede one another and the data date.
+            if let (Some(start), Some(finish)) = (entry.actual_start, entry.actual_finish) {
+                if start > finish {
+                    return Err(invalid_progress(
+                        "progress_actual_order",
+                        format!(
+                            "task {} actual start is after its actual finish",
+                            entry.task_id
+                        ),
+                    ));
+                }
+                if milestone && start != finish {
+                    return Err(invalid_progress(
+                        "progress_milestone_actuals_unequal",
+                        format!(
+                            "milestone {} requires equal actual start and finish dates",
+                            entry.task_id
+                        ),
+                    ));
+                }
+            }
+            for actual in [entry.actual_start, entry.actual_finish]
+                .into_iter()
+                .flatten()
+            {
+                if actual > data_date {
+                    return Err(invalid_progress(
+                        "progress_actual_after_data_date",
+                        format!(
+                            "task {} reports an actual after the data date",
+                            entry.task_id
+                        ),
+                    ));
+                }
+            }
+
+            // Normalize actuals onto working-day boundaries.
+            percent[index] = entry.percent_complete;
+            if let Some(start) = entry.actual_start {
+                let normalized = calendar.working_date_on_or_after(start)?;
+                actual_start_offset[index] =
+                    Some(calendar.start_offset_for_working_date(normalized)?);
+                actual_start_instant[index] = Some(calendar.working_day_start(normalized)?);
+            }
+            if let Some(finish) = entry.actual_finish {
+                let normalized = calendar.working_date_on_or_before(finish)?;
+                actual_finish_offset[index] =
+                    Some(calendar.finish_offset_for_working_date(normalized)?);
+                actual_finish_instant[index] = Some(calendar.working_day_finish(normalized)?);
+            }
+            if let (Some(start), Some(finish)) =
+                (actual_start_offset[index], actual_finish_offset[index])
+            {
+                if start > finish {
+                    return Err(invalid_progress(
+                        "progress_normalized_order",
+                        format!(
+                            "task {} normalizes to an actual start after its finish",
+                            entry.task_id
+                        ),
+                    ));
+                }
+            }
+        }
+
+        // Remaining duration = duration - floor(duration * percent / 100).
+        let mut remaining_duration = vec![0_i64; leaf_count];
+        for index in 0..leaf_count {
+            let duration = graph.durations[index];
+            let completed_portion =
+                (i128::from(duration) * i128::from(percent[index]) / 100) as i64;
+            remaining_duration[index] = duration - completed_portion;
+        }
+
+        Ok(Self {
+            data_date_offset,
+            data_date_instant,
+            status,
+            percent,
+            remaining_duration,
+            actual_start_offset,
+            actual_finish_offset,
+            actual_start_instant,
+            actual_finish_instant,
+        })
+    }
+}
+
 struct LeafGraph<'a> {
     tasks: Vec<&'a ScheduleTask>,
     original_indices: Vec<usize>,
@@ -811,15 +1268,17 @@ impl<'a> LeafGraph<'a> {
         total_float: &[i64],
         schedule_finish: i64,
         directly_violated: &[usize],
+        completed: &[bool],
     ) -> Vec<usize> {
+        // The primary driving path traces incomplete leaves only.
         if directly_violated
             .iter()
-            .any(|&index| total_float[index] < 0)
+            .any(|&index| !completed[index] && total_float[index] < 0)
         {
             let mut current = directly_violated
                 .iter()
                 .copied()
-                .filter(|&index| total_float[index] < 0)
+                .filter(|&index| !completed[index] && total_float[index] < 0)
                 .min_by(|&left, &right| {
                     total_float[left]
                         .cmp(&total_float[right])
@@ -829,7 +1288,8 @@ impl<'a> LeafGraph<'a> {
             let mut path = vec![current];
             while let Some(predecessor) =
                 self.predecessors[current].iter().find_map(|&(index, lag)| {
-                    (total_float[index] == total_float[current]
+                    (!completed[index]
+                        && total_float[index] == total_float[current]
                         && early_finish[index].checked_add(lag) == Some(early_start[current]))
                     .then_some(index)
                 })
@@ -842,7 +1302,10 @@ impl<'a> LeafGraph<'a> {
         }
         let Some(mut current) = (0..self.tasks.len())
             .filter(|&index| {
-                self.successors[index].is_empty()
+                !completed[index]
+                    && self.successors[index]
+                        .iter()
+                        .all(|&(successor, _)| completed[successor])
                     && total_float[index] == 0
                     && early_finish[index] == schedule_finish
             })
@@ -852,7 +1315,8 @@ impl<'a> LeafGraph<'a> {
         };
         let mut path = vec![current];
         while let Some(predecessor) = self.predecessors[current].iter().find_map(|&(index, lag)| {
-            (total_float[index] == 0
+            (!completed[index]
+                && total_float[index] == 0
                 && early_finish[index].checked_add(lag) == Some(early_start[current]))
             .then_some(index)
         }) {
@@ -1143,6 +1607,13 @@ fn invalid_task(code: &'static str, message: impl Into<String>) -> ScheduleError
 
 fn invalid_dependency(code: &'static str, message: impl Into<String>) -> ScheduleError {
     ScheduleError::InvalidDependency {
+        code,
+        message: message.into(),
+    }
+}
+
+fn invalid_progress(code: &'static str, message: impl Into<String>) -> ScheduleError {
+    ScheduleError::InvalidProgress {
         code,
         message: message.into(),
     }
