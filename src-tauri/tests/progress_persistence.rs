@@ -1166,6 +1166,94 @@ fn progress_on_a_duration_less_leaf_reports_duration_required() {
     assert_eq!(command_log_count(&path), audit_before);
 }
 
+#[test]
+fn schedule_edits_commit_over_pre_existing_incomplete_tasks() {
+    // The ordinary setup flow adds WBS rows before their durations, then keeps
+    // adjusting the schedule. A duration-less leaf must not block that edit.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Mid-setup".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("initial schedule");
+    // A freshly added leaf carries no duration yet.
+    let task = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Unsized".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("task");
+    // Changing the calendar and schedule start still commits over that state.
+    let updated = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-18".into()),
+                calendar: seven_day_calendar(),
+                expected_job_version: task.job_version,
+            },
+        )
+        .expect("schedule change commits over incomplete task");
+    assert_eq!(updated.version, task.job_version + 1);
+    assert_eq!(updated.schedule_start.as_deref(), Some("2026-08-18"));
+}
+
+#[test]
+fn data_date_on_a_start_less_job_reports_schedule_start_required() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "No start".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let audit_before = command_log_count(&path);
+    let error = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: job.version,
+            },
+        )
+        .expect_err("data date needs a schedule start");
+    assert_eq!(error.kind(), "validation_failed");
+    assert_eq!(
+        error.to_string(),
+        "set a schedule start before updating the schedule"
+    );
+    assert_eq!(command_log_count(&path), audit_before);
+}
+
 /// Writes an exact-v5 schema (migrations 1..5) with one leaf task, matching the
 /// DDL the migration path produces so the backup verifier accepts it as-is.
 fn write_exact_v5_database(path: &std::path::Path, job_id: &str) {

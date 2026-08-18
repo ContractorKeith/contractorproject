@@ -2606,35 +2606,38 @@ fn validate_proposed_schedule(
             let calendar = serde_json::from_str(&calendar_json).map_err(|_| {
                 ApplicationError::InvalidStoredData("job has invalid calendar".into())
             })?;
-            (stored_schedule_start, calendar)
+            (stored_schedule_start.clone(), calendar)
         }
     };
 
     // Resolve the proposed data date: the DataDate edit overrides the stored value.
     let data_date_value = match edit {
         ProposedEdit::DataDate(value) => value.map(str::to_owned),
-        _ => stored_data_date,
+        _ => stored_data_date.clone(),
     };
 
-    // Without a schedule start the pure scheduler cannot run. A Schedule edit may
-    // legally leave the job unset during setup, but only while no data date or
-    // task progress is stranded behind the missing schedule start.
+    // Without a schedule start the pure scheduler cannot run.
     let Some(schedule_start) = proposed_schedule_start else {
-        let has_progress: bool = transaction.query_row(
-            "SELECT EXISTS(SELECT 1 FROM tasks WHERE job_id = ?1 AND (percent_complete IS NOT NULL OR actual_start IS NOT NULL OR actual_finish IS NOT NULL))",
-            [job_id],
-            |row| row.get(0),
-        )?;
-        if data_date_value.is_some() || has_progress {
-            return Err(ApplicationError::ValidationFailed {
-                code: "schedule_start_required",
-                field: "scheduleStart",
-                message: "clear task progress and the data date before clearing the schedule start"
-                    .into(),
-            });
-        }
         return match edit {
-            ProposedEdit::Schedule { .. } => Ok(()),
+            // A Schedule edit may legally leave the job unset during setup, but
+            // only while no data date or task progress is stranded behind it.
+            ProposedEdit::Schedule { .. } => {
+                let has_progress: bool = transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM tasks WHERE job_id = ?1 AND (percent_complete IS NOT NULL OR actual_start IS NOT NULL OR actual_finish IS NOT NULL))",
+                    [job_id],
+                    |row| row.get(0),
+                )?;
+                if data_date_value.is_some() || has_progress {
+                    return Err(ApplicationError::ValidationFailed {
+                        code: "schedule_start_required",
+                        field: "scheduleStart",
+                        message:
+                            "clear task progress and the data date before clearing the schedule start"
+                                .into(),
+                    });
+                }
+                Ok(())
+            }
             _ => Err(ApplicationError::ValidationFailed {
                 code: "schedule_start_required",
                 field: "scheduleStart",
@@ -2747,20 +2750,58 @@ fn validate_proposed_schedule(
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    calculate_schedule_with_progress(
-        &ScheduleInput {
-            schedule_start,
-            calendar,
-            tasks,
-            dependencies,
-        },
-        &constraints,
-        &ScheduleProgress { data_date, entries },
-    )
-    .map_err(|error| ApplicationError::ValidationFailed {
-        code: error.code(),
-        field: "schedule",
-        message: error.to_string(),
+
+    // A Schedule edit only changes the schedule start, calendar, and (never)
+    // data date, so the task rows are identical across the current and proposed
+    // schedules; only the calendar inputs differ.
+    let run =
+        |schedule_start: NaiveDate, calendar: &WorkingCalendar, data_date: Option<NaiveDate>| {
+            calculate_schedule_with_progress(
+                &ScheduleInput {
+                    schedule_start,
+                    calendar: calendar.clone(),
+                    tasks: tasks.clone(),
+                    dependencies: dependencies.clone(),
+                },
+                &constraints,
+                &ScheduleProgress {
+                    data_date,
+                    entries: entries.clone(),
+                },
+            )
+        };
+
+    // For a Schedule edit, do not blame the edit for pre-existing invalidity
+    // (e.g. duration-less leaves mid-setup): only reject when the current stored
+    // inputs validate but the proposed ones do not.
+    if let ProposedEdit::Schedule { .. } = edit {
+        let current_valid = stored_schedule_start
+            .as_deref()
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+            .is_some_and(|current_start| {
+                let stored_calendar = serde_json::from_str::<WorkingCalendar>(&calendar_json);
+                let stored_data_date = stored_data_date
+                    .as_deref()
+                    .map(parse_canonical_constraint_date)
+                    .transpose();
+                match (stored_calendar, stored_data_date) {
+                    (Ok(calendar), Ok(data_date)) => {
+                        run(current_start, &calendar, data_date).is_ok()
+                    }
+                    _ => false,
+                }
+            });
+        if !current_valid {
+            return Ok(());
+        }
+    }
+
+    run(schedule_start, &calendar, data_date).map_err(|error| {
+        ApplicationError::ValidationFailed {
+            code: error.code(),
+            field: "schedule",
+            message: error.to_string(),
+        }
     })?;
     Ok(())
 }

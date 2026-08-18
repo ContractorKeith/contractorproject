@@ -64,7 +64,10 @@ scheduler before commit; failed validation leaves canonical rows, versions, and
 `command_log` unchanged. Progress requires a duration, so reporting progress on a
 duration-less leaf is rejected. A schedule start may be left unset only while no
 data date or task progress is stranded behind it; clearing the schedule start
-under persisted progress or a data date is rejected.
+under persisted progress or a data date is rejected. A schedule-setting edit is
+not blamed for pre-existing invalidity (for example duration-less leaves during
+setup): it is rejected only when the current stored inputs validate but the
+proposed calendar and schedule start do not.
 
 Progress rules: progress applies only to leaf tasks and is supplied as a
 `percent_complete` with optional `actual_start`/`actual_finish`. A cleared or
