@@ -25,4 +25,32 @@ describe("packaged Gantt verification fixture", () => {
     expect(model.rows[0]?.constraintViolated).toBe(true);
     expect(model.criticalPath).not.toHaveLength(0);
   });
+
+  it("carries a data date and statused phase-1 rows across every progress state", () => {
+    const model = createGanttVerificationReadModel();
+
+    expect(model.contractVersion).toBe(3);
+    expect(model.dataDate).not.toBeNull();
+    expect(model.rows.some((row) => row.progressStatus === "completed")).toBe(true);
+    expect(model.rows.some((row) => row.progressStatus === "inProgress")).toBe(true);
+    expect(model.rows.some((row) => row.progressStatus === "notStarted")).toBe(true);
+
+    // Completed rows carry both actuals; the in-progress row omits its finish.
+    const complete = model.rows.find((row) => row.taskId === "phase-1-task-1")!;
+    expect(complete.percentComplete).toBe(100);
+    expect(complete.progressStatus).toBe("completed");
+    expect(complete.actualStart).not.toBeNull();
+    expect(complete.actualFinish).not.toBeNull();
+
+    const running = model.rows.find((row) => row.taskId === "phase-1-task-4")!;
+    expect(running.percentComplete).toBe(50);
+    expect(running.progressStatus).toBe("inProgress");
+    expect(running.actualStart).not.toBeNull();
+    expect(running.actualFinish).toBeNull();
+
+    // Summaries expose only a derived percent, never fabricated actuals.
+    const summary = model.rows.find((row) => row.taskId === "phase-1")!;
+    expect(summary.actualStart).toBeNull();
+    expect(summary.actualFinish).toBeNull();
+  });
 });

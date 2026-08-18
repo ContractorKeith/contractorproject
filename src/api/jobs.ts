@@ -15,6 +15,8 @@ import type {
   UpdateScheduleRequest,
   UpdateTaskDurationRequest,
   UpdateTaskConstraintRequest,
+  UpdateJobDataDateRequest,
+  UpdateTaskProgressRequest,
   RemoveDependencyRequest,
 } from "../types/jobs";
 import type { GanttReadModel } from "../types/gantt";
@@ -33,6 +35,8 @@ export interface JobClient {
   updateSchedule?(request: UpdateScheduleRequest): Promise<Job>;
   updateTaskDuration?(request: UpdateTaskDurationRequest): Promise<TaskHierarchy>;
   updateTaskConstraint?(request: UpdateTaskConstraintRequest): Promise<TaskMutation>;
+  updateJobDataDate?(request: UpdateJobDataDateRequest): Promise<Job>;
+  updateTaskProgress?(request: UpdateTaskProgressRequest): Promise<TaskMutation>;
   addDependency?(request: AddDependencyRequest): Promise<TaskHierarchy>;
   removeDependency?(request: RemoveDependencyRequest): Promise<TaskHierarchy>;
 }
@@ -64,6 +68,9 @@ export const tauriJobClient: JobClient = {
   },
   updateTaskConstraint: (request) =>
     invoke<TaskMutation>("update_task_constraint", { request }),
+  updateJobDataDate: (request) => invoke<Job>("update_job_data_date", { request }),
+  updateTaskProgress: (request) =>
+    invoke<TaskMutation>("update_task_progress", { request }),
   addDependency: (request) => invoke<TaskHierarchy>("add_dependency", { request }),
   removeDependency: (request) => invoke<TaskHierarchy>("remove_dependency", { request }),
 };

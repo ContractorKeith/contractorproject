@@ -219,7 +219,7 @@ async function runPackagedBenchmark(
           100,
         maximumDrift,
         nodeCount: scrollport.querySelectorAll(
-          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-dependency]",
+          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-progress-task-id], [data-dependency]",
         ).length,
         longTasks: longTasks.length,
       });

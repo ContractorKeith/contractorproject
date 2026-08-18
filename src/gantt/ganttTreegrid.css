@@ -157,6 +157,40 @@
   opacity: 0.8;
 }
 
+/* Progress overlay: a darker fill over the bar. Progress is also stated as
+   visible % Done text in the treegrid, so this is never a color-only signal. */
+.gantt-timeline__task-progress {
+  fill: var(--color-accent-900);
+  opacity: 0.85;
+  stroke: var(--color-accent-900);
+  stroke-width: 0.5;
+}
+
+/* Vertical data-date marker: a 1.5px accent line with a small flag at the header. */
+.gantt-timeline__data-date {
+  position: absolute;
+  width: 0;
+  border-left: 1.5px solid var(--color-accent);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gantt-timeline__data-date-label {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  padding: 0 var(--space-1);
+  /* Surface/text pairing keeps the flag legible in light and dark themes; the
+     accent border ties it to the marker line. */
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm, 3px);
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .gantt-timeline__dependency {
   fill: none;
   stroke: var(--color-neutral-600);
@@ -203,10 +237,14 @@
 }
 
 .gantt-treegrid__name-column {
-  width: 16%;
+  width: 9%;
 }
 
 .gantt-treegrid__duration-column {
+  width: 7%;
+}
+
+.gantt-treegrid__progress-column {
   width: 8%;
 }
 
@@ -214,12 +252,13 @@
   width: 15%;
 }
 
+/* Date columns carry the widest facts; keep headroom for wide Linux fonts. */
 .gantt-treegrid__date-column {
-  width: 22%;
+  width: 23%;
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 10%;
+  width: 7%;
 }
 
 .gantt-treegrid th,
@@ -234,8 +273,9 @@
   box-shadow: inset 0 calc(-1 * var(--border-hairline)) var(--color-divider);
 }
 
-.gantt-treegrid td:nth-child(4),
-.gantt-treegrid td:nth-child(5) {
+/* Tighten the date cells by content class so column insertions can't drift the
+   rule off them; keeps Start and Finish at padding parity. */
+.gantt-treegrid td:has(.gantt-treegrid__date) {
   padding-inline: var(--space-1);
 }
 
@@ -403,6 +443,24 @@
   font-variant-numeric: tabular-nums;
 }
 
+.gantt-treegrid__progress {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-treegrid__progress-status {
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+}
+
+.gantt-treegrid__progress--completed .gantt-treegrid__progress-status {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .gantt-treegrid__disclosure,
 .gantt-treegrid__disclosure-spacer {
   width: 24px;
@@ -493,6 +551,22 @@
 
   .gantt-timeline__baseline {
     stroke-dasharray: 3 2;
+  }
+
+  .gantt-timeline__task-progress {
+    fill: Highlight;
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
+
+  .gantt-timeline__data-date {
+    border-left-color: CanvasText;
+  }
+
+  .gantt-timeline__data-date-label {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
   }
 
   .gantt-timeline__dependency,

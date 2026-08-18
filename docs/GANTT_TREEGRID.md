@@ -1,13 +1,16 @@
 # Production Gantt treegrid
 
 Status: implemented
-Updated: 2026-08-17
+Updated: 2026-08-18
 
 `src/gantt/GanttTreegrid.tsx` is the authoritative work-breakdown surface for
-Gantt read-model contract v2. It renders a native HTML table with
+Gantt read-model contract v3. It renders a native HTML table with
 `role="treegrid"` and uses TanStack Virtual to mount only the visible task rows
 plus overscan. The implemented supplemental SVG timeline remains a separate
-renderer and introduces no schedule facts that are absent from this table.
+renderer and introduces no schedule facts that are absent from this table, with
+two documented exceptions: the job data-date marker is a job-level instant drawn
+only on the timeline, and per-task actual start/finish appear in the table only
+inside the % Done cell's accessible name rather than as dedicated visible cells.
 
 ## Semantic contract
 
@@ -15,6 +18,9 @@ renderer and introduces no schedule facts that are absent from this table.
   `aria-rowindex="2"`, and collapse never renumbers later rows.
 - Depth, expanded state, sibling position, and sibling-set size come directly
   from the versioned read model.
+- The eight columns are WBS, Name, Duration, % Done, Start, Finish,
+  Predecessors, and Float (`aria-colcount="8"`). The Name column remains the
+  tree column and disclosure owner.
 - Task, duration, current and baseline dates, signed variance, total float,
   critical and milestone state, full predecessor IDs, leaf constraint dates,
   and scheduler-provided constraint violations remain visible cell text. A
@@ -22,8 +28,17 @@ renderer and introduces no schedule facts that are absent from this table.
   The Start and Finish cells use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; the Float
   cell shows compact `Constraint` / `violated` text, so color is never the only
   signal.
-- Accessible Name and Float cell labels include the exact constraint values and
-  violation state supplied by Rust. React does not infer schedule facts.
+- The % Done cell renders the Rust `percentComplete` as visible `NN%` text plus
+  a compact status word (`Complete`, `In progress`, `Not started`), so progress
+  state is never color-only. Its accessible name adds the progress facts, e.g.
+  `..., percent complete, 42 percent complete, in progress, actual start
+  2026-08-17 08:00`. Completed rows also announce `actual finish`.
+- Accessible Name, % Done, and Float cell labels include the exact constraint,
+  progress, and violation values supplied by Rust. React does not infer or
+  derive schedule facts.
+- The supplemental timeline overlays a proportional progress fill on task bars
+  and, when a data date is set, a labelled vertical marker line with an
+  accessible name. Both are theme-safe and forced-colors aware.
 - Exactly one mounted grid cell participates in the page tab order. Focus is
   tracked by task ID so virtualization, collapse, and a reordered projection
   can restore it to the same task or its nearest visible ancestor.
@@ -39,12 +54,14 @@ states.
 
 ## Verification
 
-Component tests cover semantics, complete schedule text, keyboard navigation,
-collapse, and projection reorder. The Playwright contract renders a deterministic
-1,000-row read model in Chromium, proves that fewer than 50 task rows are
-mounted, jumps focus to the last logical row and back, recovers focus after an
-offscreen reorder, runs axe-core, and checks reduced-motion and forced-color
-behavior.
+Component tests cover semantics, complete schedule text, the % Done column and
+progress accessible names, proportional bar fill, the data-date marker,
+keyboard navigation, collapse, and projection reorder. The Playwright contract
+renders a deterministic 1,000-row statused read model in Chromium, proves that
+fewer than 50 task rows are mounted, asserts the progress facts, bar fill, and
+data-date marker accessible name, jumps focus to the last logical row and back,
+recovers focus after an offscreen reorder, runs axe-core, and checks
+reduced-motion and forced-color behavior.
 
 ```bash
 npm test

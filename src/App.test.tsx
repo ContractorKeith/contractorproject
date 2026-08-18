@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -941,6 +941,195 @@ describe("job workspace", () => {
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't create verified backup.");
     expect(screen.getByRole("heading", { name: job.name })).toBeVisible();
   });
+
+  it("sets and clears leaf progress through the typed client", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const leaf = {
+      ...fixtureTask(job, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const initial = { jobId: job.id, jobVersion: 1, tasks: [leaf] };
+    const afterSet = {
+      jobId: job.id,
+      jobVersion: 2,
+      tasks: [{ ...leaf, version: 2, percentComplete: 50, actualStart: "2026-08-17" }],
+    };
+    const afterClear = {
+      jobId: job.id,
+      jobVersion: 3,
+      tasks: [{ ...leaf, version: 3, percentComplete: null, actualStart: null, actualFinish: null }],
+    };
+    let currentJob = job;
+    const updateTaskProgress = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 2 };
+        return Promise.resolve({ task: afterSet.tasks[0], jobVersion: 2 });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = { ...job, version: 3 };
+        return Promise.resolve({ task: afterClear.tasks[0], jobVersion: 3 });
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(afterSet)
+        .mockResolvedValueOnce(afterClear),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(), updateTaskProgress,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.type(screen.getByLabelText("Percent complete for Excavate"), "50");
+    await user.type(screen.getByLabelText("Actual start for Excavate"), "2026-08-17");
+    await user.click(screen.getByRole("button", { name: "Save progress" }));
+    await waitFor(() => expect(updateTaskProgress).toHaveBeenLastCalledWith({
+      taskId: leaf.id, clear: false, percentComplete: 50, actualStart: "2026-08-17",
+      actualFinish: null, expectedVersion: 1, expectedJobVersion: 1,
+    }));
+
+    await user.click(screen.getByRole("button", { name: "Clear progress" }));
+    await waitFor(() => expect(updateTaskProgress).toHaveBeenLastCalledWith({
+      taskId: leaf.id, clear: true, percentComplete: null, actualStart: null,
+      actualFinish: null, expectedVersion: 2, expectedJobVersion: 2,
+    }));
+  });
+
+  it("sets and clears the job data date through the typed client", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 2, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = {
+      ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const hierarchyV2 = { jobId: baseJob.id, jobVersion: 2, tasks: [leaf], dependencies: [] };
+    const hierarchyV3 = { ...hierarchyV2, jobVersion: 3 };
+    const hierarchyV4 = { ...hierarchyV2, jobVersion: 4 };
+    let currentJob = baseJob;
+    const updateJobDataDate = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        currentJob = { ...baseJob, version: 3, dataDate: "2026-08-18" };
+        return Promise.resolve(currentJob);
+      })
+      .mockImplementationOnce(() => {
+        currentJob = { ...baseJob, version: 4, dataDate: null };
+        return Promise.resolve(currentJob);
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValueOnce(hierarchyV2)
+        .mockResolvedValueOnce(hierarchyV3)
+        .mockResolvedValueOnce(hierarchyV4),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(), updateJobDataDate,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.type(screen.getByLabelText(`Data date for ${baseJob.name}`), "2026-08-18");
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+    await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
+      jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 2,
+    }));
+
+    await user.click(await screen.findByRole("button", { name: "Clear data date" }));
+    await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
+      jobId: baseJob.id, dataDate: null, expectedJobVersion: 3,
+    }));
+  });
+
+  it("rejects a non-integer percent complete before calling the client", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const leaf = {
+      ...fixtureTask(job, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const updateTaskProgress = vi.fn();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [leaf] }),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(), updateTaskProgress,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    fireEvent.change(screen.getByLabelText("Percent complete for Excavate"), {
+      target: { value: "1.5" },
+    });
+    await user.click(screen.getByRole("button", { name: "Save progress" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Percent complete must be a whole number between 0 and 100.",
+    );
+    expect(updateTaskProgress).not.toHaveBeenCalled();
+  });
+
+  it("re-baselines a data-date draft after a refresh so the retried save succeeds", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 2, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = {
+      ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1),
+      durationMinutes: 480,
+    };
+    const hierarchyV2 = { jobId: baseJob.id, jobVersion: 2, tasks: [leaf], dependencies: [] };
+    const hierarchyV3 = { ...hierarchyV2, jobVersion: 3 };
+    const hierarchyV4 = { ...hierarchyV2, jobVersion: 4 };
+    const refreshedJob = { ...baseJob, version: 3 };
+    const savedJob = { ...baseJob, version: 4, dataDate: "2026-08-18" };
+    let currentJob = baseJob;
+    const updateJobDataDate = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        // Another writer advanced the job version between load and save.
+        currentJob = refreshedJob;
+        return Promise.reject({ kind: "version_conflict", message: "stale" });
+      })
+      .mockImplementationOnce(() => {
+        currentJob = savedJob;
+        return Promise.resolve(savedJob);
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValueOnce(hierarchyV2)
+        .mockResolvedValueOnce(hierarchyV3)
+        .mockResolvedValueOnce(hierarchyV4),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(), updateJobDataDate,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    const field = screen.getByLabelText(`Data date for ${baseJob.name}`);
+    await user.type(field, "2026-08-18");
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+
+    expect(await screen.findByText(/Schedule inputs changed elsewhere/)).toBeVisible();
+    expect(field).toHaveValue("2026-08-18");
+
+    await user.click(screen.getByRole("button", { name: "Refresh schedule" }));
+    expect(field).toHaveValue("2026-08-18");
+
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+    await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
+      jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
+    }));
+
+    // The successful save must not re-raise the schedule conflict banner.
+    expect(await screen.findByText("Data date saved.")).toBeVisible();
+    expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
+  });
 });
 
 function defaultCalendar(): WorkingCalendar {
@@ -960,6 +1149,7 @@ function fixtureJob() {
     createdAt: "2026-08-14T15:00:00.000Z",
     updatedAt: "2026-08-14T15:00:00.000Z",
     version: 1,
+    dataDate: null as string | null,
   };
 }
 
@@ -985,9 +1175,9 @@ function fixtureTask(
 
 function ganttReadModel(jobId: string) {
   return {
-    contractVersion: 2 as const, jobId, jobVersion: 1,
+    contractVersion: 3 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
-    baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
-    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, predecessorIds: [], baseline: null }],
+    dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
+    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessorIds: [], baseline: null }],
   };
 }

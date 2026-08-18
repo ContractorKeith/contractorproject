@@ -11,8 +11,8 @@ use crate::gantt::{
     GanttTaskSource,
 };
 use crate::scheduling::{
-    calculate_schedule_with_constraints, CalendarWeekday, ScheduleInput, ScheduleTask,
-    TaskConstraint, WorkingCalendar,
+    calculate_schedule_with_progress, CalendarWeekday, ScheduleInput, ScheduleProgress,
+    ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use crate::storage::SqliteStore;
 
@@ -434,7 +434,48 @@ impl ApplicationService {
                 })
             })
             .collect::<Result<Vec<_>, ApplicationError>>()?;
-        let schedule = calculate_schedule_with_constraints(
+        // Load persisted progress using the canonical mapping (unstatused rows with
+        // percent NULL/0 and no actuals are omitted, matching storage validation).
+        let data_date = job
+            .data_date
+            .as_deref()
+            .map(parse_constraint_date)
+            .transpose()?;
+        let progress_entries = tasks
+            .iter()
+            .filter(|task| {
+                task.percent_complete.unwrap_or(0) != 0
+                    || task.actual_start.is_some()
+                    || task.actual_finish.is_some()
+            })
+            .map(|task| {
+                let percent = u8::try_from(task.percent_complete.unwrap_or(0)).map_err(|_| {
+                    ApplicationError::InvalidStoredData(format!(
+                        "task {} has an invalid percent complete",
+                        task.id
+                    ))
+                })?;
+                Ok(TaskProgress {
+                    task_id: task.id.clone(),
+                    percent_complete: percent,
+                    actual_start: task
+                        .actual_start
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()?,
+                    actual_finish: task
+                        .actual_finish
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()?,
+                })
+            })
+            .collect::<Result<Vec<_>, ApplicationError>>()?;
+        let progress = ScheduleProgress {
+            data_date,
+            entries: progress_entries,
+        };
+        let schedule = calculate_schedule_with_progress(
             &ScheduleInput {
                 schedule_start,
                 calendar: job.calendar.clone(),
@@ -456,6 +497,7 @@ impl ApplicationService {
                     .collect(),
             },
             &constraints,
+            &progress,
         )
         .map_err(|error| ApplicationError::ValidationFailed {
             code: error.code(),

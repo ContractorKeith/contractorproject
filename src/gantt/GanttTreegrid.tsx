@@ -21,7 +21,7 @@ const HEADER_HEIGHT = 34;
 const DEFAULT_VIEWPORT_HEIGHT = 520;
 const OVERSCAN = 8;
 
-const columns = ["WBS", "Name", "Duration", "Start", "Finish", "Predecessors", "Float"] as const;
+const columns = ["WBS", "Name", "Duration", "% Done", "Start", "Finish", "Predecessors", "Float"] as const;
 const TREE_COLUMN_INDEX = 1;
 
 interface ActiveCell {
@@ -356,6 +356,7 @@ export function GanttTreegrid({
                 <col className="gantt-treegrid__wbs-column" />
                 <col className="gantt-treegrid__name-column" />
                 <col className="gantt-treegrid__duration-column" />
+                <col className="gantt-treegrid__progress-column" />
                 <col className="gantt-treegrid__date-column" />
                 <col className="gantt-treegrid__date-column" />
                 <col className="gantt-treegrid__predecessor-column" />
@@ -482,6 +483,7 @@ function TaskRow({
       </span>
     </span>,
     row.milestone ? "Milestone" : formatMinutes(row.durationMinutes),
+    <ProgressValue key="progress" row={row} />,
     <ScheduleDate
       key="start"
       current={currentStart}
@@ -553,6 +555,19 @@ function ScheduleDate({
         {baseline ? `Baseline ${baseline} ${formatSignedMinutes(variance ?? 0)}` : "No baseline"}
       </span>
       {constraint ? <span className="gantt-treegrid__constraint-date" data-testid="schedule-constraint">{constraint}</span> : null}
+    </span>
+  );
+}
+
+function ProgressValue({ row }: { row: GanttRow }) {
+  // Visible percent text plus a compact status word so state is never color-only.
+  return (
+    <span
+      className={`gantt-treegrid__progress gantt-treegrid__progress--${row.progressStatus}`}
+      data-testid={`progress-${row.taskId}`}
+    >
+      <span>{`${row.percentComplete}%`}</span>
+      <span className="gantt-treegrid__progress-status">{progressStatusText(row.progressStatus)}</span>
     </span>
   );
 }
@@ -633,14 +648,32 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 2:
       return `${prefix}, duration, ${row.milestone ? "milestone" : formatMinutes(row.durationMinutes)}`;
     case 3:
-      return `${prefix}, start, ${formatLocalDateTime(row.start)}, ${baselineLabel(row, "start")}`;
+      return `${prefix}, percent complete, ${progressLabel(row)}`;
     case 4:
-      return `${prefix}, finish, ${formatLocalDateTime(row.finish)}, ${baselineLabel(row, "finish")}`;
+      return `${prefix}, start, ${formatLocalDateTime(row.start)}, ${baselineLabel(row, "start")}`;
     case 5:
+      return `${prefix}, finish, ${formatLocalDateTime(row.finish)}, ${baselineLabel(row, "finish")}`;
+    case 6:
       return `${prefix}, predecessors, ${row.predecessorIds.length > 0 ? row.predecessorIds.join(", ") : "none"}`;
     default:
       return `${prefix}, total float, ${formatSignedMinutes(row.totalFloatMinutes)}, ${row.critical ? "critical" : "not critical"}, ${row.constraintViolated ? "constraint violated" : "constraint satisfied"}`;
   }
+}
+
+function progressStatusText(status: GanttRow["progressStatus"]): string {
+  if (status === "completed") return "Complete";
+  if (status === "inProgress") return "In progress";
+  return "Not started";
+}
+
+function progressLabel(row: GanttRow): string {
+  const facts = [`${row.percentComplete} percent complete`];
+  if (row.progressStatus === "completed") facts.push("complete");
+  else if (row.progressStatus === "inProgress") facts.push("in progress");
+  else facts.push("not started");
+  if (row.actualStart) facts.push(`actual start ${formatLocalDateTime(row.actualStart)}`);
+  if (row.actualFinish) facts.push(`actual finish ${formatLocalDateTime(row.actualFinish)}`);
+  return facts.join(", ");
 }
 
 function constraintLabel(row: GanttRow): string {

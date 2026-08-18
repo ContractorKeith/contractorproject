@@ -10,6 +10,8 @@ export interface Job {
   version: number;
   scheduleStart?: string | null;
   calendar?: WorkingCalendar;
+  /** Canonical YYYY-MM-DD job-local data date; null while the job is unstatused. */
+  dataDate?: string | null;
 }
 
 export type CalendarWeekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
@@ -44,6 +46,10 @@ export interface Task {
   durationMinutes?: number | null;
   startNoEarlierThan?: string | null;
   finishNoLaterThan?: string | null;
+  /** Percent complete in [0, 100]; null is unstatused (equivalent to 0 with no actuals). */
+  percentComplete?: number | null;
+  actualStart?: string | null;
+  actualFinish?: string | null;
 }
 
 export interface TaskHierarchy {
@@ -86,6 +92,22 @@ export interface UpdateTaskConstraintRequest {
   taskId: string;
   kind: TaskConstraintKind;
   value: string | null;
+  expectedVersion: number;
+  expectedJobVersion: number;
+}
+export interface UpdateJobDataDateRequest {
+  jobId: string;
+  /** null clears the data date; a set value is a canonical ISO date-only string. */
+  dataDate: string | null;
+  expectedJobVersion: number;
+}
+export interface UpdateTaskProgressRequest {
+  taskId: string;
+  /** When true the progress columns are cleared and percent/actuals are ignored. */
+  clear: boolean;
+  percentComplete: number | null;
+  actualStart: string | null;
+  actualFinish: string | null;
   expectedVersion: number;
   expectedJobVersion: number;
 }

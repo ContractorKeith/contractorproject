@@ -186,6 +186,23 @@ export function GanttTimeline({
             ))}
           </svg>
         ) : null}
+        {readModel.dataDate ? (
+          <div
+            className="gantt-timeline__data-date"
+            data-testid="gantt-data-date-marker"
+            role="img"
+            aria-label={`Data date ${formatMarkerDate(readModel.dataDate)}`}
+            style={{
+              left: minuteToX(parseLocalMinute(readModel.dataDate), domain.start, dayWidth),
+              top: HEADER_HEIGHT,
+              height: totalSize,
+            }}
+          >
+            <span className="gantt-timeline__data-date-label" aria-hidden="true">
+              Data date {formatMarkerDate(readModel.dataDate)}
+            </span>
+          </div>
+        ) : null}
       </div>
     </div>
   );
@@ -320,7 +337,11 @@ function TimelineRow({
 }) {
   const x = minuteToX(parseLocalMinute(row.start), domainStart, dayWidth);
   const finishX = minuteToX(parseLocalMinute(row.finish), domainStart, dayWidth);
+  // Guard against pre-start actuals (finish before start) producing a negative bar.
   const width = Math.max(2, finishX - x);
+  // Progress fill is strictly proportioned from the Rust-provided percent.
+  const progressPercent = Math.min(100, Math.max(0, row.percentComplete));
+  const progressWidth = (width * progressPercent) / 100;
   const centerY = y + liveCenterOffset(row, rowHeight);
   const barHeight = row.summary ? 8 : 14;
   const barY = centerY - barHeight / 2;
@@ -389,15 +410,28 @@ function TimelineRow({
           <path d={`M ${x} ${barY + barHeight} v 4 M ${x + width} ${barY + barHeight} v 4`} />
         </g>
       ) : (
-        <rect
-          className={row.critical ? "gantt-timeline__task gantt-timeline__task--critical" : "gantt-timeline__task"}
-          data-timeline-task-id={row.taskId}
-          x={x}
-          y={barY}
-          width={width}
-          height={barHeight}
-          rx={2}
-        />
+        <>
+          <rect
+            className={row.critical ? "gantt-timeline__task gantt-timeline__task--critical" : "gantt-timeline__task"}
+            data-timeline-task-id={row.taskId}
+            x={x}
+            y={barY}
+            width={width}
+            height={barHeight}
+            rx={2}
+          />
+          {progressWidth > 0 ? (
+            <rect
+              className="gantt-timeline__task-progress"
+              data-progress-task-id={row.taskId}
+              x={x}
+              y={barY}
+              width={progressWidth}
+              height={barHeight}
+              rx={2}
+            />
+          ) : null}
+        </>
       )}
     </g>
   );
@@ -409,6 +443,13 @@ function timelineDomain(readModel: GanttReadModel): {
 } {
   const starts = [parseLocalMinute(readModel.scheduleStart)];
   const finishes = [parseLocalMinute(readModel.scheduleFinish)];
+  if (readModel.dataDate) {
+    // Keep the data-date marker inside the drawn ruler/grid even when it sits
+    // beyond the last finish (e.g. an all-complete job with early actuals).
+    const dataDateMinute = parseLocalMinute(readModel.dataDate);
+    starts.push(dataDateMinute);
+    finishes.push(dataDateMinute);
+  }
   for (const row of readModel.rows) {
     starts.push(parseLocalMinute(row.start));
     finishes.push(parseLocalMinute(row.finish));
@@ -469,6 +510,10 @@ function minuteToX(minute: number, domainStart: number, dayWidth: number): numbe
 function parseLocalMinute(value: string): number {
   const parsed = Date.parse(`${value.slice(0, 16)}Z`);
   return parsed / 60_000;
+}
+
+function formatMarkerDate(value: string): string {
+  return value.slice(0, 10);
 }
 
 function formatRulerDate(minute: number): string {

@@ -24,6 +24,10 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
     critical: true,
     milestone: false,
     summary: false,
+    percentComplete: 0,
+    actualStart: null,
+    actualFinish: null,
+    progressStatus: "notStarted",
     predecessorIds: [],
     baseline: null,
     ...overrides,
@@ -32,11 +36,12 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 2,
+    contractVersion: 3,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
     scheduleFinish: "2026-08-19T10:00:00",
+    dataDate: null,
     baselineId: "baseline-1",
     rowCount: rows.length,
     criticalTaskIds: rows.filter((item) => item.critical).map((item) => item.taskId),
@@ -69,6 +74,9 @@ const fixtureRows = [
     startNoEarlierThan: "2026-08-18",
     finishNoLaterThan: "2026-08-20",
     constraintViolated: true,
+    percentComplete: 42,
+    actualStart: "2026-08-17T08:00:00",
+    progressStatus: "inProgress",
     baseline: {
       start: "2026-08-17T07:00:00",
       finish: "2026-08-17T16:00:00",
@@ -125,7 +133,7 @@ describe("GanttTreegrid", () => {
       name: "Work breakdown schedule",
     });
     expect(grid).toHaveAttribute("aria-rowcount", "5");
-    expect(grid).toHaveAttribute("aria-colcount", "7");
+    expect(grid).toHaveAttribute("aria-colcount", "8");
 
     const layoutRow = screen.getByRole("row", { name: /1\.1 Layout/ });
     expect(layoutRow).toHaveAttribute("aria-rowindex", "3");
@@ -141,6 +149,15 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).toHaveTextContent("≤ 2026-08-20");
     expect(screen.getByRole("rowheader", { name: /start no earlier than 2026-08-18, finish no later than 2026-08-20, constraint violated/ })).toBeInTheDocument();
     expect(screen.getByTestId("constraint-float-task-a")).toHaveTextContent("Constraintviolated");
+
+    // The % Done column renders visible percent text and an accessible progress fact.
+    expect(screen.getByTestId("progress-task-a")).toHaveTextContent("42%");
+    expect(
+      screen.getByRole("gridcell", { name: /1\.1 Layout, percent complete, 42 percent complete, in progress, actual start 2026-08-17 08:00/ }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("gridcell", { name: /1 Site work, percent complete, 0 percent complete, not started/ }),
+    ).toBeInTheDocument();
 
     const milestoneRow = screen.getByRole("row", { name: /1\.2 Inspection/ });
     expect(milestoneRow).toHaveTextContent("Milestone");
@@ -178,6 +195,43 @@ describe("GanttTreegrid", () => {
     expect(Number(tightDependency.dataset.approachX)).toBeLessThan(Number(tightDependency.dataset.finishX));
     expect(tightDependency.getAttribute("d")).toMatch(/Q .* H /);
     expect(timeline.querySelector('[data-dependency="task-b->task-c"]')).toBeInTheDocument();
+  });
+
+  it("draws proportional progress fill and an accessible data-date marker", () => {
+    const statused = model([
+      row({
+        taskId: "task-a",
+        logicalIndex: 0,
+        wbs: "1",
+        name: "Layout",
+        percentComplete: 50,
+        actualStart: "2026-08-17T08:00:00",
+        progressStatus: "inProgress",
+        start: "2026-08-17T08:00:00",
+        finish: "2026-08-18T16:00:00",
+      }),
+    ]);
+    statused.dataDate = "2026-08-18T08:00:00";
+    render(<GanttTreegrid readModel={statused} />);
+
+    const timeline = screen.getByTestId("gantt-timeline");
+    const bar = timeline.querySelector<SVGRectElement>('[data-timeline-task-id="task-a"]')!;
+    const fill = timeline.querySelector<SVGRectElement>('[data-progress-task-id="task-a"]')!;
+    expect(fill).toBeInTheDocument();
+    // The fill is exactly half of the bar width and shares its left edge.
+    expect(fill.getAttribute("x")).toBe(bar.getAttribute("x"));
+    expect(Number(fill.getAttribute("width"))).toBeCloseTo(Number(bar.getAttribute("width")) / 2, 5);
+
+    const marker = screen.getByTestId("gantt-data-date-marker");
+    expect(marker).toHaveAccessibleName("Data date 2026-08-18");
+    expect(marker).toHaveTextContent("Data date 2026-08-18");
+  });
+
+  it("renders no progress fill or marker for an unstatused projection", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} />);
+    expect(screen.queryByTestId("gantt-data-date-marker")).not.toBeInTheDocument();
+    const timeline = screen.getByTestId("gantt-timeline");
+    expect(timeline.querySelector('[data-progress-task-id="task-c"]')).toBeNull();
   });
 
   it("moves one roving cell focus, collapses hierarchy, and reaches offscreen logical rows", async () => {
