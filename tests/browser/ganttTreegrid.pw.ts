@@ -117,6 +117,10 @@ test("announces visible constraint values and direct violations without color-on
       console.log(`FACT_FIT ${width} ${name} ${JSON.stringify(m)}`);
       expect(m.widestLine, `${name} horizontal fit @${width}`).toBeLessThanOrEqual(m.clientWidth);
       expect(m.spareLines, `${name} spare lines @${width}`).toBeGreaterThanOrEqual(1);
+      // Lock the stretched-track metric: the fact must fill a >=3-line track. If a
+      // CSS change un-stretches the spans or drops the spare line, clientHeight
+      // collapses to the content and this fails loudly instead of going tautological.
+      expect(m.trackLines, `${name} stretched track >=3 lines @${width}`).toBeGreaterThanOrEqual(3);
     }
     const currentFit = await measure(visibleFacts.nth(0));
     console.log(`FACT_FIT ${width} schedule-current ${JSON.stringify(currentFit)}`);

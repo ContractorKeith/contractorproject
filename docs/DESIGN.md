@@ -140,14 +140,18 @@ Elevation is for dialogs and popovers only. Working surfaces are flat and separa
 ### Row rhythm (schedule surfaces)
 
 ```css
---row-h: 28px;          /* comfortable — default */
---row-h-compact: 24px;
+/* As shipped (read model v4). The stacked baseline facts (current line, a
+   wrapping baseline fact in a three-line track with a spare line, and a
+   constraint line) set the floor, so rows are taller than the original sketch. */
+--row-h: 54px;          /* comfortable — default, >=1000px */
+--row-h-compact: 50px;  /* compact == the detail grid's total height (its floor) */
+/* Below 1000px the same stack needs a taller track: --row-h 64px / compact 60px. */
 --row-indent: 16px;     /* per WBS level */
 --bar-h: 14px;          /* task bar inside the row */
 --bar-h-summary: 8px;
 ```
 
-`--row-h` is the single source of truth for both the table and the timeline. Nothing in either pane may hard-code a row height; vertical sync depends on this.
+`--row-h` is the single source of truth for both the table and the timeline. Nothing in either pane may hard-code a row height; vertical sync depends on this. Compact currently equals the detail grid's total height (its floor); a genuinely tighter compact track (fewer stacked lines, or a collapsed baseline row) is a future density refinement — the accepted product decision is to keep every baseline fact visible with a spare line for now.
 
 ---
 

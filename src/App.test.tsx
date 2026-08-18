@@ -1192,6 +1192,8 @@ describe("job workspace", () => {
       expect(screen.getByText("Original plan")).toBeInTheDocument(),
     );
     expect(screen.getByText("Comparison default")).toBeVisible();
+    // The created date renders as a local ISO date, not a locale-formatted one.
+    expect(screen.getByText("Created 2026-08-18")).toBeVisible();
   });
 
   it("switches the comparison default baseline and reloads the snapshot", async () => {

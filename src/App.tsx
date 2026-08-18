@@ -1314,10 +1314,17 @@ function ScheduleSettings({
       onJobChange(snapshot.job);
       onHierarchyChange(refreshedHierarchy);
       setBaseVersion(refreshedHierarchy.jobVersion);
+      // Re-baseline the persisted refs too, or the next sibling version bump
+      // rebases against stale values and re-raises a phantom conflict.
+      scheduleBaseRef.current = {
+        start: snapshot.job.scheduleStart ?? "",
+        calendar: snapshot.job.calendar ?? DEFAULT_CALENDAR,
+      };
       // Re-baseline the data-date draft too, or a dirty field plus a job-version
       // bump wedges the conflict banner until the component remounts.
       if (dataDateBaseVersion !== null) {
         setDataDateBaseVersion(refreshedHierarchy.jobVersion);
+        dataDateBaseRef.current = { value: snapshot.job.dataDate ?? "" };
       }
       setConflict(false);
     } catch (reason: unknown) {
@@ -1599,9 +1606,18 @@ function BaselineSettings({
         baselineId,
         expectedJobVersion: hierarchy.jobVersion,
       });
-      await applied("Comparison baseline updated.");
     } catch (reason: unknown) {
       failed(reason);
+      setSaving(false);
+      return;
+    }
+    // The switch is committed. A post-command reload failure must never report
+    // the switch as failed.
+    try {
+      await applied("Comparison baseline updated.");
+    } catch {
+      setConflict(true);
+      setMessage("Comparison baseline updated, but refreshing the view failed. Refresh to see it.");
     } finally {
       setSaving(false);
     }
@@ -1864,10 +1880,15 @@ function calendarsEqual(left: WorkingCalendar, right: WorkingCalendar): boolean 
   return leftDays.every((day, index) => day === rightDays[index]);
 }
 
-// Renders a stored UTC timestamp as a local calendar date for display.
+// Renders a stored UTC timestamp as a local ISO calendar date (YYYY-MM-DD),
+// matching every other date shown in the app.
 function formatLocalDate(value: string): string {
   const parsed = new Date(value);
-  return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleDateString();
+  if (Number.isNaN(parsed.getTime())) return value;
+  const year = parsed.getFullYear();
+  const month = `${parsed.getMonth() + 1}`.padStart(2, "0");
+  const day = `${parsed.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function errorMessage(reason: unknown): string {
