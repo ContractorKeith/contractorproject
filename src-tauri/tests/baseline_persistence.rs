@@ -3,10 +3,11 @@
 // verified backup/restore acceptance of the v7 schema.
 
 use contractorproject_lib::application::{
-    ApplicationError, ApplicationService, Baseline, CommandActor, CommandContext,
-    CreateBackupRequest, CreateBaselineRequest, CreateJobRequest, CreateTaskRequest,
-    SetBaselineComparisonDefaultRequest, UpdateScheduleRequest, UpdateTaskDurationRequest,
-    VerifyRestoreRequest,
+    AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, Baseline,
+    CommandActor, CommandContext, CreateBackupRequest, CreateBaselineRequest, CreateJobRequest,
+    CreateTaskRequest, RestoreJobRequest, SetBaselineComparisonDefaultRequest, TaskConstraintKind,
+    UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
+    UpdateTaskDurationRequest, UpdateTaskProgressRequest, VerifyRestoreRequest,
 };
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
@@ -611,6 +612,265 @@ fn verified_backup_and_clean_restore_accept_v7_and_exact_v6() {
         })
         .expect("verify exact v6 restore");
     assert!(v6_result.verified);
+}
+
+#[test]
+fn baseline_snapshot_matches_the_gantt_projection_for_a_rich_schedule() {
+    // Exercise a summary with children, an FS dependency, an SNET constraint, a
+    // data date, and in-progress leaf progress, then lock the snapshot to the
+    // exact non-summary rows the Gantt projection produces.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open service");
+
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Rich job".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("schedule");
+    let new_leaf = |service: &ApplicationService, parent: Option<String>, name: &str, jv: i64| {
+        service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: parent,
+                    name: name.into(),
+                    expected_job_version: jv,
+                },
+            )
+            .expect("task")
+    };
+    let summary = new_leaf(&service, None, "Summary", job.version);
+    let child_a = new_leaf(
+        &service,
+        Some(summary.task.id.clone()),
+        "A",
+        summary.job_version,
+    );
+    let child_b = new_leaf(
+        &service,
+        Some(summary.task.id.clone()),
+        "B",
+        child_a.job_version,
+    );
+    let leaf_c = new_leaf(&service, None, "C", child_b.job_version);
+
+    let set_duration = |service: &ApplicationService, task_id: &str, version: i64, jv: i64| {
+        service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: task_id.into(),
+                    duration_minutes: Some(480),
+                    expected_version: version,
+                    expected_job_version: jv,
+                },
+            )
+            .expect("duration")
+    };
+    let a = set_duration(
+        &service,
+        &child_a.task.id,
+        child_a.task.version,
+        leaf_c.job_version,
+    );
+    let b = set_duration(
+        &service,
+        &child_b.task.id,
+        child_b.task.version,
+        a.job_version,
+    );
+    let c = set_duration(
+        &service,
+        &leaf_c.task.id,
+        leaf_c.task.version,
+        b.job_version,
+    );
+
+    let dependency = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: a.task.id.clone(),
+                successor_task_id: b.task.id.clone(),
+                lag_minutes: 0,
+                expected_job_version: c.job_version,
+            },
+        )
+        .expect("dependency");
+    let constrained_c = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: c.task.id.clone(),
+                kind: TaskConstraintKind::StartNoEarlierThan,
+                value: Some("2026-08-19".into()),
+                expected_version: c.task.version,
+                expected_job_version: dependency.job_version,
+            },
+        )
+        .expect("constraint");
+    let dated = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: constrained_c.job_version,
+            },
+        )
+        .expect("data date");
+    let progressed = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: a.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: a.task.version,
+                expected_job_version: dated.version,
+            },
+        )
+        .expect("progress");
+
+    let baseline = service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job.id.clone(),
+                name: "Locked".into(),
+                expected_job_version: progressed.job_version,
+            },
+        )
+        .expect("baseline");
+
+    let read_model = service.get_schedule(&job.id).expect("schedule projection");
+    // The projection includes a summary row we deliberately do not snapshot.
+    assert!(read_model.rows.iter().any(|row| row.summary));
+    let mut expected: Vec<(String, String, String, i64)> = read_model
+        .rows
+        .iter()
+        .filter(|row| !row.summary)
+        .map(|row| {
+            (
+                row.task_id.clone(),
+                row.start.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                row.finish.format("%Y-%m-%dT%H:%M:%S").to_string(),
+                row.duration_minutes,
+            )
+        })
+        .collect();
+    expected.sort();
+
+    let snapshot = baseline_rows(&path, &baseline.id);
+    assert_eq!(snapshot, expected);
+    // The summary is absent from the snapshot even though it is in the projection.
+    assert!(!snapshot.iter().any(|(id, ..)| *id == summary.task.id));
+}
+
+#[test]
+fn baseline_commands_are_rejected_on_an_archived_job_and_survive_restore() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, _task_id, _task_version, job_version) = seed_scheduled_leaf(&path);
+
+    let baseline = service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job_id.clone(),
+                name: "Before archive".into(),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("baseline");
+    let snapshot = baseline_rows(&path, &baseline.id);
+
+    let archived = service
+        .archive_job(
+            command_context(),
+            ArchiveJobRequest {
+                job_id: job_id.clone(),
+                expected_job_version: job_version + 1,
+            },
+        )
+        .expect("archive");
+    let audits_after_archive = command_log_count(&path);
+
+    // create_baseline on an archived job is rejected with no rows or audit.
+    let create_error = service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job_id.clone(),
+                name: "While archived".into(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect_err("archived create rejected");
+    assert!(matches!(
+        create_error,
+        ApplicationError::ValidationFailed {
+            code: "job_archived",
+            ..
+        }
+    ));
+
+    // set_baseline_comparison_default on an archived job is likewise rejected.
+    let select_error = service
+        .set_baseline_comparison_default(
+            command_context(),
+            SetBaselineComparisonDefaultRequest {
+                job_id: job_id.clone(),
+                baseline_id: baseline.id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect_err("archived select rejected");
+    assert!(matches!(
+        select_error,
+        ApplicationError::ValidationFailed {
+            code: "job_archived",
+            ..
+        }
+    ));
+    assert_eq!(baseline_count(&path), 1);
+    assert_eq!(command_log_count(&path), audits_after_archive);
+
+    // Restoring the job leaves the baseline and its snapshot intact.
+    service
+        .restore_job(
+            command_context(),
+            RestoreJobRequest {
+                job_id: job_id.clone(),
+                expected_job_version: archived.version,
+            },
+        )
+        .expect("restore");
+    let listed = service.list_baselines(&job_id).expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, baseline.id);
+    assert!(listed[0].is_comparison_default);
+    assert_eq!(baseline_rows(&path, &baseline.id), snapshot);
 }
 
 /// Writes an exact-v6 database (schema migrations 1..6, data-date/progress

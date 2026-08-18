@@ -1228,12 +1228,14 @@ impl SqliteStore {
         // The schedule must calculate through the same projection get_schedule
         // uses; a failure rejects creation atomically.
         let schedule = compute_current_schedule(&transaction, job_id)?;
-        let existing_count: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM baselines WHERE job_id = ?1",
+        // Auto-default when the job has no current comparison default, so a
+        // hand-edited default-less state self-repairs on the next create.
+        let has_default: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM baselines WHERE job_id = ?1 AND is_comparison_default = 1)",
             [job_id],
             |row| row.get(0),
         )?;
-        let is_comparison_default = existing_count == 0;
+        let is_comparison_default = !has_default;
         let baseline_id = Uuid::now_v7().to_string();
         transaction.execute(
             "INSERT INTO baselines (id, job_id, name, created_at, is_comparison_default)
@@ -2600,9 +2602,14 @@ fn verify_v7_baseline_domain(connection: &Connection) -> Result<(), ApplicationE
         if duration < 0 {
             return Err(ApplicationError::BackupVerificationFailed);
         }
+        // Round-trip the instant so non-canonical text (e.g. "2026-8-1T5:00:00")
+        // is rejected; #44 joins these strings against serialized instants.
         for value in [start, finish] {
-            NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S")
+            let parsed = NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S")
                 .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+            if parsed.format("%Y-%m-%dT%H:%M:%S").to_string() != value {
+                return Err(ApplicationError::BackupVerificationFailed);
+            }
         }
     }
     Ok(())
@@ -3226,7 +3233,7 @@ fn baseline_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Baseline> {
         job_id: row.get(1)?,
         name: row.get(2)?,
         created_at: row.get(3)?,
-        is_comparison_default: row.get::<_, i64>(4)? != 0,
+        is_comparison_default: row.get::<_, i64>(4)? == 1,
     })
 }
 

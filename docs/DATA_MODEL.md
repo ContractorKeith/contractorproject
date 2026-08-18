@@ -84,7 +84,7 @@ Migration v5 adds the two nullable constraint columns. Migration v6 adds the
 nullable `jobs.data_date` and the nullable `tasks.percent_complete`,
 `tasks.actual_start`, and `tasks.actual_finish` columns. Existing null values
 retain their unstatused meaning. Verified-backup preflight accepts exact v4, v5,
-or v6 snapshots without migration; new databases and verified backups use v7.
+v6, or v7 snapshots without migration; new databases and verified backups use v7.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in
