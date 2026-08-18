@@ -487,12 +487,14 @@ function TaskRow({
       current={currentStart}
       baseline={row.baseline ? formatLocalDateTime(row.baseline.start) : null}
       variance={row.baseline?.startVarianceMinutes ?? null}
+      constraint={row.startNoEarlierThan ? `≥ ${row.startNoEarlierThan}` : null}
     />,
     <ScheduleDate
       key="finish"
       current={currentFinish}
       baseline={row.baseline ? formatLocalDateTime(row.baseline.finish) : null}
       variance={row.baseline?.finishVarianceMinutes ?? null}
+      constraint={row.finishNoLaterThan ? `≤ ${row.finishNoLaterThan}` : null}
     />,
     row.predecessorIds.length > 0 ? row.predecessorIds.join(", ") : "None",
     <FloatValue key="float" row={row} />,
@@ -537,22 +539,34 @@ function ScheduleDate({
   current,
   baseline,
   variance,
+  constraint,
 }: {
   current: string;
   baseline: string | null;
   variance: number | null;
+  constraint: string | null;
 }) {
   return (
-    <span className="gantt-treegrid__date">
-      <span>{current}</span>
-      <span className="gantt-treegrid__secondary">
-        {baseline ? `Baseline ${baseline} · ${formatSignedMinutes(variance ?? 0)}` : "No baseline"}
+    <span className="gantt-treegrid__date gantt-treegrid__date--detail">
+      <span data-testid="schedule-current">{current}</span>
+      <span className="gantt-treegrid__secondary" data-testid="schedule-baseline">
+        {baseline ? `Baseline ${baseline} ${formatSignedMinutes(variance ?? 0)}` : "No baseline"}
       </span>
+      {constraint ? <span className="gantt-treegrid__constraint-date" data-testid="schedule-constraint">{constraint}</span> : null}
     </span>
   );
 }
 
 function FloatValue({ row }: { row: GanttRow }) {
+  if (row.constraintViolated) {
+    return (
+      <span className="gantt-treegrid__constraint-float" data-testid={`constraint-float-${row.taskId}`}>
+        <span>{formatCompactFloat(row.totalFloatMinutes)}</span>
+        <span>Constraint</span>
+        <span>violated</span>
+      </span>
+    );
+  }
   return (
     <span className={row.totalFloatMinutes < 0 ? "gantt-treegrid__risk" : undefined}>
       {row.totalFloatMinutes < 0 ? (
@@ -604,13 +618,18 @@ function formatSignedMinutes(value: number): string {
   return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")} min`;
 }
 
+function formatCompactFloat(value: number): string {
+  if (value === 0) return "0";
+  return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")}`;
+}
+
 function cellLabel(row: GanttRow, columnIndex: number): string {
   const prefix = `${row.wbs} ${row.name}`;
   switch (columnIndex) {
     case 0:
       return `${prefix}, WBS`;
     case 1:
-      return `${prefix}, task, ${row.summary ? "summary" : row.milestone ? "milestone" : "activity"}, ${row.critical ? "critical" : "not critical"}`;
+      return `${prefix}, task, ${row.summary ? "summary" : row.milestone ? "milestone" : "activity"}, ${row.critical ? "critical" : "not critical"}, ${constraintLabel(row)}`;
     case 2:
       return `${prefix}, duration, ${row.milestone ? "milestone" : formatMinutes(row.durationMinutes)}`;
     case 3:
@@ -620,8 +639,17 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 5:
       return `${prefix}, predecessors, ${row.predecessorIds.length > 0 ? row.predecessorIds.join(", ") : "none"}`;
     default:
-      return `${prefix}, total float, ${formatSignedMinutes(row.totalFloatMinutes)}, ${row.critical ? "critical" : "not critical"}`;
+      return `${prefix}, total float, ${formatSignedMinutes(row.totalFloatMinutes)}, ${row.critical ? "critical" : "not critical"}, ${row.constraintViolated ? "constraint violated" : "constraint satisfied"}`;
   }
+}
+
+function constraintLabel(row: GanttRow): string {
+  const constraints = [
+    row.startNoEarlierThan ? `start no earlier than ${row.startNoEarlierThan}` : null,
+    row.finishNoLaterThan ? `finish no later than ${row.finishNoLaterThan}` : null,
+    row.constraintViolated ? "constraint violated" : null,
+  ].filter((value): value is string => value !== null);
+  return constraints.length > 0 ? constraints.join(", ") : "no task constraints";
 }
 
 function baselineLabel(row: GanttRow, field: "start" | "finish"): string {

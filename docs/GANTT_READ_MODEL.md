@@ -1,7 +1,7 @@
 # Versioned Gantt read model
 
-Status: implemented contract v1
-Updated: 2026-08-14
+Status: implemented contract v2
+Updated: 2026-08-17
 
 The Gantt read model is the only schedule shape consumed by the production
 work-breakdown table and supplemental timeline. Rust joins canonical task
@@ -11,7 +11,7 @@ virtualize them, but it does not calculate dates, hierarchy positions,
 variance, float, or critical state.
 
 The Rust contract lives in `src-tauri/src/gantt.rs`. Its TypeScript mirror is
-`src/types/gantt.ts`. Both currently use `contractVersion: 1`; a breaking
+`src/types/gantt.ts`. Both currently use `contractVersion: 2`; a breaking
 field or semantic change requires a new version.
 
 ## Top-level projection
@@ -38,7 +38,11 @@ Each row exposes:
 - zero-based `logicalIndex` that never changes when React collapses rows
 - zero-based `depth`, one-based `positionInSet`, `setSize`, and `wbs`
 - `kind`, `hasChildren`, and explicit milestone/summary flags
-- calculated duration, current start/finish, total float, and critical state
+- calculated duration, current start/finish, signed total float, and critical state
+- nullable leaf `startNoEarlierThan` and `finishNoLaterThan` local-civil dates,
+  plus explicit `constraintViolated` from the scheduler. A leaf reports its
+  direct violation; a summary derives this state from a violated descendant.
+  Neither is inferred from propagated negative float.
 - stable, sorted predecessor task IDs
 - an optional baseline comparison with baseline start/finish/duration and
   signed start/finish variance minutes derived by Rust from the current and
@@ -49,7 +53,7 @@ snapshot. The baseline identity remains present at the top level while the
 row's `baseline` value is `null`.
 
 Positive variance means the current date is later than its baseline date;
-negative variance means it is earlier. Contract v1 reports the exact local
+negative variance means it is earlier. Contract v2 reports the exact local
 civil-time difference in minutes. React displays that value and never
 recalculates it.
 
@@ -60,14 +64,16 @@ owned by Rust application adapters. It validates exact task/schedule joins,
 hierarchy pre-order, unique sibling positions, baseline references, and
 predecessor references before returning a serializable projection. Stable
 error codes identify malformed joins instead of sending partial schedule data
-to React.
+to React. A scheduled summary with either leaf constraint is rejected with
+`gantt_summary_constraint_invalid`; valid summary rows have null constraint
+values, while `constraintViolated` remains the scheduler-derived descendant
+state.
 
-Durations, dependencies, calendars, and baselines are not yet canonical
-SQLite records, so this slice does not invent persistence defaults or mutation
-commands for them. The future application adapter will load those records,
-call `calculate_schedule`, and pass the result to this query. The contract and
-visible-row projection are ready for the production treegrid without making
-React an alternate domain owner.
+The application adapter loads canonical SQLite job schedule inputs, tasks,
+durations, FS dependencies, weekly calendar, and leaf constraints; it passes
+that snapshot to the pure scheduler, then joins its result through this builder.
+React consumes only the resulting projection and never becomes an alternate
+schedule owner. Baselines remain a future canonical feature.
 
 ## Executable fixtures
 
@@ -75,7 +81,7 @@ React an alternate domain owner.
 
 - an empty schedule and exact camel-case serialization
 - a nested summary with current dates, baseline variance, and predecessor IDs
-- a rejected metadata/schedule join
+- rejected metadata/schedule joins and constrained summaries
 - a deterministic 1,000-row hierarchy with stable WBS, logical index, depth,
   sibling position, and JSON row count
 

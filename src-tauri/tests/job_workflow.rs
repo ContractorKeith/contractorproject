@@ -810,13 +810,27 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
             command_context(),
             AddDependencyRequest {
                 job_id: job.id.clone(),
-                predecessor_task_id: activity.id,
+                predecessor_task_id: activity.id.clone(),
                 successor_task_id: milestone.id,
                 lag_minutes: 0,
                 expected_job_version: scheduled.version,
             },
         )
         .expect("dependency");
+
+    let constrained = service
+        .update_task_constraint(
+            command_context(),
+            UpdateTaskConstraintRequest {
+                task_id: activity.id.clone(),
+                kind: TaskConstraintKind::FinishNoLaterThan,
+                value: Some("2026-08-16".into()),
+                expected_version: activity.version,
+                expected_job_version: 8,
+            },
+        )
+        .expect("deadline constraint")
+        .task;
 
     let before = service.get_schedule(&job.id).expect("schedule read model");
     assert_eq!(before.rows.len(), 3);
@@ -826,14 +840,22 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
     assert!(before.rows[0].summary);
     assert_eq!(before.rows[0].wbs, "1");
     assert_eq!(before.rows[0].depth, 0);
-    assert_eq!(before.rows[0].total_float_minutes, 0);
+    assert_eq!(before.rows[0].total_float_minutes, -480);
     assert!(before.rows[0].critical);
+    assert!(before.rows[0].start_no_earlier_than.is_none());
+    assert!(before.rows[0].finish_no_later_than.is_none());
+    assert!(before.rows[0].constraint_violated);
     assert_eq!(before.rows[1].wbs, "1.1");
     assert_eq!(before.rows[1].depth, 1);
     assert_eq!(before.rows[1].start.to_string(), "2026-08-17 08:00:00");
     assert_eq!(before.rows[1].finish.to_string(), "2026-08-17 16:00:00");
-    assert_eq!(before.rows[1].total_float_minutes, 0);
+    assert_eq!(before.rows[1].total_float_minutes, -480);
     assert!(before.rows[1].critical);
+    assert_eq!(
+        before.rows[1].finish_no_later_than,
+        Some(chrono::NaiveDate::from_ymd_opt(2026, 8, 16).expect("date"))
+    );
+    assert!(before.rows[1].constraint_violated);
     assert!(before.rows[2].milestone);
     assert_eq!(before.rows[2].start, before.rows[2].finish);
     assert_eq!(before.rows[2].start.to_string(), "2026-08-17 16:00:00");
@@ -843,13 +865,7 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
         before.rows[2].predecessor_ids,
         vec![before.rows[1].task_id.clone()]
     );
-    assert_eq!(
-        before.critical_path,
-        vec![
-            before.rows[1].task_id.clone(),
-            before.rows[2].task_id.clone()
-        ]
-    );
+    assert_eq!(before.critical_path, vec![before.rows[1].task_id.clone()]);
     drop(service);
 
     let after = ApplicationService::open(&path)
@@ -857,6 +873,7 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
         .get_schedule(&job.id)
         .expect("reopened schedule read model");
     assert_eq!(after, before);
+    assert_eq!(constrained.id, activity.id);
 }
 
 #[test]

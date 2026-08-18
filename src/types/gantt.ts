@@ -1,4 +1,4 @@
-export const GANTT_READ_MODEL_VERSION = 1 as const;
+export const GANTT_READ_MODEL_VERSION = 2 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
 
@@ -26,6 +26,9 @@ export interface GanttRow {
   start: string;
   finish: string;
   totalFloatMinutes: number;
+  startNoEarlierThan: string | null;
+  finishNoLaterThan: string | null;
+  constraintViolated: boolean;
   critical: boolean;
   milestone: boolean;
   summary: boolean;

@@ -1,10 +1,10 @@
 # Production Gantt treegrid
 
 Status: implemented
-Updated: 2026-08-14
+Updated: 2026-08-17
 
 `src/gantt/GanttTreegrid.tsx` is the authoritative work-breakdown surface for
-Gantt read-model contract v1. It renders a native HTML table with
+Gantt read-model contract v2. It renders a native HTML table with
 `role="treegrid"` and uses TanStack Virtual to mount only the visible task rows
 plus overscan. The implemented supplemental SVG timeline remains a separate
 renderer and introduces no schedule facts that are absent from this table.
@@ -16,7 +16,14 @@ renderer and introduces no schedule facts that are absent from this table.
 - Depth, expanded state, sibling position, and sibling-set size come directly
   from the versioned read model.
 - Task, duration, current and baseline dates, signed variance, total float,
-  critical and milestone state, and full predecessor IDs remain cell text.
+  critical and milestone state, full predecessor IDs, leaf constraint dates,
+  and scheduler-provided constraint violations remain visible cell text. A
+  leaf violation is direct; a summary violation is derived from descendants.
+  The Start and Finish cells use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; the Float
+  cell shows compact `Constraint` / `violated` text, so color is never the only
+  signal.
+- Accessible Name and Float cell labels include the exact constraint values and
+  violation state supplied by Rust. React does not infer schedule facts.
 - Exactly one mounted grid cell participates in the page tab order. Focus is
   tracked by task ID so virtualization, collapse, and a reordered projection
   can restore it to the same task or its nearest visible ancestor.

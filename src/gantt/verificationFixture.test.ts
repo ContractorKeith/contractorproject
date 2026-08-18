@@ -17,6 +17,12 @@ describe("packaged Gantt verification fixture", () => {
     expect(model.rows.filter((row) => row.baseline)).toHaveLength(990);
     expect(model.rows.some((row) => row.predecessorIds.length > 1)).toBe(true);
     expect(model.rows.some((row) => row.totalFloatMinutes > 0)).toBe(true);
+    expect(model.rows[1]).toMatchObject({
+      startNoEarlierThan: "2026-08-18",
+      finishNoLaterThan: "2026-08-17",
+      constraintViolated: true,
+    });
+    expect(model.rows[0]?.constraintViolated).toBe(true);
     expect(model.criticalPath).not.toHaveLength(0);
   });
 });

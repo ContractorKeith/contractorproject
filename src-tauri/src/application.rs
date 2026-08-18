@@ -446,6 +446,18 @@ impl ApplicationService {
                     parent_task_id: task.parent_task_id.clone(),
                     sort_key: task.sort_key,
                     name: task.name.clone(),
+                    start_no_earlier_than: task
+                        .start_no_earlier_than
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()
+                        .expect("constraints were validated before building the read model"),
+                    finish_no_later_than: task
+                        .finish_no_later_than
+                        .as_deref()
+                        .map(parse_constraint_date)
+                        .transpose()
+                        .expect("constraints were validated before building the read model"),
                 })
                 .collect(),
             schedule,

@@ -18,6 +18,9 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
     start: "2026-08-17T08:00:00",
     finish: "2026-08-17T17:00:00",
     totalFloatMinutes: 0,
+    startNoEarlierThan: null,
+    finishNoLaterThan: null,
+    constraintViolated: false,
     critical: true,
     milestone: false,
     summary: false,
@@ -29,7 +32,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 1,
+    contractVersion: 2,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -63,6 +66,9 @@ const fixtureRows = [
     wbs: "1.1",
     name: "Layout",
     predecessorIds: ["survey-control"],
+    startNoEarlierThan: "2026-08-18",
+    finishNoLaterThan: "2026-08-20",
+    constraintViolated: true,
     baseline: {
       start: "2026-08-17T07:00:00",
       finish: "2026-08-17T16:00:00",
@@ -128,10 +134,13 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).toHaveAttribute("aria-setsize", "2");
     expect(layoutRow).not.toHaveAttribute("aria-expanded");
     expect(layoutRow).toHaveTextContent("2026-08-17 08:00");
-    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 07:00");
-    expect(layoutRow).toHaveTextContent("+60 min");
+    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 07:00 +60 min");
     expect(layoutRow).toHaveTextContent("Critical");
     expect(layoutRow).toHaveTextContent("survey-control");
+    expect(layoutRow).toHaveTextContent("≥ 2026-08-18");
+    expect(layoutRow).toHaveTextContent("≤ 2026-08-20");
+    expect(screen.getByRole("rowheader", { name: /start no earlier than 2026-08-18, finish no later than 2026-08-20, constraint violated/ })).toBeInTheDocument();
+    expect(screen.getByTestId("constraint-float-task-a")).toHaveTextContent("Constraintviolated");
 
     const milestoneRow = screen.getByRole("row", { name: /1\.2 Inspection/ });
     expect(milestoneRow).toHaveTextContent("Milestone");
