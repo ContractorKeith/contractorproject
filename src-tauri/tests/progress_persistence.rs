@@ -296,7 +296,6 @@ fn task_progress_round_trips_and_survives_restart_with_identical_projection() {
         )
         .expect("data date");
 
-    let projection_before = service.get_schedule(&job.id).expect("projection");
     let progress = service
         .update_task_progress(
             command_context(),
@@ -326,6 +325,17 @@ fn task_progress_round_trips_and_survives_restart_with_identical_projection() {
         .expect("progress audit summary");
     assert_eq!(summary, "updated task progress");
 
+    // The statused projection reflects the persisted progress and data date.
+    let projection_before = service.get_schedule(&job.id).expect("projection");
+    assert!(projection_before.data_date.is_some());
+    let leaf_row = projection_before
+        .rows
+        .iter()
+        .find(|row| row.task_id == leaf.task.id)
+        .expect("leaf row");
+    assert_eq!(leaf_row.percent_complete, 50);
+    assert!(leaf_row.actual_start.is_some());
+
     drop(service);
     let reopened = ApplicationService::open(&path).expect("reopen");
     let row = task_progress_row(&path, &leaf.task.id);
@@ -333,7 +343,9 @@ fn task_progress_round_trips_and_survives_restart_with_identical_projection() {
     assert_eq!(row.1.as_deref(), Some("2026-08-17"));
     assert_eq!(row.2, None);
     let projection_after = reopened.get_schedule(&job.id).expect("projection after");
+    // The statused projection is identical after a restart.
     assert_eq!(projection_after.rows, projection_before.rows);
+    assert_eq!(projection_after.data_date, projection_before.data_date);
     assert_eq!(
         projection_after.schedule_finish,
         projection_before.schedule_finish

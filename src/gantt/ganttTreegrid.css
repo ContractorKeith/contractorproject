@@ -157,6 +157,37 @@
   opacity: 0.8;
 }
 
+/* Progress overlay: a darker fill plus a striped pattern so it is not color-only. */
+.gantt-timeline__task-progress {
+  fill: var(--color-accent-900);
+  opacity: 0.85;
+  stroke: var(--color-accent-900);
+  stroke-width: 0.5;
+}
+
+/* Vertical data-date marker line with a label pinned to the top of the pane. */
+.gantt-timeline__data-date {
+  position: absolute;
+  width: 0;
+  border-left: 2px dashed var(--state-risk);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gantt-timeline__data-date-label {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  padding: 0 var(--space-1);
+  color: var(--state-risk);
+  background: var(--color-bg);
+  border: 1px solid var(--state-risk);
+  border-radius: var(--radius-sm, 3px);
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
 .gantt-timeline__dependency {
   fill: none;
   stroke: var(--color-neutral-600);
@@ -203,10 +234,14 @@
 }
 
 .gantt-treegrid__name-column {
-  width: 16%;
+  width: 11%;
 }
 
 .gantt-treegrid__duration-column {
+  width: 7%;
+}
+
+.gantt-treegrid__progress-column {
   width: 8%;
 }
 
@@ -219,7 +254,7 @@
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 10%;
+  width: 8%;
 }
 
 .gantt-treegrid th,
@@ -403,6 +438,24 @@
   font-variant-numeric: tabular-nums;
 }
 
+.gantt-treegrid__progress {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-treegrid__progress-status {
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+}
+
+.gantt-treegrid__progress--completed .gantt-treegrid__progress-status {
+  color: var(--color-text);
+  font-weight: 600;
+}
+
 .gantt-treegrid__disclosure,
 .gantt-treegrid__disclosure-spacer {
   width: 24px;
@@ -493,6 +546,22 @@
 
   .gantt-timeline__baseline {
     stroke-dasharray: 3 2;
+  }
+
+  .gantt-timeline__task-progress {
+    fill: Highlight;
+    stroke: CanvasText;
+    stroke-width: 1;
+  }
+
+  .gantt-timeline__data-date {
+    border-left-color: CanvasText;
+  }
+
+  .gantt-timeline__data-date-label {
+    color: CanvasText;
+    background: Canvas;
+    border-color: CanvasText;
   }
 
   .gantt-timeline__dependency,

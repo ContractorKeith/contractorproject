@@ -40,7 +40,7 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 
 - [x] Specify duration, working-date, FS lag, weekly-calendar, and summary-task rules with executable examples.
 - [x] Specify and implement leaf start-no-earlier-than and finish-no-later-than constraints with executable examples.
-- [ ] Specify and implement data-date/progress rules with examples.
+- [x] Specify and implement data-date/progress rules with examples (scheduler, persistence, and the v3 read-model projection with normal-app editing).
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
 - [ ] Add SS, FF, and SF dependency types plus negative lag.
 - [x] Persist the default weekly working calendar.
@@ -58,7 +58,7 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
   - [x] Ship the virtualized semantic work-breakdown treegrid.
   - [x] Add the viewport-cropped SVG timeline in the shared scroll view.
 - [x] Add zoom, hierarchy collapse, and dependency rendering.
-- [ ] Add pan and today/data-date markers.
+- [ ] Add pan and today/data-date markers. (Data-date marker shipped in the v3 read model; pan and the today marker remain deferred.)
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
 - [ ] Create immutable named baselines.
 - [ ] Display baseline bars and start/finish/duration variance.

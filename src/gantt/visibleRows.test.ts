@@ -32,6 +32,10 @@ function row(
     critical: true,
     milestone: false,
     summary: hasChildren,
+    percentComplete: 0,
+    actualStart: null,
+    actualFinish: null,
+    progressStatus: "notStarted",
     predecessorIds: [],
     baseline: null,
   };
@@ -51,6 +55,7 @@ function nestedReadModel(): GanttReadModel {
     jobVersion: 5,
     scheduleStart: "2026-01-05T08:00:00",
     scheduleFinish: "2026-01-05T16:00:00",
+    dataDate: null,
     baselineId: null,
     rowCount: rows.length,
     criticalTaskIds: rows.map((item) => item.taskId),

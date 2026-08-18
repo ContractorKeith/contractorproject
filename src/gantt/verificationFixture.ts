@@ -1,4 +1,8 @@
-import type { GanttReadModel, GanttRow } from "../types/gantt";
+import type {
+  GanttProgressStatus,
+  GanttReadModel,
+  GanttRow,
+} from "../types/gantt";
 
 export const GANTT_VERIFICATION_FIXTURE_ID = "contractorproject-gantt-1000-v1";
 
@@ -41,6 +45,11 @@ export function createGanttVerificationReadModel(): GanttReadModel {
       critical: phase === 0,
       milestone: false,
       summary: true,
+      // Phase 1 is statused; summaries expose only a derived percent, never actuals.
+      percentComplete: phase === 0 ? 42 : 0,
+      actualStart: null,
+      actualFinish: null,
+      progressStatus: phase === 0 ? "inProgress" : "notStarted",
       predecessorIds: [],
       baseline: null,
     });
@@ -49,6 +58,21 @@ export function createGanttVerificationReadModel(): GanttReadModel {
       const logicalIndex = rows.length;
       const taskId = `${summaryId}-task-${task + 1}`;
       const taskDay = phaseStartDay + task;
+      // Statused phase-1 activities: first three complete, the fourth in progress.
+      let percentComplete = 0;
+      let actualStart: string | null = null;
+      let actualFinish: string | null = null;
+      let progressStatus: GanttProgressStatus = "notStarted";
+      if (phase === 0 && task <= 2) {
+        percentComplete = 100;
+        actualStart = localTimestamp(taskDay);
+        actualFinish = localTimestamp(taskDay, 17);
+        progressStatus = "completed";
+      } else if (phase === 0 && task === 3) {
+        percentComplete = 50;
+        actualStart = localTimestamp(taskDay);
+        progressStatus = "inProgress";
+      }
       const predecessorIds =
         task === 0
           ? []
@@ -80,6 +104,10 @@ export function createGanttVerificationReadModel(): GanttReadModel {
         critical: phase === 0,
         milestone: task === 98,
         summary: false,
+        percentComplete,
+        actualStart,
+        actualFinish,
+        progressStatus,
         predecessorIds,
         baseline: {
           start: localTimestamp(taskDay - 3),
@@ -123,11 +151,13 @@ export function reorderFirstVerificationActivity(
 
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 2,
+    contractVersion: 3,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",
     scheduleFinish: localTimestamp(179, 17),
+    // Statused fixture: the data date sits within phase 1's activity window.
+    dataDate: localTimestamp(4),
     baselineId: "verification-baseline",
     rowCount: rows.length,
     criticalTaskIds: rows

@@ -638,6 +638,14 @@ function TaskEditor({
   const [constraintBaseVersion, setConstraintBaseVersion] = useState<number | null>(
     null,
   );
+  const [percentComplete, setPercentComplete] = useState(
+    task?.percentComplete == null ? "" : String(task.percentComplete),
+  );
+  const [actualStart, setActualStart] = useState(task?.actualStart ?? "");
+  const [actualFinish, setActualFinish] = useState(task?.actualFinish ?? "");
+  const [progressBaseVersion, setProgressBaseVersion] = useState<number | null>(
+    null,
+  );
   const isRootCreator = Boolean(job);
   const label = isRootCreator ? "New root task" : `Task name for ${task!.name}`;
   const siblings = hierarchy.tasks.filter(
@@ -665,7 +673,16 @@ function TaskEditor({
     } else if (task.version !== constraintBaseVersion) {
       setConflict(true);
     }
-  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, task]);
+    if (progressBaseVersion === null) {
+      setPercentComplete(
+        task.percentComplete == null ? "" : String(task.percentComplete),
+      );
+      setActualStart(task.actualStart ?? "");
+      setActualFinish(task.actualFinish ?? "");
+    } else if (task.version !== progressBaseVersion) {
+      setConflict(true);
+    }
+  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, progressBaseVersion, task]);
 
   async function run(
     action: () => Promise<TaskHierarchy>,
@@ -711,6 +728,12 @@ function TaskEditor({
         );
         if (refreshedTask) setConstraintBaseVersion(refreshedTask.version);
       }
+      if (task && progressBaseVersion !== null) {
+        const refreshedTask = refreshed.tasks.find(
+          (candidate) => candidate.id === task.id,
+        );
+        if (refreshedTask) setProgressBaseVersion(refreshedTask.version);
+      }
       onHierarchyChange(refreshed);
       setConflict(false);
     } catch (reason: unknown) {
@@ -740,6 +763,33 @@ function TaskEditor({
       onJobChange(snapshot.job);
       onHierarchyChange(snapshot.hierarchy);
       setConstraintBaseVersion(null);
+      setConflict(false);
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setConflict(true);
+      else setError(errorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  async function saveProgress(clear: boolean) {
+    if (!task || !client.updateTaskProgress || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      await client.updateTaskProgress({
+        taskId: task.id,
+        clear,
+        percentComplete: clear || percentComplete === "" ? null : Number(percentComplete),
+        actualStart: clear ? null : actualStart || null,
+        actualFinish: clear ? null : actualFinish || null,
+        expectedVersion: progressBaseVersion ?? task.version,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+      const snapshot = await loadJobSnapshot(client, hierarchy.jobId);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      setProgressBaseVersion(null);
       setConflict(false);
     } catch (reason: unknown) {
       if (isVersionConflict(reason)) setConflict(true);
@@ -930,6 +980,66 @@ function TaskEditor({
               </button>
             </fieldset>
           ) : null}
+          {!isSummary && client.updateTaskProgress ? (
+            <fieldset className="task-editor__progress">
+              <legend>Progress</legend>
+              <label>
+                Percent complete
+                <input
+                  aria-label={`Percent complete for ${task.name}`}
+                  type="number"
+                  min="0"
+                  max="100"
+                  value={percentComplete}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setPercentComplete(event.target.value);
+                    setProgressBaseVersion((current) => current ?? task.version);
+                  }}
+                />
+              </label>
+              <label>
+                Actual start
+                <input
+                  aria-label={`Actual start for ${task.name}`}
+                  type="date"
+                  value={actualStart}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setActualStart(event.target.value);
+                    setProgressBaseVersion((current) => current ?? task.version);
+                  }}
+                />
+              </label>
+              <label>
+                Actual finish
+                <input
+                  aria-label={`Actual finish for ${task.name}`}
+                  type="date"
+                  value={actualFinish}
+                  disabled={pending}
+                  onChange={(event) => {
+                    setActualFinish(event.target.value);
+                    setProgressBaseVersion((current) => current ?? task.version);
+                  }}
+                />
+              </label>
+              <button
+                type="button"
+                disabled={pending || percentComplete === ""}
+                onClick={() => void saveProgress(false)}
+              >
+                Save progress
+              </button>
+              <button
+                type="button"
+                disabled={pending || task.percentComplete == null}
+                onClick={() => void saveProgress(true)}
+              >
+                Clear progress
+              </button>
+            </fieldset>
+          ) : null}
           <button
             type="button"
             disabled={pending || taskIndex <= 0}
@@ -1096,6 +1206,10 @@ function ScheduleSettings({
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
+  const [dataDate, setDataDate] = useState(job.dataDate ?? "");
+  const [dataDateBaseVersion, setDataDateBaseVersion] = useState<number | null>(
+    null,
+  );
   useEffect(() => {
     if (baseVersion === null) {
       setStart(job.scheduleStart ?? "");
@@ -1103,8 +1217,43 @@ function ScheduleSettings({
     } else if (hierarchy.jobVersion !== baseVersion) {
       setConflict(true);
     }
-  }, [baseVersion, hierarchy.jobVersion, job.calendar, job.scheduleStart]);
+    if (dataDateBaseVersion === null) {
+      setDataDate(job.dataDate ?? "");
+    } else if (hierarchy.jobVersion !== dataDateBaseVersion) {
+      setConflict(true);
+    }
+  }, [
+    baseVersion,
+    dataDateBaseVersion,
+    hierarchy.jobVersion,
+    job.calendar,
+    job.dataDate,
+    job.scheduleStart,
+  ]);
   if (!client.updateSchedule) return null;
+  async function saveDataDate(value: string | null) {
+    if (!client.updateJobDataDate || saving) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await client.updateJobDataDate({
+        jobId: job.id,
+        dataDate: value,
+        expectedJobVersion: dataDateBaseVersion ?? hierarchy.jobVersion,
+      });
+      const snapshot = await loadJobSnapshot(client, job.id);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      setDataDateBaseVersion(null);
+      setConflict(false);
+      setMessage("Data date saved.");
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) setConflict(true);
+      setMessage(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
   const markDirty = () =>
     setBaseVersion((current) => current ?? hierarchy.jobVersion);
   const refresh = async () => {
@@ -1164,6 +1313,37 @@ function ScheduleSettings({
           }}
         />
       </label>
+      {client.updateJobDataDate ? (
+        <div className="schedule-settings__data-date">
+          <label>
+            Data date{" "}
+            <input
+              aria-label={`Data date for ${job.name}`}
+              type="date"
+              value={dataDate}
+              disabled={saving}
+              onChange={(event) => {
+                setDataDate(event.target.value);
+                setDataDateBaseVersion((current) => current ?? hierarchy.jobVersion);
+              }}
+            />
+          </label>
+          <button
+            type="button"
+            disabled={saving || dataDate === (job.dataDate ?? "")}
+            onClick={() => void saveDataDate(dataDate || null)}
+          >
+            Save data date
+          </button>
+          <button
+            type="button"
+            disabled={saving || !job.dataDate}
+            onClick={() => void saveDataDate(null)}
+          >
+            Clear data date
+          </button>
+        </div>
+      ) : null}
       <fieldset>
         <legend>Working weekdays</legend>
         {WEEKDAYS.map(({ value, label }) => (

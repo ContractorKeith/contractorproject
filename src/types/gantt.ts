@@ -1,6 +1,9 @@
-export const GANTT_READ_MODEL_VERSION = 2 as const;
+export const GANTT_READ_MODEL_VERSION = 3 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
+
+/** Rust-derived progress status. React renders this fact and never derives it. */
+export type GanttProgressStatus = "completed" | "inProgress" | "notStarted";
 
 export interface GanttBaselineComparison {
   start: string;
@@ -32,6 +35,12 @@ export interface GanttRow {
   critical: boolean;
   milestone: boolean;
   summary: boolean;
+  /** Percent complete: leaf canonical value, summary duration-weighted rollup. */
+  percentComplete: number;
+  /** Normalized actual start/finish instants; null when absent (always null on summaries). */
+  actualStart: string | null;
+  actualFinish: string | null;
+  progressStatus: GanttProgressStatus;
   predecessorIds: string[];
   baseline: GanttBaselineComparison | null;
 }
@@ -42,6 +51,8 @@ export interface GanttReadModel {
   jobVersion: number;
   scheduleStart: string;
   scheduleFinish: string;
+  /** Normalized job-local data-date instant, or null when the job is unstatused. */
+  dataDate: string | null;
   baselineId: string | null;
   rowCount: number;
   criticalTaskIds: string[];

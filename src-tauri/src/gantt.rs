@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::scheduling::{ScheduleResult, ScheduledTask};
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 2;
+pub const GANTT_READ_MODEL_VERSION: u16 = 3;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -63,6 +63,16 @@ pub enum GanttTaskKind {
     Milestone,
 }
 
+/// Rust-derived progress status. Leaves use their own percent/actuals; summaries
+/// use their duration-weighted rollup. React renders this fact and never derives it.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GanttProgressStatus {
+    Completed,
+    InProgress,
+    NotStarted,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GanttBaselineComparison {
@@ -81,6 +91,8 @@ pub struct GanttReadModel {
     pub job_version: i64,
     pub schedule_start: NaiveDateTime,
     pub schedule_finish: NaiveDateTime,
+    /// Normalized job-local data-date instant, or null when the job is unstatused.
+    pub data_date: Option<NaiveDateTime>,
     pub baseline_id: Option<String>,
     pub row_count: usize,
     pub critical_task_ids: Vec<String>,
@@ -112,6 +124,14 @@ pub struct GanttRow {
     pub critical: bool,
     pub milestone: bool,
     pub summary: bool,
+    /// Percent complete: leaf canonical value, summary duration-weighted rollup.
+    pub percent_complete: u8,
+    /// Normalized actual start/finish instants; null when the leaf lacks that actual
+    /// and always null on summaries (which do not fabricate actual dates).
+    pub actual_start: Option<NaiveDateTime>,
+    pub actual_finish: Option<NaiveDateTime>,
+    /// Rust-derived completed/in-progress/not-started state.
+    pub progress_status: GanttProgressStatus,
     pub predecessor_ids: Vec<String>,
     pub baseline: Option<GanttBaselineComparison>,
 }
@@ -233,6 +253,10 @@ pub fn build_gantt_read_model(
                 critical: scheduled.critical,
                 milestone: scheduled.milestone,
                 summary: scheduled.summary,
+                percent_complete: scheduled.percent_complete,
+                actual_start: scheduled.actual_start,
+                actual_finish: scheduled.actual_finish,
+                progress_status: derive_progress_status(scheduled),
                 predecessor_ids: predecessors_by_task
                     .get(task.id.as_str())
                     .cloned()
@@ -262,12 +286,27 @@ pub fn build_gantt_read_model(
         job_version: source.job_version,
         schedule_start: source.schedule.schedule_start,
         schedule_finish: source.schedule.schedule_finish,
+        data_date: source.schedule.data_date,
         baseline_id,
         row_count: rows.len(),
         critical_task_ids: source.schedule.critical_task_ids,
         critical_path: source.schedule.critical_path,
         rows,
     })
+}
+
+/// Derives completed/in-progress/not-started purely from scheduler facts. Leaves
+/// carry actuals; summaries expose only a derived percent (their actuals are None),
+/// so a fully-complete row is 100, an untouched row is 0 with no actual start, and
+/// everything between is in progress.
+fn derive_progress_status(scheduled: &ScheduledTask) -> GanttProgressStatus {
+    if scheduled.percent_complete == 100 {
+        GanttProgressStatus::Completed
+    } else if scheduled.percent_complete == 0 && scheduled.actual_start.is_none() {
+        GanttProgressStatus::NotStarted
+    } else {
+        GanttProgressStatus::InProgress
+    }
 }
 
 fn validate_unique_task_ids(

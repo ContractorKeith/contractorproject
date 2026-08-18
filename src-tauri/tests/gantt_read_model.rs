@@ -1,12 +1,13 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use contractorproject_lib::gantt::{
     build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorSource,
-    GanttReadModelError, GanttReadModelSource, GanttTaskKind, GanttTaskSource,
+    GanttProgressStatus, GanttReadModelError, GanttReadModelSource, GanttTaskKind, GanttTaskSource,
     GANTT_READ_MODEL_VERSION,
 };
 use contractorproject_lib::scheduling::{
-    calculate_schedule, calculate_schedule_with_constraints, CalendarWeekday,
-    FinishStartDependency, ScheduleInput, ScheduleTask, TaskConstraint, WorkingCalendar,
+    calculate_schedule, calculate_schedule_with_constraints, calculate_schedule_with_progress,
+    CalendarWeekday, FinishStartDependency, ScheduleInput, ScheduleProgress, ScheduleTask,
+    TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use serde_json::json;
 
@@ -52,11 +53,12 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 2,
+            "contractVersion": 3,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
             "scheduleFinish": "2026-01-05T08:00:00",
+            "dataDate": null,
             "baselineId": null,
             "rowCount": 0,
             "criticalTaskIds": [],
@@ -67,7 +69,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
 }
 
 #[test]
-fn constrained_violating_leaf_serializes_the_exact_v2_contract() {
+fn constrained_violating_leaf_serializes_the_exact_v3_contract() {
     let schedule = calculate_schedule_with_constraints(
         &ScheduleInput {
             schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
@@ -106,11 +108,12 @@ fn constrained_violating_leaf_serializes_the_exact_v2_contract() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 2,
+            "contractVersion": 3,
             "jobId": "job-1",
             "jobVersion": 1,
             "scheduleStart": "2026-01-05T08:00:00",
             "scheduleFinish": "2026-01-06T16:00:00",
+            "dataDate": null,
             "baselineId": null,
             "rowCount": 1,
             "criticalTaskIds": ["leaf"],
@@ -137,11 +140,164 @@ fn constrained_violating_leaf_serializes_the_exact_v2_contract() {
                 "critical": true,
                 "milestone": false,
                 "summary": false,
+                "percentComplete": 0,
+                "actualStart": null,
+                "actualFinish": null,
+                "progressStatus": "notStarted",
                 "predecessorIds": [],
                 "baseline": null
             }]
         })
     );
+}
+
+#[test]
+fn statused_schedule_projects_the_v3_progress_facts_and_data_date() {
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+    let schedule = calculate_schedule_with_progress(
+        &ScheduleInput {
+            schedule_start: date(2026, 1, 5),
+            calendar: standard_calendar(),
+            tasks: vec![
+                ScheduleTask {
+                    id: "phase".into(),
+                    parent_task_id: None,
+                    duration_minutes: None,
+                },
+                ScheduleTask {
+                    id: "done".into(),
+                    parent_task_id: Some("phase".into()),
+                    duration_minutes: Some(480),
+                },
+                ScheduleTask {
+                    id: "running".into(),
+                    parent_task_id: Some("phase".into()),
+                    duration_minutes: Some(960),
+                },
+                ScheduleTask {
+                    id: "waiting".into(),
+                    parent_task_id: Some("phase".into()),
+                    duration_minutes: Some(480),
+                },
+            ],
+            dependencies: vec![FinishStartDependency {
+                predecessor_task_id: "running".into(),
+                successor_task_id: "waiting".into(),
+                lag_minutes: 0,
+            }],
+        },
+        &[],
+        &ScheduleProgress {
+            data_date: Some(date(2026, 1, 7)),
+            entries: vec![
+                TaskProgress {
+                    task_id: "done".into(),
+                    percent_complete: 100,
+                    actual_start: Some(date(2026, 1, 5)),
+                    actual_finish: Some(date(2026, 1, 5)),
+                },
+                TaskProgress {
+                    task_id: "running".into(),
+                    percent_complete: 50,
+                    actual_start: Some(date(2026, 1, 6)),
+                    actual_finish: None,
+                },
+            ],
+        },
+    )
+    .expect("calculate statused schedule");
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 3,
+        tasks: vec![
+            GanttTaskSource {
+                id: "phase".into(),
+                parent_task_id: None,
+                sort_key: 0,
+                name: "Phase".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+            GanttTaskSource {
+                id: "done".into(),
+                parent_task_id: Some("phase".into()),
+                sort_key: 0,
+                name: "Done".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+            GanttTaskSource {
+                id: "running".into(),
+                parent_task_id: Some("phase".into()),
+                sort_key: 1,
+                name: "Running".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+            GanttTaskSource {
+                id: "waiting".into(),
+                parent_task_id: Some("phase".into()),
+                sort_key: 2,
+                name: "Waiting".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+        ],
+        schedule,
+        baseline: None,
+        predecessors: vec![GanttPredecessorSource {
+            task_id: "waiting".into(),
+            predecessor_ids: vec!["running".into()],
+        }],
+    })
+    .expect("build statused read model");
+
+    assert_eq!(read_model.contract_version, 3);
+    assert_eq!(read_model.data_date, Some(date_time("2026-01-07T08:00:00")));
+
+    let summary = &read_model.rows[0];
+    assert_eq!(summary.task_id, "phase");
+    // Duration-weighted rollup over 480@100, 960@50, 480@0 minutes.
+    assert_eq!(summary.percent_complete, 50);
+    assert_eq!(summary.progress_status, GanttProgressStatus::InProgress);
+    assert!(summary.actual_start.is_none());
+    assert!(summary.actual_finish.is_none());
+
+    let done = &read_model.rows[1];
+    assert_eq!(done.percent_complete, 100);
+    assert_eq!(done.progress_status, GanttProgressStatus::Completed);
+    assert_eq!(done.actual_start, Some(date_time("2026-01-05T08:00:00")));
+    assert_eq!(done.actual_finish, Some(date_time("2026-01-05T16:00:00")));
+
+    let running = &read_model.rows[2];
+    assert_eq!(running.percent_complete, 50);
+    assert_eq!(running.progress_status, GanttProgressStatus::InProgress);
+    assert_eq!(running.actual_start, Some(date_time("2026-01-06T08:00:00")));
+    assert!(running.actual_finish.is_none());
+
+    let waiting = &read_model.rows[3];
+    assert_eq!(waiting.percent_complete, 0);
+    assert_eq!(waiting.progress_status, GanttProgressStatus::NotStarted);
+    assert!(waiting.actual_start.is_none());
+    assert!(waiting.actual_finish.is_none());
+
+    // The completed leaf serializes the exact camel-case v3 progress facts.
+    let value = serde_json::to_value(&read_model).expect("serialize statused projection");
+    assert_eq!(value["dataDate"], json!("2026-01-07T08:00:00"));
+    assert_eq!(value["rows"][1]["percentComplete"], json!(100));
+    assert_eq!(
+        value["rows"][1]["actualStart"],
+        json!("2026-01-05T08:00:00")
+    );
+    assert_eq!(
+        value["rows"][1]["actualFinish"],
+        json!("2026-01-05T16:00:00")
+    );
+    assert_eq!(value["rows"][1]["progressStatus"], json!("completed"));
+    assert_eq!(value["rows"][2]["progressStatus"], json!("inProgress"));
+    assert_eq!(value["rows"][3]["progressStatus"], json!("notStarted"));
+    assert_eq!(value["rows"][2]["actualFinish"], json!(null));
 }
 
 #[test]

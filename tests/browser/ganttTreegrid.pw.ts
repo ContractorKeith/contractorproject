@@ -89,6 +89,46 @@ test("announces visible constraint values and direct violations without color-on
   await expect(float).toHaveText(/Constraint\s*violated/);
 });
 
+test("announces progress facts, draws the data-date marker, and stays accessible", async ({ page }) => {
+  // The % Done column exposes visible percent text and an accessible progress fact.
+  const completeName = page.getByRole("gridcell", {
+    name: /1\.1 Activity 1, percent complete, 100 percent complete, complete/,
+  });
+  await expect(completeName).toBeVisible();
+  await expect(page.getByTestId("progress-phase-1-task-1")).toHaveText(/100%/);
+
+  const runningName = page.getByRole("gridcell", {
+    name: /1\.4 Activity 4, percent complete, 50 percent complete, in progress/,
+  });
+  await expect(runningName).toBeVisible();
+
+  // The in-progress bar carries a proportional fill overlay.
+  const bar = page.locator('[data-timeline-task-id="phase-1-task-4"]');
+  const fill = page.locator('[data-progress-task-id="phase-1-task-4"]');
+  await expect(fill).toHaveCount(1);
+  const proportion = await page.evaluate(() => {
+    const barRect = document
+      .querySelector<SVGRectElement>('[data-timeline-task-id="phase-1-task-4"]')!
+      .getBBox();
+    const fillRect = document
+      .querySelector<SVGRectElement>('[data-progress-task-id="phase-1-task-4"]')!
+      .getBBox();
+    return fillRect.width / barRect.width;
+  });
+  expect(proportion).toBeGreaterThan(0.45);
+  expect(proportion).toBeLessThan(0.55);
+  await expect(bar).toHaveCount(1);
+
+  // The vertical data-date marker has a visible label and an accessible name.
+  const marker = page.getByTestId("gantt-data-date-marker");
+  await expect(marker).toBeVisible();
+  await expect(marker).toHaveText(/Data date \d{4}-\d{2}-\d{2}/);
+  await expect(marker).toHaveAccessibleName(/Data date \d{4}-\d{2}-\d{2}/);
+
+  const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
+  expect(results.violations).toEqual([]);
+});
+
 test("keeps compact density synchronized with the virtual scroll model", async ({ page }) => {
   await page.evaluate(() => {
     document.querySelector<HTMLElement>(".gantt-schedule")?.style.setProperty("--row-h", "var(--row-h-compact)");
