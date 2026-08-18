@@ -240,8 +240,9 @@
   width: 9%;
 }
 
+/* Widened to seat the stacked baseline duration variance fact. */
 .gantt-treegrid__duration-column {
-  width: 7%;
+  width: 10%;
 }
 
 .gantt-treegrid__progress-column {
@@ -254,11 +255,11 @@
 
 /* Date columns carry the widest facts; keep headroom for wide Linux fonts. */
 .gantt-treegrid__date-column {
-  width: 23%;
+  width: 22%;
 }
 
 .gantt-treegrid__predecessor-column {
-  width: 7%;
+  width: 6%;
 }
 
 .gantt-treegrid th,
@@ -275,7 +276,8 @@
 
 /* Tighten the date cells by content class so column insertions can't drift the
    rule off them; keeps Start and Finish at padding parity. */
-.gantt-treegrid td:has(.gantt-treegrid__date) {
+.gantt-treegrid td:has(.gantt-treegrid__date),
+.gantt-treegrid td:has(.gantt-treegrid__duration) {
   padding-inline: var(--space-1);
 }
 
@@ -376,6 +378,17 @@
 .gantt-treegrid__date--detail .gantt-treegrid__secondary {
   font-size: inherit;
   white-space: normal;
+}
+
+/* The Duration cell stacks only the current value and its baseline fact (no
+   constraint line), so give the wrapping baseline row the remaining height. */
+.gantt-treegrid__duration.gantt-treegrid__date--detail {
+  grid-template-rows: 12px 1fr;
+}
+
+.gantt-treegrid__duration .gantt-treegrid__secondary {
+  min-height: 0;
+  line-height: 10px;
 }
 
 .gantt-treegrid__constraint-date {

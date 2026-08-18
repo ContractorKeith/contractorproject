@@ -115,9 +115,11 @@ export function createGanttVerificationReadModel(): GanttReadModel {
             task === 98
               ? localTimestamp(taskDay - 3)
               : localTimestamp(taskDay - 3, 17),
-          durationMinutes: task === 98 ? 0 : 480,
+          durationMinutes: task === 98 ? 0 : 360,
           startVarianceMinutes: 4_320,
           finishVarianceMinutes: 4_320,
+          // Current leaves run 480 min against a 360-min baseline (milestones 0).
+          durationVarianceMinutes: task === 98 ? 0 : 120,
         },
       });
     }
@@ -151,7 +153,7 @@ export function reorderFirstVerificationActivity(
 
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 3,
+    contractVersion: 4,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",

@@ -68,6 +68,17 @@ test("announces visible constraint values and direct violations without color-on
     await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 08:00 +4,320 min");
     await expect(visibleFacts.nth(2)).toHaveText("≥ 2026-08-18");
     await expect(constrainedRow.getByTestId("constraint-float-phase-1-task-1")).toHaveText(/Constraint\s*violated/);
+    // The Duration cell surfaces the Rust-derived baseline duration variance fact.
+    const durationBaseline = constrainedRow.getByTestId("duration-baseline-phase-1-task-1");
+    await expect(durationBaseline).toHaveText("Baseline 360 min +120 min");
+    const durationFit = await durationBaseline.evaluate((element) => ({
+      scrollWidth: element.scrollWidth,
+      clientWidth: element.clientWidth,
+      scrollHeight: element.scrollHeight,
+      clientHeight: element.clientHeight,
+    }));
+    expect(durationFit.scrollWidth, "duration baseline horizontal fit").toBeLessThanOrEqual(durationFit.clientWidth);
+    expect(durationFit.scrollHeight, "duration baseline vertical fit").toBeLessThanOrEqual(durationFit.clientHeight);
     const factDimensions = await visibleFacts.evaluateAll((elements) => elements.map((element) => ({
       fact: element.getAttribute("data-testid") ?? element.className,
       clientWidth: element.clientWidth,

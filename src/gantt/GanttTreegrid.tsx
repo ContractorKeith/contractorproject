@@ -482,7 +482,7 @@ function TaskRow({
         </span>
       </span>
     </span>,
-    row.milestone ? "Milestone" : formatMinutes(row.durationMinutes),
+    <DurationValue key="duration" row={row} />,
     <ProgressValue key="progress" row={row} />,
     <ScheduleDate
       key="start"
@@ -555,6 +555,25 @@ function ScheduleDate({
         {baseline ? `Baseline ${baseline} ${formatSignedMinutes(variance ?? 0)}` : "No baseline"}
       </span>
       {constraint ? <span className="gantt-treegrid__constraint-date" data-testid="schedule-constraint">{constraint}</span> : null}
+    </span>
+  );
+}
+
+function DurationValue({ row }: { row: GanttRow }) {
+  // Visible duration plus the Rust-derived baseline duration variance fact, so
+  // schedule slippage in scope is text, not color-only. Summaries carry no
+  // baseline and simply show their rolled-up duration.
+  const baseline = row.baseline;
+  return (
+    <span className="gantt-treegrid__duration gantt-treegrid__date--detail">
+      <span data-testid={`duration-current-${row.taskId}`}>
+        {row.milestone ? "Milestone" : formatMinutes(row.durationMinutes)}
+      </span>
+      {baseline ? (
+        <span className="gantt-treegrid__secondary" data-testid={`duration-baseline-${row.taskId}`}>
+          {`Baseline ${formatMinutes(baseline.durationMinutes)} ${formatSignedMinutes(baseline.durationVarianceMinutes)}`}
+        </span>
+      ) : null}
     </span>
   );
 }
@@ -646,7 +665,7 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 1:
       return `${prefix}, task, ${row.summary ? "summary" : row.milestone ? "milestone" : "activity"}, ${row.critical ? "critical" : "not critical"}, ${constraintLabel(row)}`;
     case 2:
-      return `${prefix}, duration, ${row.milestone ? "milestone" : formatMinutes(row.durationMinutes)}`;
+      return `${prefix}, duration, ${row.milestone ? "milestone" : formatMinutes(row.durationMinutes)}, ${baselineDurationLabel(row)}`;
     case 3:
       return `${prefix}, percent complete, ${progressLabel(row)}`;
     case 4:
@@ -683,6 +702,11 @@ function constraintLabel(row: GanttRow): string {
     row.constraintViolated ? "constraint violated" : null,
   ].filter((value): value is string => value !== null);
   return constraints.length > 0 ? constraints.join(", ") : "no task constraints";
+}
+
+function baselineDurationLabel(row: GanttRow): string {
+  if (!row.baseline) return "no baseline";
+  return `baseline duration ${formatMinutes(row.baseline.durationMinutes)}, variance ${formatSignedMinutes(row.baseline.durationVarianceMinutes)}`;
 }
 
 function baselineLabel(row: GanttRow, field: "start" | "finish"): string {

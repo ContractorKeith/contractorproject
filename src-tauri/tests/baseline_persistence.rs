@@ -873,6 +873,125 @@ fn baseline_commands_are_rejected_on_an_archived_job_and_survive_restore() {
     assert_eq!(baseline_rows(&path, &baseline.id), snapshot);
 }
 
+#[test]
+fn get_schedule_projects_the_comparison_default_baseline_variance() {
+    // A baseline snapshot flows into the Gantt projection: after rescheduling
+    // the leaf longer, its comparison carries the exact Rust-derived variances.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, task_id, task_version, job_version) = seed_scheduled_leaf(&path);
+
+    service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job_id.clone(),
+                name: "Original".into(),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("baseline");
+
+    // Grow the leaf from 480 to 960 minutes, moving its finish a day later.
+    service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: task_id.clone(),
+                duration_minutes: Some(960),
+                expected_version: task_version,
+                expected_job_version: job_version + 1,
+            },
+        )
+        .expect("grow duration");
+
+    let read_model = service.get_schedule(&job_id).expect("projection");
+    assert!(read_model.baseline_id.is_some());
+    let row = read_model
+        .rows
+        .iter()
+        .find(|row| row.task_id == task_id)
+        .expect("leaf row");
+    let baseline = row.baseline.as_ref().expect("baseline comparison");
+    assert_eq!(baseline.duration_minutes, 480);
+    assert_eq!(baseline.start_variance_minutes, 0);
+    assert_eq!(baseline.finish_variance_minutes, 1_440);
+    assert_eq!(baseline.duration_variance_minutes, 480);
+}
+
+#[test]
+fn get_schedule_drops_a_baseline_row_for_a_task_that_became_a_summary() {
+    // A leaf captured in the baseline that later gains children becomes a summary.
+    // Summaries stay derived-only, so its baseline comparison must be dropped and
+    // the newly added child (absent from the snapshot) reports a null comparison.
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, parent_id, task_version, job_version) = seed_scheduled_leaf(&path);
+
+    service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job_id.clone(),
+                name: "Before children".into(),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("baseline");
+
+    // Clear the leaf's duration so it can become a summary, then add a child.
+    let cleared = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: parent_id.clone(),
+                duration_minutes: None,
+                expected_version: task_version,
+                expected_job_version: job_version + 1,
+            },
+        )
+        .expect("clear parent duration");
+    let child = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job_id.clone(),
+                parent_task_id: Some(parent_id.clone()),
+                name: "Child".into(),
+                expected_job_version: cleared.job_version,
+            },
+        )
+        .expect("child task");
+    service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: child.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: child.task.version,
+                expected_job_version: child.job_version,
+            },
+        )
+        .expect("child duration");
+
+    let read_model = service.get_schedule(&job_id).expect("projection");
+    let parent_row = read_model
+        .rows
+        .iter()
+        .find(|row| row.task_id == parent_id)
+        .expect("parent row");
+    assert!(parent_row.summary);
+    // The former leaf is now a summary: no comparison despite its snapshot row.
+    assert!(parent_row.baseline.is_none());
+    let child_row = read_model
+        .rows
+        .iter()
+        .find(|row| row.task_id == child.task.id)
+        .expect("child row");
+    // The child was added after the baseline, so it has no comparison.
+    assert!(child_row.baseline.is_none());
+}
+
 /// Writes an exact-v6 database (schema migrations 1..6, data-date/progress
 /// columns present, no baseline tables) with one scheduled leaf.
 fn write_exact_v6_database(path: &std::path::Path, job_id: &str) {

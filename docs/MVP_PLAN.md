@@ -60,8 +60,8 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
 - [x] Add zoom, hierarchy collapse, and dependency rendering.
 - [ ] Add pan and today/data-date markers. (Data-date marker shipped in the v3 read model; pan and the today marker remain deferred.)
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
-- [ ] Create immutable named baselines.
-- [ ] Display baseline bars and start/finish/duration variance.
+- [x] Create immutable named baselines.
+- [x] Display baseline bars and start/finish/duration variance.
 - [ ] Add exportable schedule and variance views.
 
 Exit: a user can create a realistic schedule, set a baseline, change the plan, and understand the variance without inspecting raw data.

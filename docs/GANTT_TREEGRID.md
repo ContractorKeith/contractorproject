@@ -28,6 +28,13 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
   The Start and Finish cells use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; the Float
   cell shows compact `Constraint` / `violated` text, so color is never the only
   signal.
+- The Duration cell renders the Rust `durationMinutes` as visible `NNN min`
+  text (or `Milestone`) and, when the row carries a baseline, a stacked baseline
+  duration variance fact `Baseline 360 min +120 min`. Its accessible name adds
+  the same fact, e.g. `..., duration, 480 min, baseline duration 360 min,
+  variance +120 min`, or `no baseline` when absent. The Start and Finish cell
+  labels likewise append `baseline <instant>, variance <signed> min`. Duration
+  variance is computed in Rust and never derived in React.
 - The % Done cell renders the Rust `percentComplete` as visible `NN%` text plus
   a compact status word (`Complete`, `In progress`, `Not started`), so progress
   state is never color-only. Its accessible name adds the progress facts, e.g.

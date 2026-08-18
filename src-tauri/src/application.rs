@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::Path;
 
 use chrono::{NaiveDate, SecondsFormat, Utc};
@@ -7,8 +8,8 @@ use uuid::Uuid;
 pub use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 pub use crate::error::ApplicationError;
 use crate::gantt::{
-    build_gantt_read_model, GanttPredecessorSource, GanttReadModel, GanttReadModelSource,
-    GanttTaskSource,
+    build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorSource,
+    GanttReadModel, GanttReadModelSource, GanttTaskSource,
 };
 use crate::scheduling::{
     calculate_schedule_with_progress, CalendarWeekday, ScheduleInput, ScheduleProgress,
@@ -520,6 +521,33 @@ impl ApplicationService {
             field: "schedule",
             message: error.to_string(),
         })?;
+        // Load the job's comparison-default baseline snapshot (if any). Only
+        // currently-non-summary leaves produce a comparison: a baseline row whose
+        // task became a summary (children added later) or was deleted is dropped,
+        // so join_baseline's UnknownBaselineTask stays a defensive invariant.
+        let current_leaf_ids: HashSet<&str> = schedule
+            .tasks
+            .iter()
+            .filter(|task| !task.summary)
+            .map(|task| task.id.as_str())
+            .collect();
+        let baseline = self
+            .store
+            .load_comparison_baseline(&job.id)?
+            .map(|snapshot| GanttBaselineSource {
+                id: snapshot.id,
+                tasks: snapshot
+                    .tasks
+                    .into_iter()
+                    .filter(|task| current_leaf_ids.contains(task.task_id.as_str()))
+                    .map(|task| GanttBaselineTaskSource {
+                        task_id: task.task_id,
+                        start: task.start,
+                        finish: task.finish,
+                        duration_minutes: task.duration_minutes,
+                    })
+                    .collect(),
+            });
         build_gantt_read_model(GanttReadModelSource {
             job_id: job.id,
             job_version: job.version,
@@ -545,7 +573,7 @@ impl ApplicationService {
                 })
                 .collect(),
             schedule,
-            baseline: None,
+            baseline,
             predecessors: tasks
                 .iter()
                 .map(|task| GanttPredecessorSource {

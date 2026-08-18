@@ -111,5 +111,14 @@ export interface UpdateTaskProgressRequest {
   expectedVersion: number;
   expectedJobVersion: number;
 }
+export interface Baseline {
+  id: string;
+  jobId: string;
+  name: string;
+  createdAt: string;
+  isComparisonDefault: boolean;
+}
+export interface CreateBaselineRequest { jobId: string; name: string; expectedJobVersion: number; }
+export interface SetBaselineComparisonDefaultRequest { jobId: string; baselineId: string; expectedJobVersion: number; }
 export interface AddDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; lagMinutes: number; expectedJobVersion: number; }
 export interface RemoveDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; expectedJobVersion: number; }

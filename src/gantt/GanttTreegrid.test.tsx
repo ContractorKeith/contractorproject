@@ -36,7 +36,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 3,
+    contractVersion: 4,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -80,9 +80,10 @@ const fixtureRows = [
     baseline: {
       start: "2026-08-17T07:00:00",
       finish: "2026-08-17T16:00:00",
-      durationMinutes: 480,
+      durationMinutes: 420,
       startVarianceMinutes: 60,
       finishVarianceMinutes: 60,
+      durationVarianceMinutes: 60,
     },
   }),
   row({
@@ -107,6 +108,7 @@ const fixtureRows = [
       durationMinutes: 0,
       startVarianceMinutes: 1_440,
       finishVarianceMinutes: 1_440,
+      durationVarianceMinutes: 0,
     },
   }),
   row({
@@ -143,6 +145,15 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).not.toHaveAttribute("aria-expanded");
     expect(layoutRow).toHaveTextContent("2026-08-17 08:00");
     expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 07:00 +60 min");
+    // Duration cell surfaces the Rust-derived baseline duration variance fact.
+    expect(screen.getByTestId("duration-baseline-task-a")).toHaveTextContent(
+      "Baseline 420 min +60 min",
+    );
+    expect(
+      screen.getByRole("gridcell", {
+        name: /1\.1 Layout, duration, 480 min, baseline duration 420 min, variance \+60 min/,
+      }),
+    ).toBeInTheDocument();
     expect(layoutRow).toHaveTextContent("Critical");
     expect(layoutRow).toHaveTextContent("survey-control");
     expect(layoutRow).toHaveTextContent("≥ 2026-08-18");

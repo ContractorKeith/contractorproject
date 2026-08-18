@@ -5,6 +5,7 @@ import { BrandMark } from "./components/BrandMark";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
+  Baseline,
   CalendarWeekday,
   Job,
   Task,
@@ -512,6 +513,13 @@ function TaskPanel({
         onJobChange={onJobChange}
       />
       <ScheduleSettings
+        job={job}
+        hierarchy={state.hierarchy}
+        client={client}
+        onHierarchyChange={onHierarchyChange}
+        onJobChange={onJobChange}
+      />
+      <BaselineSettings
         job={job}
         hierarchy={state.hierarchy}
         client={client}
@@ -1435,6 +1443,184 @@ function ScheduleSettings({
         <span role="status">{message}</span>
       ) : null}
     </form>
+  );
+}
+
+// Baseline management: list existing baselines, create a named baseline, and
+// switch the comparison default. Mirrors the data-date flow (typed rejections,
+// version-conflict recovery). A successful command reloads the job snapshot so
+// the version bump re-drives the Gantt getSchedule effect onto the new baseline.
+function BaselineSettings({
+  job,
+  hierarchy,
+  client,
+  onHierarchyChange,
+  onJobChange,
+}: {
+  job: Job;
+  hierarchy: TaskHierarchy;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
+  onJobChange: (job: Job) => void;
+}) {
+  const [baselines, setBaselines] = useState<Baseline[]>([]);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+
+  const listBaselines = client.listBaselines;
+  useEffect(() => {
+    if (!listBaselines) return;
+    let active = true;
+    listBaselines(job.id)
+      .then((list) => {
+        if (active) setBaselines(list);
+      })
+      .catch((reason: unknown) => {
+        if (active) setMessage(errorMessage(reason));
+      });
+    return () => {
+      active = false;
+    };
+    // Re-list whenever the job version advances (create/switch bumps it).
+  }, [listBaselines, job.id, job.version]);
+
+  if (
+    !client.listBaselines ||
+    !client.createBaseline ||
+    !client.setBaselineComparisonDefault
+  )
+    return null;
+
+  // A successful command advanced the job version: reload the canonical snapshot
+  // so the Gantt and the list rebase onto it, clearing any phantom conflict.
+  const applied = async (status: string) => {
+    const snapshot = await loadJobSnapshot(client, job.id);
+    onJobChange(snapshot.job);
+    onHierarchyChange(snapshot.hierarchy);
+    setConflict(false);
+    setMessage(status);
+  };
+  const failed = (reason: unknown) => {
+    setConflict(isVersionConflict(reason));
+    setMessage(errorMessage(reason));
+  };
+  const refresh = async () => {
+    setSaving(true);
+    try {
+      const snapshot = await loadJobSnapshot(client, job.id);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      setConflict(false);
+      setMessage(null);
+    } catch (reason: unknown) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  async function createBaseline() {
+    if (!client.createBaseline || saving) return;
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      setMessage("Enter a baseline name.");
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      await client.createBaseline({
+        jobId: job.id,
+        name: trimmed,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+      setName("");
+      await applied(`Baseline “${trimmed}” created.`);
+    } catch (reason: unknown) {
+      failed(reason);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setDefault(baselineId: string) {
+    if (!client.setBaselineComparisonDefault || saving) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await client.setBaselineComparisonDefault({
+        jobId: job.id,
+        baselineId,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+      await applied("Comparison baseline updated.");
+    } catch (reason: unknown) {
+      failed(reason);
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="baseline-settings" aria-labelledby="baseline-settings-heading">
+      <h3 id="baseline-settings-heading">Baselines</h3>
+      <div className="baseline-settings__create">
+        <label>
+          New baseline name{" "}
+          <input
+            aria-label={`New baseline name for ${job.name}`}
+            type="text"
+            value={name}
+            disabled={saving}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={saving || name.trim() === ""}
+          onClick={() => void createBaseline()}
+        >
+          Create baseline
+        </button>
+      </div>
+      {baselines.length > 0 ? (
+        <ul className="baseline-settings__list">
+          {baselines.map((baseline) => (
+            <li key={baseline.id} className="baseline-settings__item">
+              <span className="baseline-settings__name">{baseline.name}</span>
+              <span className="baseline-settings__created">
+                Created {baseline.createdAt.slice(0, 10)}
+              </span>
+              {baseline.isComparisonDefault ? (
+                <span className="baseline-settings__default">Comparison default</span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void setDefault(baseline.id)}
+                >
+                  Set as comparison default
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>No baselines yet.</p>
+      )}
+      {conflict ? (
+        <span role="alert">
+          Baselines changed elsewhere. Your entry is still here.{" "}
+          <button type="button" onClick={() => void refresh()} disabled={saving}>
+            Refresh baselines
+          </button>
+        </span>
+      ) : message ? (
+        <span role="status">{message}</span>
+      ) : null}
+    </section>
   );
 }
 

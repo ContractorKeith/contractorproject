@@ -1,4 +1,4 @@
-export const GANTT_READ_MODEL_VERSION = 3 as const;
+export const GANTT_READ_MODEL_VERSION = 4 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
 
@@ -11,6 +11,8 @@ export interface GanttBaselineComparison {
   durationMinutes: number;
   startVarianceMinutes: number;
   finishVarianceMinutes: number;
+  /** Signed current-minus-baseline duration difference in minutes. */
+  durationVarianceMinutes: number;
 }
 
 export interface GanttRow {

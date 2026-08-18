@@ -15,6 +15,12 @@ describe("packaged Gantt verification fixture", () => {
     expect(model.rows.filter((row) => row.summary)).toHaveLength(10);
     expect(model.rows.filter((row) => row.milestone)).toHaveLength(10);
     expect(model.rows.filter((row) => row.baseline)).toHaveLength(990);
+    // Non-milestone leaves carry a positive baseline duration variance fact.
+    expect(
+      model.rows.some(
+        (row) => row.baseline != null && row.baseline.durationVarianceMinutes > 0,
+      ),
+    ).toBe(true);
     expect(model.rows.some((row) => row.predecessorIds.length > 1)).toBe(true);
     expect(model.rows.some((row) => row.totalFloatMinutes > 0)).toBe(true);
     expect(model.rows[1]).toMatchObject({
@@ -29,7 +35,7 @@ describe("packaged Gantt verification fixture", () => {
   it("carries a data date and statused phase-1 rows across every progress state", () => {
     const model = createGanttVerificationReadModel();
 
-    expect(model.contractVersion).toBe(3);
+    expect(model.contractVersion).toBe(4);
     expect(model.dataDate).not.toBeNull();
     expect(model.rows.some((row) => row.progressStatus === "completed")).toBe(true);
     expect(model.rows.some((row) => row.progressStatus === "inProgress")).toBe(true);
