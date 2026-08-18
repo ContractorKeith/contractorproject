@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{NaiveDate, SecondsFormat, Utc};
+use chrono::{NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use rusqlite::backup::Backup;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -17,11 +17,11 @@ use crate::application::{
     UpdateTaskProgressRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
     MAX_COMMAND_ID_CHARACTERS,
 };
-use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
+use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
 use crate::scheduling::{
     calculate_schedule_with_progress, FinishStartDependency as ScheduleDependency, ScheduleInput,
-    ScheduleProgress, ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
+    ScheduleProgress, ScheduleResult, ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
@@ -1197,6 +1197,142 @@ impl SqliteStore {
         Ok((current + 1, tasks, dependencies))
     }
 
+    /// Snapshots the current calculated leaf schedule into a new immutable
+    /// baseline. Blank names are rejected upstream; duplicate names, an
+    /// uncalculable schedule, a version conflict, or a duplicate command all
+    /// leave the job, its baselines, and the audit log unchanged.
+    pub(crate) fn create_baseline(
+        &self,
+        job_id: &str,
+        name: &str,
+        expected_job_version: i64,
+        now: &str,
+        context: &CommandContext,
+    ) -> Result<Baseline, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job_version = require_draft_job(&transaction, job_id, Some(expected_job_version))?;
+        let name_exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM baselines WHERE job_id = ?1 AND name = ?2)",
+            params![job_id, name],
+            |row| row.get(0),
+        )?;
+        if name_exists {
+            return Err(ApplicationError::ValidationFailed {
+                code: "baseline_name_exists",
+                field: "name",
+                message: "a baseline with this name already exists for the job".into(),
+            });
+        }
+        // The schedule must calculate through the same projection get_schedule
+        // uses; a failure rejects creation atomically.
+        let schedule = compute_current_schedule(&transaction, job_id)?;
+        let existing_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM baselines WHERE job_id = ?1",
+            [job_id],
+            |row| row.get(0),
+        )?;
+        let is_comparison_default = existing_count == 0;
+        let baseline_id = Uuid::now_v7().to_string();
+        transaction.execute(
+            "INSERT INTO baselines (id, job_id, name, created_at, is_comparison_default)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![baseline_id, job_id, name, now, is_comparison_default as i64],
+        )?;
+        // Snapshot every leaf row's calculated instants and duration. Milestones
+        // are leaves with early_start == early_finish.
+        for task in schedule.tasks.iter().filter(|task| !task.summary) {
+            transaction.execute(
+                "INSERT INTO baseline_tasks (baseline_id, task_id, start, finish, duration_minutes)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    baseline_id,
+                    task.id,
+                    format_baseline_instant(task.early_start),
+                    format_baseline_instant(task.early_finish),
+                    task.duration_minutes
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![now, job_version + 1, job_id],
+        )?;
+        write_audit_record(&transaction, context, now, "created baseline")?;
+        let baseline = Baseline {
+            id: baseline_id,
+            job_id: job_id.into(),
+            name: name.into(),
+            created_at: now.into(),
+            is_comparison_default,
+        };
+        transaction.commit()?;
+        Ok(baseline)
+    }
+
+    /// Marks one baseline as the job's comparison default, clearing any other in
+    /// the same transaction. Snapshots are never mutated. Setting the already
+    /// default baseline is a legal audited no-op-shaped command.
+    pub(crate) fn set_baseline_comparison_default(
+        &self,
+        job_id: &str,
+        baseline_id: &str,
+        expected_job_version: i64,
+        now: &str,
+        context: &CommandContext,
+    ) -> Result<Baseline, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job_version = require_draft_job(&transaction, job_id, Some(expected_job_version))?;
+        let belongs: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM baselines WHERE id = ?1 AND job_id = ?2)",
+            params![baseline_id, job_id],
+            |row| row.get(0),
+        )?;
+        if !belongs {
+            return Err(ApplicationError::NotFound {
+                resource: "baseline",
+                id: baseline_id.into(),
+            });
+        }
+        // Clear the others first so the single-default index never sees two set.
+        transaction.execute(
+            "UPDATE baselines SET is_comparison_default = 0 WHERE job_id = ?1 AND id <> ?2",
+            params![job_id, baseline_id],
+        )?;
+        transaction.execute(
+            "UPDATE baselines SET is_comparison_default = 1 WHERE id = ?1",
+            [baseline_id],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![now, job_version + 1, job_id],
+        )?;
+        write_audit_record(
+            &transaction,
+            context,
+            now,
+            "updated baseline comparison default",
+        )?;
+        let baseline = read_baseline(&transaction, baseline_id)?;
+        transaction.commit()?;
+        Ok(baseline)
+    }
+
+    pub(crate) fn list_baselines(&self, job_id: &str) -> Result<Vec<Baseline>, ApplicationError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT id, job_id, name, created_at, is_comparison_default
+             FROM baselines WHERE job_id = ?1 ORDER BY created_at, id",
+        )?;
+        let baselines = statement
+            .query_map([job_id], baseline_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(baselines)
+    }
+
     fn connection(&self) -> Result<Connection, ApplicationError> {
         let connection = Connection::open(&self.database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -1365,6 +1501,42 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 7)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 7)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Immutable named baselines. baseline_tasks holds a leaf snapshot of
+            // calculated start/finish instants and duration; one default per job
+            // is enforced by the partial unique index.
+            transaction.execute_batch(
+                "CREATE TABLE baselines (
+                    id TEXT PRIMARY KEY,
+                    job_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    is_comparison_default INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_comparison_default IN (0, 1)),
+                    UNIQUE (job_id, name),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT
+                 );
+                 CREATE TABLE baseline_tasks (
+                    baseline_id TEXT NOT NULL,
+                    task_id TEXT NOT NULL,
+                    start TEXT NOT NULL,
+                    finish TEXT NOT NULL,
+                    duration_minutes INTEGER NOT NULL CHECK (duration_minutes >= 0),
+                    PRIMARY KEY (baseline_id, task_id),
+                    FOREIGN KEY (baseline_id) REFERENCES baselines(id) ON DELETE RESTRICT
+                 );
+                 CREATE UNIQUE INDEX baselines_one_default_per_job
+                    ON baselines(job_id) WHERE is_comparison_default = 1;
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1390,12 +1562,16 @@ impl SqliteStore {
     }
 }
 
-const REQUIRED_BACKUP_TABLES: [&str; 5] = [
+// Indices 0..5 are required at every supported version; indices 5..7 (the
+// baseline tables) exist only from v7 onward.
+const REQUIRED_BACKUP_TABLES: [&str; 7] = [
     "schema_migrations",
     "jobs",
     "tasks",
     "command_log",
     "task_dependencies",
+    "baselines",
+    "baseline_tasks",
 ];
 
 #[derive(Clone, Copy)]
@@ -1680,6 +1856,70 @@ const COMMAND_LOG_COLUMNS: [ColumnSpec; 5] = [
         primary_key_position: 0,
     },
 ];
+const BASELINE_COLUMNS: [ColumnSpec; 5] = [
+    ColumnSpec {
+        name: "id",
+        data_type: "TEXT",
+        not_null: false,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "name",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "created_at",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "is_comparison_default",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
+const BASELINE_TASK_COLUMNS: [ColumnSpec; 5] = [
+    ColumnSpec {
+        name: "baseline_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "task_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 2,
+    },
+    ColumnSpec {
+        name: "start",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "finish",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "duration_minutes",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
 const DEPENDENCY_COLUMNS: [ColumnSpec; 4] = [
     ColumnSpec {
         name: "job_id",
@@ -1941,10 +2181,12 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if !matches!(schema_version, 4..=6) {
+    if !matches!(schema_version, 4..=7) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
-    let required_table_count: i64 = connection
+    // The base tables are required at every version; the baseline tables are
+    // required only from v7 so exact v4-v6 snapshots still verify unchanged.
+    let base_table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master
              WHERE type = 'table' AND name IN (?1, ?2, ?3, ?4, ?5)",
@@ -1958,15 +2200,31 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             |row| row.get(0),
         )
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if required_table_count != REQUIRED_BACKUP_TABLES.len() as i64 {
+    if base_table_count != 5 {
         return Err(ApplicationError::BackupVerificationFailed);
+    }
+    if schema_version >= 7 {
+        let baseline_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name IN (?1, ?2)",
+                params![REQUIRED_BACKUP_TABLES[5], REQUIRED_BACKUP_TABLES[6]],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if baseline_table_count != 2 {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
     }
     verify_supported_schema(&connection, schema_version)?;
     if schema_version >= 5 {
         verify_v5_constraint_domain(&connection)?;
     }
-    if schema_version == 6 {
+    if schema_version >= 6 {
         verify_v6_progress_domain(&connection)?;
+    }
+    if schema_version >= 7 {
+        verify_v7_baseline_domain(&connection)?;
     }
 
     // These bounded counts prove the core domain tables are readable without
@@ -1998,7 +2256,8 @@ fn verify_supported_schema(
     let expected_migrations: &[i64] = match schema_version {
         4 => &[1, 2, 3, 4],
         5 => &[1, 2, 3, 4, 5],
-        _ => &[1, 2, 3, 4, 5, 6],
+        6 => &[1, 2, 3, 4, 5, 6],
+        _ => &[1, 2, 3, 4, 5, 6, 7],
     };
     if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
@@ -2008,7 +2267,7 @@ fn verify_supported_schema(
     verify_table_columns(
         connection,
         "jobs",
-        if schema_version == 6 {
+        if schema_version >= 6 {
             &JOB_V6_COLUMNS[..]
         } else {
             &JOB_COLUMNS[..]
@@ -2081,7 +2340,7 @@ fn verify_supported_schema(
         ),
         (
             "jobs",
-            if schema_version == 6 {
+            if schema_version >= 6 {
                 "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefaultdata_datetext"
             } else {
                 "createtablejobsidtextprimarykeynametextnotnullstatustextnotnulltimezonetextnotnullcreated_attextnotnullupdated_attextnotnullversionintegernotnullcheckversion>0schedule_starttextcalendar_jsontextnotnulldefault"
@@ -2115,12 +2374,56 @@ fn verify_supported_schema(
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
+    if schema_version >= 7 {
+        verify_table_columns(connection, "baselines", &BASELINE_COLUMNS)?;
+        verify_table_columns(connection, "baseline_tasks", &BASELINE_TASK_COLUMNS)?;
+        verify_foreign_keys(connection, "baselines", [("jobs", "job_id", "id")])?;
+        verify_foreign_keys(
+            connection,
+            "baseline_tasks",
+            [("baselines", "baseline_id", "id")],
+        )?;
+        let index_sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?1",
+                ["baselines_one_default_per_job"],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if !matches_supported_schema_sql(
+            &index_sql,
+            "createuniqueindexbaselines_one_default_per_jobonbaselinesjob_idwhereis_comparison_default=1",
+        ) {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+        for (table, expected_sql) in [
+            (
+                "baselines",
+                "createtablebaselinesidtextprimarykeyjob_idtextnotnullnametextnotnullcreated_attextnotnullis_comparison_defaultintegernotnulldefault0checkis_comparison_defaultin01uniquejob_idnameforeignkeyjob_idreferencesjobsidondeleterestrict",
+            ),
+            (
+                "baseline_tasks",
+                "createtablebaseline_tasksbaseline_idtextnotnulltask_idtextnotnullstarttextnotnullfinishtextnotnullduration_minutesintegernotnullcheckduration_minutes>=0primarykeybaseline_idtask_idforeignkeybaseline_idreferencesbaselinesidondeleterestrict",
+            ),
+        ] {
+            let sql: String = connection
+                .query_row(
+                    "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+            if !matches_supported_schema_sql(&sql, expected_sql) {
+                return Err(ApplicationError::BackupVerificationFailed);
+            }
+        }
+    }
     let task_query = match schema_version {
         4 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
         5 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
         _ => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
     };
-    let job_query = if schema_version == 6 {
+    let job_query = if schema_version >= 6 {
         "SELECT id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1"
     } else {
         "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1"
@@ -2135,6 +2438,17 @@ fn verify_supported_schema(
             .prepare(query)
             .and_then(|mut statement| statement.query([]).map(|_| ()))
             .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
+    if schema_version >= 7 {
+        for query in [
+            "SELECT id, job_id, name, created_at, is_comparison_default FROM baselines ORDER BY created_at, id LIMIT 1",
+            "SELECT baseline_id, task_id, start, finish, duration_minutes FROM baseline_tasks ORDER BY baseline_id, task_id LIMIT 1",
+        ] {
+            connection
+                .prepare(query)
+                .and_then(|mut statement| statement.query([]).map(|_| ()))
+                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        }
     }
     Ok(())
 }
@@ -2232,6 +2546,62 @@ fn verify_v6_progress_domain(connection: &Connection) -> Result<(), ApplicationE
         }
         for value in [actual_start, actual_finish].into_iter().flatten() {
             parse_canonical_constraint_date(&value)
+                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        }
+    }
+    Ok(())
+}
+
+/// Read-only v7 preflight for the baseline snapshot tables. It checks that every
+/// snapshot row references an existing baseline, stored instants parse, durations
+/// are non-negative, and no job carries more than one comparison default.
+fn verify_v7_baseline_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_orphan_task: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM baseline_tasks bt
+                WHERE NOT EXISTS(SELECT 1 FROM baselines b WHERE b.id = bt.baseline_id)
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if has_orphan_task {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    let has_duplicate_default: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM baselines WHERE is_comparison_default = 1
+                GROUP BY job_id HAVING COUNT(*) > 1
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if has_duplicate_default {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    let mut statement = connection
+        .prepare("SELECT start, finish, duration_minutes FROM baseline_tasks")
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, i64>(2)?,
+            ))
+        })
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    for row in rows {
+        let (start, finish, duration) =
+            row.map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if duration < 0 {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+        for value in [start, finish] {
+            NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S")
                 .map_err(|_| ApplicationError::BackupVerificationFailed)?;
         }
     }
@@ -2842,6 +3212,167 @@ fn validate_proposed_schedule(
         }
     })?;
     Ok(())
+}
+
+/// Canonical instant text used for baseline snapshot rows, matching the schedule
+/// projection's serialized `NaiveDateTime` format (`YYYY-MM-DDTHH:MM:SS`).
+fn format_baseline_instant(instant: NaiveDateTime) -> String {
+    instant.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+fn baseline_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Baseline> {
+    Ok(Baseline {
+        id: row.get(0)?,
+        job_id: row.get(1)?,
+        name: row.get(2)?,
+        created_at: row.get(3)?,
+        is_comparison_default: row.get::<_, i64>(4)? != 0,
+    })
+}
+
+fn read_baseline(
+    transaction: &Transaction<'_>,
+    baseline_id: &str,
+) -> Result<Baseline, ApplicationError> {
+    transaction
+        .query_row(
+            "SELECT id, job_id, name, created_at, is_comparison_default
+             FROM baselines WHERE id = ?1",
+            [baseline_id],
+            baseline_from_row,
+        )
+        .optional()?
+        .ok_or_else(|| ApplicationError::NotFound {
+            resource: "baseline",
+            id: baseline_id.into(),
+        })
+}
+
+/// Runs the progress-aware scheduler over the job's current canonical inputs,
+/// returning the full result so baseline creation can snapshot leaf instants.
+/// A missing schedule start or a scheduler rejection surfaces as a typed error.
+fn compute_current_schedule(
+    transaction: &Transaction<'_>,
+    job_id: &str,
+) -> Result<ScheduleResult, ApplicationError> {
+    let (schedule_start, calendar_json, data_date): (Option<String>, String, Option<String>) =
+        transaction
+            .query_row(
+                "SELECT schedule_start, calendar_json, data_date FROM jobs WHERE id = ?1",
+                [job_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?
+            .ok_or_else(|| ApplicationError::NotFound {
+                resource: "job",
+                id: job_id.into(),
+            })?;
+    let schedule_start = schedule_start.ok_or(ApplicationError::ValidationFailed {
+        code: "schedule_start_required",
+        field: "scheduleStart",
+        message: "set a schedule start before creating a baseline".into(),
+    })?;
+    let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidStoredData("job has invalid schedule start".into())
+    })?;
+    let calendar: WorkingCalendar = serde_json::from_str(&calendar_json)
+        .map_err(|_| ApplicationError::InvalidStoredData("job has invalid calendar".into()))?;
+    let data_date = data_date
+        .as_deref()
+        .map(parse_stored_data_date)
+        .transpose()?;
+
+    let mut tasks = Vec::new();
+    let mut constraints = Vec::new();
+    let mut entries = Vec::new();
+    let mut statement = transaction.prepare(
+        "SELECT id, parent_task_id, duration_minutes, start_no_earlier_than, finish_no_later_than,
+                percent_complete, actual_start, actual_finish
+         FROM tasks WHERE job_id = ?1 ORDER BY id",
+    )?;
+    let rows = statement.query_map([job_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, Option<String>>(4)?,
+            row.get::<_, Option<i64>>(5)?,
+            row.get::<_, Option<String>>(6)?,
+            row.get::<_, Option<String>>(7)?,
+        ))
+    })?;
+    for row in rows {
+        let (
+            id,
+            parent_task_id,
+            duration_minutes,
+            snet,
+            fnlt,
+            percent,
+            actual_start,
+            actual_finish,
+        ) = row?;
+        tasks.push(ScheduleTask {
+            id: id.clone(),
+            parent_task_id,
+            duration_minutes,
+        });
+        if snet.is_some() || fnlt.is_some() {
+            constraints.push(TaskConstraint {
+                task_id: id.clone(),
+                start_no_earlier_than: snet.as_deref().map(parse_stored_constraint).transpose()?,
+                finish_no_later_than: fnlt.as_deref().map(parse_stored_constraint).transpose()?,
+            });
+        }
+        let has_signal =
+            percent.unwrap_or(0) != 0 || actual_start.is_some() || actual_finish.is_some();
+        if has_signal {
+            let percent_complete = u8::try_from(percent.unwrap_or(0)).map_err(|_| {
+                ApplicationError::InvalidStoredData("task has invalid percent complete".into())
+            })?;
+            entries.push(TaskProgress {
+                task_id: id,
+                percent_complete,
+                actual_start: actual_start
+                    .as_deref()
+                    .map(parse_stored_constraint)
+                    .transpose()?,
+                actual_finish: actual_finish
+                    .as_deref()
+                    .map(parse_stored_constraint)
+                    .transpose()?,
+            });
+        }
+    }
+    let mut statement = transaction.prepare(
+        "SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id",
+    )?;
+    let dependencies = statement
+        .query_map([job_id], |row| {
+            Ok(ScheduleDependency {
+                predecessor_task_id: row.get(0)?,
+                successor_task_id: row.get(1)?,
+                lag_minutes: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    calculate_schedule_with_progress(
+        &ScheduleInput {
+            schedule_start,
+            calendar,
+            tasks,
+            dependencies,
+        },
+        &constraints,
+        &ScheduleProgress { data_date, entries },
+    )
+    .map_err(|error| ApplicationError::ValidationFailed {
+        code: error.code(),
+        field: "schedule",
+        message: error.to_string(),
+    })
 }
 
 fn parse_stored_constraint(value: &str) -> Result<NaiveDate, ApplicationError> {

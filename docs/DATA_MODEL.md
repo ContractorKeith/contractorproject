@@ -84,7 +84,7 @@ Migration v5 adds the two nullable constraint columns. Migration v6 adds the
 nullable `jobs.data_date` and the nullable `tasks.percent_complete`,
 `tasks.actual_start`, and `tasks.actual_finish` columns. Existing null values
 retain their unstatused meaning. Verified-backup preflight accepts exact v4, v5,
-or v6 snapshots without migration; new databases and verified backups use v6.
+or v6 snapshots without migration; new databases and verified backups use v7.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in
@@ -125,7 +125,24 @@ Cost codes are job-local in v1 with a code, name, and optional parent. Task cost
 
 ### `baselines` and `baseline_tasks`
 
-A baseline has an ID, job ID, name, creation timestamp, and immutable task snapshot rows containing planned start, finish, duration, and planned cost. One baseline can be marked as the comparison default without mutating the snapshot.
+A baseline has an ID, job ID, name, creation timestamp, and immutable task
+snapshot rows. Each `baseline_tasks` row snapshots one leaf task's calculated
+start and finish instants (canonical `YYYY-MM-DDTHH:MM:SS` text) and duration
+minutes, keyed uniquely by baseline and task. Summary rollups are not snapshotted;
+they are re-derived from the leaf snapshot. Planned cost is not stored yet: a
+`planned_cost` column joins the snapshot once task costs exist. One baseline per
+job can be the comparison default, enforced by a partial unique index, and the
+default flag flips without mutating any snapshot row.
+
+Creation is an audited, job-version-checked command that requires the current
+schedule to calculate through the same progress-aware projection `get_schedule`
+uses; blank or duplicate-per-job names are rejected, and the first baseline for a
+job becomes the comparison default automatically. Baselines have no update or
+delete command — the snapshot is immutable.
+
+Migration v7 adds the `baselines` and `baseline_tasks` tables and the
+single-default-per-job index. Verified-backup preflight accepts exact v4, v5, v6,
+or v7 snapshots without migration; new databases and verified backups use v7.
 
 ### `job_notes` and `attachments`
 
@@ -182,9 +199,12 @@ modified and backup creation is not a domain command, so it has no
 Before reporting success, the completed snapshot is opened read-only without
 running migrations. Verification requires `integrity_check` to return exactly
 `ok`, no `foreign_key_check` rows, an exact supported schema migration version
-(4, 5, or 6), the required canonical tables, and bounded count reads from the
-job, task, dependency, and audit tables. For v5 and v6 the preflight also
-read-checks that constraint and progress values are canonical leaf inputs. A failed backup removes only the newly reserved incomplete
+(4, 5, 6, or 7), the required canonical tables, and bounded count reads from the
+job, task, dependency, and audit tables. For v5 and later the preflight also
+read-checks that constraint and progress values are canonical leaf inputs, and
+for v7 that baseline snapshot rows carry parseable instants, non-negative
+durations, references to existing baselines, and at most one default per job. A
+failed backup removes only the newly reserved incomplete
 destination; it never changes the live database or an existing file.
 
 ### Clean-directory restore verification
@@ -193,7 +213,7 @@ Restore verification is a developer-facing recovery check, not a normal-app
 import flow. It first opens the selected backup read-only and applies the same
 integrity, foreign-key, schema-version, required-table, and bounded domain-read
 checks as backup creation. The verifier requires a complete supported migration
-sequence (through v4, v5, or v6), supported
+sequence (through v4, v5, v6, or v7), supported
 column/type/nullability/primary-key layouts, required
 foreign keys, and exact normalized supported DDL signatures for every required
 table and named index, including constraints and partial-index predicates. It

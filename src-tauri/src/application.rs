@@ -4,7 +4,7 @@ use chrono::{NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use crate::domain::{FinishStartDependency, Job, JobStatus, Task};
+pub use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 pub use crate::error::ApplicationError;
 use crate::gantt::{
     build_gantt_read_model, GanttPredecessorSource, GanttReadModel, GanttReadModelSource,
@@ -194,6 +194,22 @@ pub struct UpdateTaskProgressRequest {
     pub actual_start: Option<String>,
     pub actual_finish: Option<String>,
     pub expected_version: i64,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateBaselineRequest {
+    pub job_id: String,
+    pub name: String,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SetBaselineComparisonDefaultRequest {
+    pub job_id: String,
+    pub baseline_id: String,
     pub expected_job_version: i64,
 }
 
@@ -706,6 +722,46 @@ impl ApplicationService {
             &context,
         )?;
         Ok(TaskMutation { task, job_version })
+    }
+
+    /// Snapshots the current calculated leaf schedule into a named immutable
+    /// baseline. The first baseline for a job becomes the comparison default.
+    pub fn create_baseline(
+        &self,
+        context: CommandContext,
+        request: CreateBaselineRequest,
+    ) -> Result<Baseline, ApplicationError> {
+        let context = context.validate()?;
+        let name = required_text("name", request.name, 120)?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        self.store.create_baseline(
+            &request.job_id,
+            &name,
+            request.expected_job_version,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    /// Marks one baseline as the job's comparison default, clearing any other.
+    pub fn set_baseline_comparison_default(
+        &self,
+        context: CommandContext,
+        request: SetBaselineComparisonDefaultRequest,
+    ) -> Result<Baseline, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        self.store.set_baseline_comparison_default(
+            &request.job_id,
+            &request.baseline_id,
+            request.expected_job_version,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    pub fn list_baselines(&self, job_id: &str) -> Result<Vec<Baseline>, ApplicationError> {
+        self.store.list_baselines(job_id)
     }
 
     pub fn add_dependency(

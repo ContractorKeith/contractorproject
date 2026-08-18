@@ -169,7 +169,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 6);
+    assert_eq!(version, 7);
     let job_columns: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'data_date'",
@@ -198,7 +198,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 6);
+    assert_eq!(migrated_version, 7);
     let hierarchy = service.list_tasks("job-v5").expect("preserved tasks");
     assert_eq!(hierarchy.tasks.len(), 1);
     let leaf = &hierarchy.tasks[0];
@@ -765,7 +765,7 @@ fn backup_and_restore_verification_accept_v6_and_exact_v5_snapshots() {
     assert!(backup.verified);
 
     // An exact-v5 snapshot is still accepted by the restore preflight and the
-    // owned target migrates forward to v6.
+    // owned target migrates forward to the current schema.
     let v5_dir = tempfile::tempdir().expect("temp");
     let v5_path = v5_dir.path().join("v5.backup.sqlite3");
     write_exact_v5_database(&v5_path, "job-v5");
@@ -783,7 +783,7 @@ fn backup_and_restore_verification_accept_v6_and_exact_v5_snapshots() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 6);
+    assert_eq!(restored_version, 7);
 }
 
 #[test]
