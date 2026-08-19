@@ -4403,7 +4403,7 @@ fn add_dependency_rejects_out_of_range_lag_on_both_sides() {
     let path = temp.path().join("contractorproject.sqlite3");
     let (service, job_id, predecessor, successor, job_version) = seed_two_leaves(&path);
 
-    for lag in [10_000_001, -10_000_001] {
+    for lag in [10_000_001, -10_000_001, i64::MAX, i64::MIN] {
         let error = service
             .add_dependency(
                 command_context(),

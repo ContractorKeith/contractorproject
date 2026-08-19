@@ -935,7 +935,8 @@ fn resolve_dependency_type(code: Option<&str>) -> Result<DependencyType, Applica
 const MAX_DEPENDENCY_LAG_MINUTES: i64 = 10_000_000;
 
 fn validate_lag_bound(lag_minutes: i64) -> Result<(), ApplicationError> {
-    if lag_minutes.abs() > MAX_DEPENDENCY_LAG_MINUTES {
+    // Range check rather than abs(): i64::MIN.abs() overflows.
+    if !(-MAX_DEPENDENCY_LAG_MINUTES..=MAX_DEPENDENCY_LAG_MINUTES).contains(&lag_minutes) {
         return Err(ApplicationError::InvalidInput {
             field: "lagMinutes",
             message: "lag must be between -10,000,000 and 10,000,000 minutes".into(),
