@@ -356,25 +356,41 @@ function TimelineRow({
         y1={y + rowHeight}
         y2={y + rowHeight}
       />
-      {row.predecessorIds.map((predecessorId) => {
+      {row.predecessors.map((link) => {
+        const predecessorId = link.taskId;
         const predecessor = rowById.get(predecessorId);
         const predecessorIndex = visibleIndexById.get(predecessorId);
         if (!predecessor || predecessorIndex === undefined) return null;
         const predecessorY = HEADER_HEIGHT + predecessorIndex * rowHeight + liveCenterOffset(predecessor, rowHeight);
-        const predecessorX = minuteToX(parseLocalMinute(predecessor.finish), domainStart, dayWidth);
+        // Type-aware anchors, taken straight from the row instants (no schedule
+        // math): predecessor start for SS/SF, finish for FS/FF; successor start
+        // for FS/SS, finish for FF/SF.
+        const predecessorAtStart =
+          link.dependencyType === "SS" || link.dependencyType === "SF";
+        const successorAtStart =
+          link.dependencyType === "FS" || link.dependencyType === "SS";
+        const predecessorX = minuteToX(
+          parseLocalMinute(predecessorAtStart ? predecessor.start : predecessor.finish),
+          domainStart,
+          dayWidth,
+        );
+        const successorX = successorAtStart ? x : finishX;
         const dependencyId = `${predecessorId}->${row.taskId}`;
         const critical = criticalEdges.has(dependencyId);
         const active = hoveredTaskId === predecessorId || hoveredTaskId === row.taskId;
         return (
           <path
-            key={predecessorId}
+            key={`${predecessorId}-${link.dependencyType}`}
             className={dependencyClassName(critical, hoveredTaskId !== null, active)}
             data-dependency={dependencyId}
+            data-dependency-type={link.dependencyType}
             data-predecessor-task-id={predecessorId}
             data-successor-task-id={row.taskId}
-            data-approach-x={x - 8}
-            data-finish-x={x}
-            d={dependencyPath(predecessorX, predecessorY, x, centerY)}
+            data-predecessor-anchor={predecessorAtStart ? "start" : "finish"}
+            data-successor-anchor={successorAtStart ? "start" : "finish"}
+            data-approach-x={successorX - 8}
+            data-finish-x={successorX}
+            d={dependencyPath(predecessorX, predecessorY, successorX, centerY)}
             markerEnd={`url(#${active ? activeMarkerId : critical ? criticalMarkerId : normalMarkerId})`}
           />
         );

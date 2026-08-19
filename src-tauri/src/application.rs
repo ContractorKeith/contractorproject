@@ -8,8 +8,8 @@ use uuid::Uuid;
 pub use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 pub use crate::error::ApplicationError;
 use crate::gantt::{
-    build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorSource,
-    GanttReadModel, GanttReadModelSource, GanttTaskSource,
+    build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorLink,
+    GanttPredecessorSource, GanttReadModel, GanttReadModelSource, GanttTaskSource,
 };
 use crate::scheduling::{
     calculate_schedule_with_progress, CalendarWeekday, DependencyType, ScheduleInput,
@@ -585,10 +585,14 @@ impl ApplicationService {
                 .iter()
                 .map(|task| GanttPredecessorSource {
                     task_id: task.id.clone(),
-                    predecessor_ids: dependencies
+                    predecessors: dependencies
                         .iter()
                         .filter(|dependency| dependency.successor_task_id == task.id)
-                        .map(|dependency| dependency.predecessor_task_id.clone())
+                        .map(|dependency| GanttPredecessorLink {
+                            task_id: dependency.predecessor_task_id.clone(),
+                            dependency_type: dependency.dependency_type,
+                            lag_minutes: dependency.lag_minutes,
+                        })
                         .collect(),
                 })
                 .collect(),

@@ -647,6 +647,7 @@ describe("job workspace", () => {
         {
           predecessorTaskId: first.id,
           successorTaskId: second.id,
+          dependencyType: "FS" as const,
           lagMinutes: 60,
         },
       ],
@@ -661,7 +662,9 @@ describe("job workspace", () => {
       updateTaskDuration: vi.fn().mockResolvedValue(afterDuration),
       updateSchedule: vi.fn().mockResolvedValue(afterSchedule),
       addDependency: vi.fn().mockResolvedValue(afterDependency),
-      removeDependency: vi.fn(),
+      removeDependency: vi
+        .fn()
+        .mockResolvedValue({ ...afterDependency, jobVersion: 7, dependencies: [] }),
     };
 
     render(<App client={client} />);
@@ -707,16 +710,34 @@ describe("job workspace", () => {
       screen.getByLabelText("Dependency successor"),
       second.id,
     );
+    await user.selectOptions(screen.getByLabelText("Dependency type"), "SS");
     await user.clear(screen.getByLabelText("Dependency lag minutes"));
-    await user.type(screen.getByLabelText("Dependency lag minutes"), "60");
+    await user.type(screen.getByLabelText("Dependency lag minutes"), "-60");
     await user.click(screen.getByRole("button", { name: "Add dependency" }));
     await waitFor(() =>
       expect(client.addDependency).toHaveBeenCalledWith({
         jobId: job.id,
         predecessorTaskId: first.id,
         successorTaskId: second.id,
-        lagMinutes: 60,
+        dependencyType: "SS",
+        lagMinutes: -60,
         expectedJobVersion: 5,
+      }),
+    );
+
+    // The removal control is keyed and labeled by (predecessor, successor, type).
+    await user.click(
+      screen.getByRole("button", {
+        name: `Remove FS dependency from ${first.name} to ${second.name}`,
+      }),
+    );
+    await waitFor(() =>
+      expect(client.removeDependency).toHaveBeenCalledWith({
+        jobId: job.id,
+        predecessorTaskId: first.id,
+        successorTaskId: second.id,
+        dependencyType: "FS",
+        expectedJobVersion: 6,
       }),
     );
   });
@@ -1351,6 +1372,6 @@ function ganttReadModel(jobId: string) {
     contractVersion: 4 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
     dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
-    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessorIds: [], baseline: null }],
+    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null }],
   };
 }

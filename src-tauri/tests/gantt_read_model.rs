@@ -1,8 +1,8 @@
 use chrono::{NaiveDate, NaiveDateTime};
 use contractorproject_lib::gantt::{
-    build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorSource,
-    GanttProgressStatus, GanttReadModelError, GanttReadModelSource, GanttTaskKind, GanttTaskSource,
-    GANTT_READ_MODEL_VERSION,
+    build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorLink,
+    GanttPredecessorSource, GanttProgressStatus, GanttReadModelError, GanttReadModelSource,
+    GanttTaskKind, GanttTaskSource, GANTT_READ_MODEL_VERSION,
 };
 use contractorproject_lib::scheduling::{
     calculate_schedule, calculate_schedule_with_constraints, calculate_schedule_with_progress,
@@ -53,7 +53,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 4,
+            "contractVersion": 5,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -108,7 +108,7 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 4,
+            "contractVersion": 5,
             "jobId": "job-1",
             "jobVersion": 1,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -144,7 +144,7 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
                 "actualStart": null,
                 "actualFinish": null,
                 "progressStatus": "notStarted",
-                "predecessorIds": [],
+                "predecessors": [],
                 "baseline": null
             }]
         })
@@ -249,12 +249,16 @@ fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
         baseline: None,
         predecessors: vec![GanttPredecessorSource {
             task_id: "waiting".into(),
-            predecessor_ids: vec!["running".into()],
+            predecessors: vec![GanttPredecessorLink {
+                task_id: "running".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
         }],
     })
     .expect("build statused read model");
 
-    assert_eq!(read_model.contract_version, 4);
+    assert_eq!(read_model.contract_version, 5);
     assert_eq!(read_model.data_date, Some(date_time("2026-01-07T08:00:00")));
 
     let summary = &read_model.rows[0];
@@ -450,7 +454,11 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
         }),
         predecessors: vec![GanttPredecessorSource {
             task_id: "excavate".into(),
-            predecessor_ids: vec!["layout".into()],
+            predecessors: vec![GanttPredecessorLink {
+                task_id: "layout".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
         }],
     })
     .expect("build read model");
@@ -487,7 +495,20 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
     assert_eq!(excavate.wbs, "1.2");
     assert_eq!(excavate.kind, GanttTaskKind::Task);
     assert!(!excavate.has_children);
-    assert_eq!(excavate.predecessor_ids, vec!["layout"]);
+    assert_eq!(excavate.predecessors.len(), 1);
+    assert_eq!(excavate.predecessors[0].task_id, "layout");
+    assert_eq!(
+        excavate.predecessors[0].dependency_type,
+        DependencyType::FinishStart
+    );
+    assert_eq!(excavate.predecessors[0].lag_minutes, 0);
+    // The predecessor link serializes as a typed camel-case object in v5.
+    let excavate_value = serde_json::to_value(read_model.rows[2].predecessors.clone())
+        .expect("serialize predecessor links");
+    assert_eq!(
+        excavate_value,
+        json!([{ "taskId": "layout", "dependencyType": "FS", "lagMinutes": 0 }])
+    );
     let baseline = excavate.baseline.as_ref().expect("baseline comparison");
     assert_eq!(baseline.start_variance_minutes, 1_440);
     assert_eq!(baseline.finish_variance_minutes, 1_440);
@@ -842,4 +863,161 @@ fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
             .len(),
         1_000
     );
+}
+
+#[test]
+fn typed_predecessor_links_serialize_sorted_by_id_then_type() {
+    // Four independent leaves so mixed link types and negative lag do not perturb
+    // the schedule; the read model only carries the links through, sorted.
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![
+            ScheduleTask {
+                id: "a".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+            ScheduleTask {
+                id: "b".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+            ScheduleTask {
+                id: "c".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+            ScheduleTask {
+                id: "target".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+        ],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+
+    let source_task = |id: &str| GanttTaskSource {
+        id: id.into(),
+        parent_task_id: None,
+        sort_key: match id {
+            "a" => 0,
+            "b" => 1,
+            "c" => 2,
+            _ => 3,
+        },
+        name: id.into(),
+        start_no_earlier_than: None,
+        finish_no_later_than: None,
+    };
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![
+            source_task("a"),
+            source_task("b"),
+            source_task("c"),
+            source_task("target"),
+        ],
+        schedule,
+        baseline: None,
+        // Supplied out of order and with a duplicate pair carrying two types.
+        predecessors: vec![GanttPredecessorSource {
+            task_id: "target".into(),
+            predecessors: vec![
+                GanttPredecessorLink {
+                    task_id: "c".into(),
+                    dependency_type: DependencyType::StartFinish,
+                    lag_minutes: -60,
+                },
+                GanttPredecessorLink {
+                    task_id: "a".into(),
+                    dependency_type: DependencyType::FinishFinish,
+                    lag_minutes: 0,
+                },
+                GanttPredecessorLink {
+                    task_id: "a".into(),
+                    dependency_type: DependencyType::StartStart,
+                    lag_minutes: 120,
+                },
+            ],
+        }],
+    })
+    .expect("build read model");
+
+    let target = read_model
+        .rows
+        .iter()
+        .find(|row| row.task_id == "target")
+        .expect("target row");
+    // Sorted by predecessor id, then dependency type declaration order (FS,SS,FF,SF).
+    let value = serde_json::to_value(target.predecessors.clone()).expect("serialize links");
+    assert_eq!(
+        value,
+        json!([
+            { "taskId": "a", "dependencyType": "SS", "lagMinutes": 120 },
+            { "taskId": "a", "dependencyType": "FF", "lagMinutes": 0 },
+            { "taskId": "c", "dependencyType": "SF", "lagMinutes": -60 }
+        ])
+    );
+}
+
+#[test]
+fn duplicate_typed_predecessor_link_is_rejected() {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![
+            ScheduleTask {
+                id: "a".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+            ScheduleTask {
+                id: "b".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+        ],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+
+    let task = |id: &str, sort_key: i64| GanttTaskSource {
+        id: id.into(),
+        parent_task_id: None,
+        sort_key,
+        name: id.into(),
+        start_no_earlier_than: None,
+        finish_no_later_than: None,
+    };
+
+    let error = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![task("a", 0), task("b", 1)],
+        schedule,
+        baseline: None,
+        predecessors: vec![GanttPredecessorSource {
+            task_id: "b".into(),
+            predecessors: vec![
+                GanttPredecessorLink {
+                    task_id: "a".into(),
+                    dependency_type: DependencyType::StartStart,
+                    lag_minutes: 0,
+                },
+                GanttPredecessorLink {
+                    task_id: "a".into(),
+                    dependency_type: DependencyType::StartStart,
+                    lag_minutes: 30,
+                },
+            ],
+        }],
+    })
+    .expect_err("duplicate typed link rejected");
+    assert_eq!(error.code(), "gantt_predecessor_duplicate");
+    // A different type on the same pair remains legal.
+    matches!(error, GanttReadModelError::DuplicatePredecessor { .. });
 }

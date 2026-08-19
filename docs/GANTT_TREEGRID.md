@@ -1,7 +1,7 @@
 # Production Gantt treegrid
 
 Status: implemented
-Updated: 2026-08-18
+Updated: 2026-08-19
 
 `src/gantt/GanttTreegrid.tsx` is the authoritative work-breakdown surface for
 Gantt read-model contract v3. It renders a native HTML table with
@@ -22,7 +22,7 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
   Predecessors, and Float (`aria-colcount="8"`). The Name column remains the
   tree column and disclosure owner.
 - Task, duration, current and baseline dates, signed variance, total float,
-  critical and milestone state, full predecessor IDs, leaf constraint dates,
+  critical and milestone state, typed predecessor links, leaf constraint dates,
   and scheduler-provided constraint violations remain visible cell text. A
   leaf violation is direct; a summary violation is derived from descendants.
   The Start and Finish cells use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; the Float
@@ -42,6 +42,22 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
   `..., start, 2026-08-17 08:00, baseline start 2026-08-14 08:00, variance +4,320
   min`, and the timeline ghost bar carries the exact position. Duration variance
   is computed in Rust and never derived in React.
+- The Predecessors cell renders every link explicitly so a bare id can never be
+  read as an implicit `FS+0`. Each link shows `<pred> <TYPE> <±lag> min`, e.g.
+  `T2 SS +120 min` or `T3 FF -60 min`; the lag fragment is dropped at zero
+  (`T2 FS`). Links wrap one per line and stretch to the row track, mirroring the
+  baseline facts, and long task ids break within the cell so a line never
+  overflows. The cell's accessible name spells each link out in the joined-string
+  style, e.g. `..., predecessors, predecessor T2, start-to-start, lag +120
+  minutes, predecessor T3, finish-to-finish, lag -60 minutes` (a zero-lag link
+  reads `no lag`). React renders the Rust-sorted links and derives nothing.
+- The supplemental timeline draws a dependency line per link with type-aware
+  anchors taken straight from the row instants (no schedule math): the line
+  leaves the predecessor start for `SS`/`SF` and its finish for `FS`/`FF`, and
+  enters the successor start for `FS`/`SS` and its finish for `FF`/`SF`. Path
+  styling, hover emphasis, and critical classes are unchanged; each path carries
+  `data-dependency-type`, `data-predecessor-anchor`, and `data-successor-anchor`
+  attributes for verification.
 - The % Done cell renders the Rust `percentComplete` as visible `NN%` text plus
   a compact status word (`Complete`, `In progress`, `Not started`), so progress
   state is never color-only. Its accessible name adds the progress facts, e.g.

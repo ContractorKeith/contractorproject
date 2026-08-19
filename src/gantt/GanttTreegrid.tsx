@@ -11,7 +11,12 @@ import {
 } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 
-import type { GanttReadModel, GanttRow } from "../types/gantt";
+import type {
+  GanttDependencyType,
+  GanttPredecessorLink,
+  GanttReadModel,
+  GanttRow,
+} from "../types/gantt";
 import { GANTT_ZOOMS, GanttTimeline, type GanttZoom } from "./GanttTimeline";
 import { selectVisibleGanttRows } from "./visibleRows";
 import "./ganttTreegrid.css";
@@ -498,7 +503,7 @@ function TaskRow({
       variance={row.baseline?.finishVarianceMinutes ?? null}
       constraint={row.finishNoLaterThan ? `≤ ${row.finishNoLaterThan}` : null}
     />,
-    row.predecessorIds.length > 0 ? row.predecessorIds.join(", ") : "None",
+    <PredecessorValue key="predecessors" row={row} />,
     <FloatValue key="float" row={row} />,
   ];
 
@@ -629,6 +634,57 @@ function FloatValue({ row }: { row: GanttRow }) {
   );
 }
 
+// The Predecessors cell always renders explicit per-link annotations so a bare
+// id can never be mistaken for FS+0. Each link reads "T2 SS +120 min" (the lag
+// text is dropped at zero: "T2 FS"). Links wrap in reading order.
+function PredecessorValue({ row }: { row: GanttRow }) {
+  if (row.predecessors.length === 0) {
+    return <span data-testid={`predecessors-${row.taskId}`}>None</span>;
+  }
+  return (
+    <span className="gantt-treegrid__predecessors" data-testid={`predecessors-${row.taskId}`}>
+      {row.predecessors.map((link) => (
+        <span
+          className="gantt-treegrid__predecessor-link"
+          key={`${link.taskId}-${link.dependencyType}`}
+        >
+          {predecessorAnnotation(link)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+// Visible annotation for one predecessor link, e.g. "T2 SS +120 min" or "T2 FS".
+function predecessorAnnotation(link: GanttPredecessorLink): string {
+  if (link.lagMinutes === 0) return `${link.taskId} ${link.dependencyType}`;
+  return `${link.taskId} ${link.dependencyType} ${formatSignedMinutes(link.lagMinutes)}`;
+}
+
+// Full spoken relationship name for a dependency type code.
+function dependencyTypeName(type: GanttDependencyType): string {
+  switch (type) {
+    case "FS":
+      return "finish-to-start";
+    case "SS":
+      return "start-to-start";
+    case "FF":
+      return "finish-to-finish";
+    default:
+      return "start-to-finish";
+  }
+}
+
+// Accessible fragment for one predecessor link, joined into the row label,
+// e.g. "predecessor T2, start-to-start, lag +120 minutes".
+function predecessorLinkLabel(link: GanttPredecessorLink): string {
+  const lag =
+    link.lagMinutes === 0
+      ? "no lag"
+      : `lag ${formatSignedMinutes(link.lagMinutes).replace(" min", " minutes")}`;
+  return `predecessor ${link.taskId}, ${dependencyTypeName(link.dependencyType)}, ${lag}`;
+}
+
 function SpacerRow({ height }: { height: number }) {
   return (
     <tr className="gantt-treegrid__spacer" aria-hidden="true">
@@ -687,7 +743,7 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 5:
       return `${prefix}, finish, ${formatLocalDateTime(row.finish)}, ${baselineLabel(row, "finish")}`;
     case 6:
-      return `${prefix}, predecessors, ${row.predecessorIds.length > 0 ? row.predecessorIds.join(", ") : "none"}`;
+      return `${prefix}, predecessors, ${row.predecessors.length > 0 ? row.predecessors.map(predecessorLinkLabel).join(", ") : "none"}`;
     default:
       return `${prefix}, total float, ${formatSignedMinutes(row.totalFloatMinutes)}, ${row.critical ? "critical" : "not critical"}, ${row.constraintViolated ? "constraint violated" : "constraint satisfied"}`;
   }

@@ -237,13 +237,13 @@
 }
 
 .gantt-treegrid__wbs-column {
-  width: 8%;
+  width: 6%;
 }
 
 /* Name is the primary reading column, so it keeps a usable width; the date facts
    are shortened to a civil date (time lives in the accessible name) to pay for it. */
 .gantt-treegrid__name-column {
-  width: 9%;
+  width: 8%;
 }
 
 /* Widened to seat the stacked baseline duration variance fact ("Baseline" alone
@@ -263,11 +263,13 @@
 
 /* Date columns carry the widest facts; keep headroom for wide fallback fonts. */
 .gantt-treegrid__date-column {
-  width: 22%;
+  width: 21%;
 }
 
+/* Widened from 5% to seat the explicit per-link annotations ("T2 SS +120 min").
+   Long task ids break within the cell so a line never overflows horizontally. */
 .gantt-treegrid__predecessor-column {
-  width: 5%;
+  width: 10%;
 }
 
 .gantt-treegrid th,
@@ -474,6 +476,27 @@
   min-height: 36px;
   text-align: right;
   font-variant-numeric: tabular-nums;
+}
+
+/* Predecessor links stack one per line and stretch to the row track, mirroring
+   the baseline facts. Long task ids break within a line so nothing overflows. */
+.gantt-treegrid__predecessors {
+  display: grid;
+  gap: 1px;
+  align-content: center;
+  height: 100%;
+  min-height: 36px;
+  color: var(--color-neutral-700);
+  font-size: 9px;
+  line-height: 12px;
+  text-align: right;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-treegrid__predecessor-link {
+  min-width: 0;
 }
 
 .gantt-treegrid__progress {

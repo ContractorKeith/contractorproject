@@ -42,7 +42,7 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 - [x] Specify and implement leaf start-no-earlier-than and finish-no-later-than constraints with executable examples.
 - [x] Specify and implement data-date/progress rules with examples (scheduler, persistence, and the v3 read-model projection with normal-app editing).
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
-- [ ] Add SS, FF, and SF dependency types plus negative lag.
+- [x] Add SS, FF, and SF dependency types plus negative lag.
 - [x] Persist the default weekly working calendar.
 - [ ] Add dated calendar exceptions.
 - [x] Define the versioned Rust schedule read-model query with fixture-based tests.

@@ -58,7 +58,9 @@ export interface TaskHierarchy {
   tasks: Task[];
   dependencies?: FinishStartDependency[];
 }
-export interface FinishStartDependency { predecessorTaskId: string; successorTaskId: string; lagMinutes: number; }
+/** The four dependency relationship types, as canonical two-letter codes. */
+export type DependencyType = "FS" | "SS" | "FF" | "SF";
+export interface FinishStartDependency { predecessorTaskId: string; successorTaskId: string; dependencyType: DependencyType; lagMinutes: number; }
 
 export interface CreateTaskRequest {
   jobId: string;
@@ -120,5 +122,5 @@ export interface Baseline {
 }
 export interface CreateBaselineRequest { jobId: string; name: string; expectedJobVersion: number; }
 export interface SetBaselineComparisonDefaultRequest { jobId: string; baselineId: string; expectedJobVersion: number; }
-export interface AddDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; lagMinutes: number; expectedJobVersion: number; }
-export interface RemoveDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; expectedJobVersion: number; }
+export interface AddDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; dependencyType?: DependencyType; lagMinutes: number; expectedJobVersion: number; }
+export interface RemoveDependencyRequest { jobId: string; predecessorTaskId: string; successorTaskId: string; dependencyType?: DependencyType; expectedJobVersion: number; }

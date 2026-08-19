@@ -36,7 +36,7 @@ function row(
     actualStart: null,
     actualFinish: null,
     progressStatus: "notStarted",
-    predecessorIds: [],
+    predecessors: [],
     baseline: null,
   };
 }

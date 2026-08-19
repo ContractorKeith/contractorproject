@@ -21,7 +21,13 @@ describe("packaged Gantt verification fixture", () => {
         (row) => row.baseline != null && row.baseline.durationVarianceMinutes > 0,
       ),
     ).toBe(true);
-    expect(model.rows.some((row) => row.predecessorIds.length > 1)).toBe(true);
+    expect(model.rows.some((row) => row.predecessors.length > 1)).toBe(true);
+    // The fixture exercises every link type plus a negative lag for geometry tests.
+    const links = model.rows.flatMap((row) => row.predecessors);
+    expect(links.some((link) => link.dependencyType === "SS")).toBe(true);
+    expect(links.some((link) => link.dependencyType === "FF")).toBe(true);
+    expect(links.some((link) => link.dependencyType === "SF")).toBe(true);
+    expect(links.some((link) => link.lagMinutes < 0)).toBe(true);
     expect(model.rows.some((row) => row.totalFloatMinutes > 0)).toBe(true);
     expect(model.rows[1]).toMatchObject({
       startNoEarlierThan: "2026-08-18",
@@ -35,7 +41,7 @@ describe("packaged Gantt verification fixture", () => {
   it("carries a data date and statused phase-1 rows across every progress state", () => {
     const model = createGanttVerificationReadModel();
 
-    expect(model.contractVersion).toBe(4);
+    expect(model.contractVersion).toBe(5);
     expect(model.dataDate).not.toBeNull();
     expect(model.rows.some((row) => row.progressStatus === "completed")).toBe(true);
     expect(model.rows.some((row) => row.progressStatus === "inProgress")).toBe(true);

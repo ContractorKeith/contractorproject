@@ -1,4 +1,5 @@
 import type {
+  GanttPredecessorLink,
   GanttProgressStatus,
   GanttReadModel,
   GanttRow,
@@ -50,7 +51,7 @@ export function createGanttVerificationReadModel(): GanttReadModel {
       actualStart: null,
       actualFinish: null,
       progressStatus: phase === 0 ? "inProgress" : "notStarted",
-      predecessorIds: [],
+      predecessors: [],
       baseline: null,
     });
 
@@ -73,14 +74,41 @@ export function createGanttVerificationReadModel(): GanttReadModel {
         actualStart = localTimestamp(taskDay);
         progressStatus = "inProgress";
       }
-      const predecessorIds =
+      // The immediately-preceding activity is the default FS+0 driver. A few
+      // low-index phase-1 activities carry SS, FF, SF, and a negative lag so the
+      // browser suite exercises real type-aware dependency-line geometry.
+      const priorId = `${summaryId}-task-${task}`;
+      const typedLink = (): GanttPredecessorLink => {
+        if (task === 4)
+          return { taskId: priorId, dependencyType: "SS", lagMinutes: 120 };
+        if (task === 5)
+          return { taskId: priorId, dependencyType: "FF", lagMinutes: -60 };
+        if (task === 6)
+          return { taskId: priorId, dependencyType: "SF", lagMinutes: 240 };
+        return { taskId: priorId, dependencyType: "FS", lagMinutes: 0 };
+      };
+      const predecessors: GanttPredecessorLink[] =
         task === 0
           ? []
           : task === 10
-            ? [`${summaryId}-task-${task}`, `${summaryId}-task-${task - 1}`]
+            ? [
+                { taskId: priorId, dependencyType: "FS", lagMinutes: 0 },
+                {
+                  taskId: `${summaryId}-task-${task - 1}`,
+                  dependencyType: "FS",
+                  lagMinutes: 0,
+                },
+              ]
             : task === 50
-              ? [`${summaryId}-task-${task}`, `${summaryId}-task-1`]
-              : [`${summaryId}-task-${task}`];
+              ? [
+                  { taskId: priorId, dependencyType: "FS", lagMinutes: 0 },
+                  {
+                    taskId: `${summaryId}-task-1`,
+                    dependencyType: "FS",
+                    lagMinutes: 0,
+                  },
+                ]
+              : [typedLink()];
       rows.push({
         taskId,
         parentTaskId: summaryId,
@@ -108,7 +136,7 @@ export function createGanttVerificationReadModel(): GanttReadModel {
         actualStart,
         actualFinish,
         progressStatus,
-        predecessorIds,
+        predecessors,
         baseline: {
           start: localTimestamp(taskDay - 3),
           finish:
@@ -153,7 +181,7 @@ export function reorderFirstVerificationActivity(
 
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 4,
+    contractVersion: 5,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",

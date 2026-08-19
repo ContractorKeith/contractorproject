@@ -1,7 +1,7 @@
 # Versioned Gantt read model
 
-Status: implemented contract v4
-Updated: 2026-08-18
+Status: implemented contract v5
+Updated: 2026-08-19
 
 The Gantt read model is the only schedule shape consumed by the production
 work-breakdown table and supplemental timeline. Rust joins canonical task
@@ -11,7 +11,7 @@ virtualize them, but it does not calculate dates, hierarchy positions,
 variance, float, or critical state.
 
 The Rust contract lives in `src-tauri/src/gantt.rs`. Its TypeScript mirror is
-`src/types/gantt.ts`. Both currently use `contractVersion: 4`; a breaking
+`src/types/gantt.ts`. Both currently use `contractVersion: 5`; a breaking
 field or semantic change requires a new version.
 
 ## Top-level projection
@@ -58,7 +58,16 @@ Each row exposes:
   plus explicit `constraintViolated` from the scheduler. A leaf reports its
   direct violation; a summary derives this state from a violated descendant.
   Neither is inferred from propagated negative float.
-- stable, sorted predecessor task IDs
+- typed predecessor links (added in contract v5). Each link is
+  `{ taskId, dependencyType, lagMinutes }`, where `taskId` is the predecessor
+  task, `dependencyType` is one of `FS`, `SS`, `FF`, `SF`, and `lagMinutes` is
+  signed working minutes. Rust rejects an unknown predecessor task and any
+  duplicate `(predecessor, type)` pair, then emits the links sorted by
+  predecessor id and then dependency-type declaration order (`FS`, `SS`, `FF`,
+  `SF`). Multiple different-type links between the same pair are legal and both
+  appear. React renders these facts and derives no geometry math from them
+  beyond choosing the anchor edge per type. Contract v4 exposed a bare
+  `predecessorIds: string[]`; v5 replaces it with the `predecessors` object list.
 - an optional baseline comparison with baseline start/finish/duration and
   signed start/finish/duration variance minutes derived by Rust from the current
   and baseline values. `durationVarianceMinutes` is the current row duration
@@ -129,7 +138,11 @@ math beyond proportioning:
 
 - an empty schedule and exact camel-case serialization
 - a nested summary with current dates, baseline start/finish/duration variance,
-  and predecessor IDs, asserting the exact v4 camel-case baseline serialization
+  and a typed predecessor link, asserting the exact v5 camel-case baseline and
+  predecessor-object serialization
+- mixed-type predecessor links (SS, FF, SF) with a negative lag, asserting they
+  serialize sorted by predecessor id then type, and a duplicate `(predecessor,
+  type)` pair rejected with `gantt_predecessor_duplicate`
 - a partial baseline whose later-added task reports a `null` comparison
 - the baseline error paths (`gantt_baseline_task_unknown`,
   `gantt_baseline_task_duplicate`)

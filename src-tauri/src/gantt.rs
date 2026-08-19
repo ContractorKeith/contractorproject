@@ -4,9 +4,9 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::scheduling::{ScheduleResult, ScheduledTask};
+use crate::scheduling::{DependencyType, ScheduleResult, ScheduledTask};
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 4;
+pub const GANTT_READ_MODEL_VERSION: u16 = 5;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,8 +51,20 @@ pub struct GanttBaselineTaskSource {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GanttPredecessorSource {
+    /// Successor task the links belong to.
     pub task_id: String,
-    pub predecessor_ids: Vec<String>,
+    pub predecessors: Vec<GanttPredecessorLink>,
+}
+
+/// One typed predecessor link on the successor row. `task_id` is the predecessor
+/// task; `dependency_type` and signed `lag_minutes` describe the relationship.
+/// Serialized as `{ taskId, dependencyType, lagMinutes }` in contract v5.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GanttPredecessorLink {
+    pub task_id: String,
+    pub dependency_type: DependencyType,
+    pub lag_minutes: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -135,7 +147,8 @@ pub struct GanttRow {
     pub actual_finish: Option<NaiveDateTime>,
     /// Rust-derived completed/in-progress/not-started state.
     pub progress_status: GanttProgressStatus,
-    pub predecessor_ids: Vec<String>,
+    /// Typed predecessor links, sorted by predecessor id then dependency type.
+    pub predecessors: Vec<GanttPredecessorLink>,
     pub baseline: Option<GanttBaselineComparison>,
 }
 
@@ -157,10 +170,13 @@ pub enum GanttReadModelError {
     DuplicatePredecessorRow { task_id: String },
     #[error("predecessor metadata references unknown task {task_id}")]
     UnknownPredecessorTask { task_id: String },
-    #[error("task {task_id} lists predecessor {predecessor_id} more than once")]
+    #[error(
+        "task {task_id} lists predecessor {predecessor_id} ({dependency_type}) more than once"
+    )]
     DuplicatePredecessor {
         task_id: String,
         predecessor_id: String,
+        dependency_type: &'static str,
     },
     #[error("summary task {task_id} cannot carry task constraints")]
     SummaryConstraint { task_id: String },
@@ -261,7 +277,7 @@ pub fn build_gantt_read_model(
                 actual_start: scheduled.actual_start,
                 actual_finish: scheduled.actual_finish,
                 progress_status: progress_statuses[task.id.as_str()],
-                predecessor_ids: predecessors_by_task
+                predecessors: predecessors_by_task
                     .get(task.id.as_str())
                     .cloned()
                     .unwrap_or_default(),
@@ -558,7 +574,7 @@ fn join_baseline(
 fn join_predecessors(
     predecessors: Vec<GanttPredecessorSource>,
     task_ids: &HashSet<&str>,
-) -> Result<HashMap<String, Vec<String>>, GanttReadModelError> {
+) -> Result<HashMap<String, Vec<GanttPredecessorLink>>, GanttReadModelError> {
     let mut predecessors_by_task = HashMap::new();
     for row in predecessors {
         if !task_ids.contains(row.task_id.as_str()) {
@@ -566,24 +582,32 @@ fn join_predecessors(
                 task_id: row.task_id,
             });
         }
+        // Links are unique on (predecessor, type); different-type links between the
+        // same pair are legal, mirroring the scheduler's dependency uniqueness.
         let mut seen = HashSet::new();
-        let mut predecessor_ids = row.predecessor_ids;
-        for predecessor_id in &predecessor_ids {
-            if !task_ids.contains(predecessor_id.as_str()) {
+        let mut links = row.predecessors;
+        for link in &links {
+            if !task_ids.contains(link.task_id.as_str()) {
                 return Err(GanttReadModelError::UnknownPredecessorTask {
-                    task_id: predecessor_id.clone(),
+                    task_id: link.task_id.clone(),
                 });
             }
-            if !seen.insert(predecessor_id.as_str()) {
+            if !seen.insert((link.task_id.as_str(), link.dependency_type)) {
                 return Err(GanttReadModelError::DuplicatePredecessor {
                     task_id: row.task_id,
-                    predecessor_id: predecessor_id.clone(),
+                    predecessor_id: link.task_id.clone(),
+                    dependency_type: link.dependency_type.as_code(),
                 });
             }
         }
-        predecessor_ids.sort();
+        // Deterministic order: predecessor id, then dependency type.
+        links.sort_by(|left, right| {
+            left.task_id
+                .cmp(&right.task_id)
+                .then_with(|| left.dependency_type.cmp(&right.dependency_type))
+        });
         if predecessors_by_task
-            .insert(row.task_id.clone(), predecessor_ids)
+            .insert(row.task_id.clone(), links)
             .is_some()
         {
             return Err(GanttReadModelError::DuplicatePredecessorRow {
