@@ -64,6 +64,17 @@ npm run tauri dev
 
 - Full estimating, CRM, invoicing, inventory, payroll, mobile apps, real-time cloud collaboration, and heavy ERP workflows.
 
+## Documentation
+
+Canonical user docs for ContractorProject live in the website repo:
+**`ContractorKeith/opencontractoros` → `src/content/docs/project/`** (served at
+opencontractoros.com/docs/project/).
+
+**Hard rule:** any PR or commit that changes user-facing behavior must include
+a matching docs update at that exact path, committed and pushed in the same
+working session. Every PR must carry a `docs-updated` or `docs-n/a` marker in
+its body or labels — `.github/workflows/docs-reminder.yml` fails it otherwise.
+
 <!-- kodade:kodmem-project:v1:start -->
 Follow the managed KödMem project-context rule in `AGENTS.md`.
 <!-- kodade:kodmem-project:v1:end -->
