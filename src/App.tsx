@@ -7,6 +7,7 @@ import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
   Baseline,
   CalendarWeekday,
+  DependencyType,
   Job,
   Task,
   TaskConstraintKind,
@@ -1697,6 +1698,7 @@ function DependencyControls({
 }) {
   const [predecessorTaskId, setPredecessor] = useState("");
   const [successorTaskId, setSuccessor] = useState("");
+  const [dependencyType, setDependencyType] = useState<DependencyType>("FS");
   const [lagMinutes, setLag] = useState("0");
   const [message, setMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
@@ -1706,6 +1708,8 @@ function DependencyControls({
     hierarchy.tasks.length < 2
   )
     return null;
+  const taskName = (id: string) =>
+    hierarchy.tasks.find((task) => task.id === id)?.name ?? id;
   const failed = (reason: unknown) => {
     setMessage(errorMessage(reason));
     setConflict(isVersionConflict(reason));
@@ -1725,11 +1729,22 @@ function DependencyControls({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setMessage(null);
+    // Reject a non-integer lag client-side so a decimal — or a bare "-" that
+    // would coerce to NaN — never reaches the store. Lag is signed working
+    // minutes; the store bounds the magnitude.
+    if (lagMinutes.trim() !== "") {
+      const parsed = Number(lagMinutes);
+      if (!Number.isInteger(parsed) || Math.abs(parsed) > 10_000_000) {
+        setMessage("Lag must be a whole number of minutes within ±10,000,000.");
+        return;
+      }
+    }
     void client.addDependency!({
       jobId: hierarchy.jobId,
       predecessorTaskId,
       successorTaskId,
-      lagMinutes: Number(lagMinutes),
+      dependencyType,
+      lagMinutes: lagMinutes.trim() === "" ? 0 : Number(lagMinutes),
       expectedJobVersion: hierarchy.jobVersion,
     })
       .then(succeeded)
@@ -1738,7 +1753,7 @@ function DependencyControls({
   return (
     <section
       className="dependency-controls"
-      aria-label="Finish-to-start dependencies"
+      aria-label="Task dependencies"
     >
       <form onSubmit={submit}>
         <label>
@@ -1772,11 +1787,26 @@ function DependencyControls({
           </select>
         </label>
         <label>
+          Type{" "}
+          <select
+            aria-label="Dependency type"
+            value={dependencyType}
+            onChange={(event) =>
+              setDependencyType(event.target.value as DependencyType)
+            }
+          >
+            <option value="FS">Finish-to-start (FS)</option>
+            <option value="SS">Start-to-start (SS)</option>
+            <option value="FF">Finish-to-finish (FF)</option>
+            <option value="SF">Start-to-finish (SF)</option>
+          </select>
+        </label>
+        <label>
           Lag{" "}
           <input
             aria-label="Dependency lag minutes"
             type="number"
-            min="0"
+            step="1"
             value={lagMinutes}
             onChange={(event) => setLag(event.target.value)}
           />
@@ -1787,16 +1817,24 @@ function DependencyControls({
       </form>
       {(hierarchy.dependencies ?? []).map((dependency) => (
         <div
-          key={`${dependency.predecessorTaskId}-${dependency.successorTaskId}`}
+          key={`${dependency.predecessorTaskId}-${dependency.successorTaskId}-${dependency.dependencyType}`}
         >
-          <span>FS dependency</span>
+          <span>
+            {taskName(dependency.predecessorTaskId)} {dependency.dependencyType}{" "}
+            {taskName(dependency.successorTaskId)}
+            {dependency.lagMinutes !== 0
+              ? ` ${dependency.lagMinutes > 0 ? "+" : ""}${dependency.lagMinutes} min`
+              : ""}
+          </span>
           <button
             type="button"
+            aria-label={`Remove ${dependency.dependencyType} dependency from ${taskName(dependency.predecessorTaskId)} to ${taskName(dependency.successorTaskId)}`}
             onClick={() =>
               void client.removeDependency!({
                 jobId: hierarchy.jobId,
                 predecessorTaskId: dependency.predecessorTaskId,
                 successorTaskId: dependency.successorTaskId,
+                dependencyType: dependency.dependencyType,
                 expectedJobVersion: hierarchy.jobVersion,
               })
                 .then(succeeded)

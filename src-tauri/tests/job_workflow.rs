@@ -865,10 +865,16 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
     assert_eq!(before.rows[2].start.to_string(), "2026-08-17 16:00:00");
     assert_eq!(before.rows[2].total_float_minutes, 0);
     assert!(before.rows[2].critical);
+    assert_eq!(before.rows[2].predecessors.len(), 1);
     assert_eq!(
-        before.rows[2].predecessor_ids,
-        vec![before.rows[1].task_id.clone()]
+        before.rows[2].predecessors[0].task_id,
+        before.rows[1].task_id
     );
+    assert_eq!(
+        before.rows[2].predecessors[0].dependency_type,
+        contractorproject_lib::scheduling::DependencyType::FinishStart
+    );
+    assert_eq!(before.rows[2].predecessors[0].lag_minutes, 0);
     assert_eq!(before.critical_path, vec![before.rows[1].task_id.clone()]);
     drop(service);
 

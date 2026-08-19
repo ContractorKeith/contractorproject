@@ -1,6 +1,17 @@
-export const GANTT_READ_MODEL_VERSION = 4 as const;
+export const GANTT_READ_MODEL_VERSION = 5 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
+
+/** The four dependency relationship types, as their canonical two-letter codes. */
+export type GanttDependencyType = "FS" | "SS" | "FF" | "SF";
+
+/** A typed predecessor link on a successor row. `taskId` is the predecessor task. */
+export interface GanttPredecessorLink {
+  taskId: string;
+  dependencyType: GanttDependencyType;
+  /** Signed working-minute lag. */
+  lagMinutes: number;
+}
 
 /** Rust-derived progress status. React renders this fact and never derives it. */
 export type GanttProgressStatus = "completed" | "inProgress" | "notStarted";
@@ -43,7 +54,8 @@ export interface GanttRow {
   actualStart: string | null;
   actualFinish: string | null;
   progressStatus: GanttProgressStatus;
-  predecessorIds: string[];
+  /** Typed predecessor links, sorted by predecessor id then dependency type. */
+  predecessors: GanttPredecessorLink[];
   baseline: GanttBaselineComparison | null;
 }
 

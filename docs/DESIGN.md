@@ -117,6 +117,11 @@ Barlow Condensed sets headings, panel titles, column headers, and the wordmark. 
 | Label | Barlow | 12px | 500 | |
 | Metadata | Barlow | 11px | 400 | `--color-neutral-700` |
 | Body prose | Barlow | 14px | 400 | line-height 1.5, `text-wrap: pretty`, max 68ch |
+| Dense annotation (exception) | heading face | 8px | 400 | line-height 9px; Predecessors link annotations only — buys the cross-font spare wrap line; full text always in the accessible name |
+
+Summary rows carry the heading face/weight on the Name rowheader only; their
+date and numeric cells stay at the regular table weight so the widest date
+facts keep their fit headroom.
 
 All dates, durations, currency, and float values use `font-variant-numeric: tabular-nums` so columns align across rows. Currency is rendered from integer minor units; the UI never does float math.
 

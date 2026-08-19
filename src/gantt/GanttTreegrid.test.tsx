@@ -28,7 +28,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
     actualStart: null,
     actualFinish: null,
     progressStatus: "notStarted",
-    predecessorIds: [],
+    predecessors: [],
     baseline: null,
     ...overrides,
   };
@@ -36,7 +36,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 4,
+    contractVersion: 5,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -70,7 +70,9 @@ const fixtureRows = [
     setSize: 2,
     wbs: "1.1",
     name: "Layout",
-    predecessorIds: ["survey-control"],
+    predecessors: [
+      { taskId: "survey-control", dependencyType: "SS", lagMinutes: 120 },
+    ],
     startNoEarlierThan: "2026-08-18",
     finishNoLaterThan: "2026-08-20",
     constraintViolated: true,
@@ -123,7 +125,10 @@ const fixtureRows = [
     start: "2026-08-17T17:00:00",
     finish: "2026-08-18T10:00:00",
     durationMinutes: 120,
-    predecessorIds: ["task-a", "task-b"],
+    predecessors: [
+      { taskId: "task-a", dependencyType: "FS", lagMinutes: 0 },
+      { taskId: "task-b", dependencyType: "FF", lagMinutes: -60 },
+    ],
   }),
 ];
 
@@ -168,7 +173,22 @@ describe("GanttTreegrid", () => {
       screen.getByRole("gridcell", { name: /1\.2 Inspection, duration, milestone, no baseline/ }),
     ).toBeInTheDocument();
     expect(layoutRow).toHaveTextContent("Critical");
-    expect(layoutRow).toHaveTextContent("survey-control");
+    // The Predecessors cell renders an explicit per-link annotation and an
+    // accessible name that spells out the relationship and signed lag.
+    expect(layoutRow).toHaveTextContent("survey-control SS +120 min");
+    expect(
+      screen.getByRole("gridcell", {
+        name: /1\.1 Layout, predecessors, predecessor survey-control, start-to-start, lag \+120 minutes/,
+      }),
+    ).toBeInTheDocument();
+    const closeoutRow = screen.getByRole("row", { name: /2 Closeout/ });
+    expect(closeoutRow).toHaveTextContent("task-a FS");
+    expect(closeoutRow).toHaveTextContent("task-b FF -60 min");
+    expect(
+      screen.getByRole("gridcell", {
+        name: /2 Closeout, predecessors, predecessor task-a, finish-to-start, no lag, predecessor task-b, finish-to-finish, lag -60 minutes/,
+      }),
+    ).toBeInTheDocument();
     expect(layoutRow).toHaveTextContent("≥ 2026-08-18");
     expect(layoutRow).toHaveTextContent("≤ 2026-08-20");
     expect(screen.getByRole("rowheader", { name: /start no earlier than 2026-08-18, finish no later than 2026-08-20, constraint violated/ })).toBeInTheDocument();
@@ -214,11 +234,11 @@ describe("GanttTreegrid", () => {
     const milestoneCenter = Number(milestone.getAttribute("y")) + Number(milestone.getAttribute("height")) / 2;
     const rotatedMilestoneBottom = milestoneCenter + Math.sqrt(50);
     expect(rotatedMilestoneBottom).toBeLessThan(Number(milestoneBaseline.getAttribute("y")));
-    const tightDependency = timeline.querySelector<SVGPathElement>('[data-dependency="task-a->task-c"]')!;
+    const tightDependency = timeline.querySelector<SVGPathElement>('[data-dependency="task-a->task-c:FS"]')!;
     expect(tightDependency).toBeInTheDocument();
     expect(Number(tightDependency.dataset.approachX)).toBeLessThan(Number(tightDependency.dataset.finishX));
     expect(tightDependency.getAttribute("d")).toMatch(/Q .* H /);
-    expect(timeline.querySelector('[data-dependency="task-b->task-c"]')).toBeInTheDocument();
+    expect(timeline.querySelector('[data-dependency="task-b->task-c:FF"]')).toBeInTheDocument();
   });
 
   it("draws proportional progress fill and an accessible data-date marker", () => {
