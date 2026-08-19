@@ -8,8 +8,9 @@ mod work_breakdown;
 
 use application::{
     AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, BackupResult,
-    CommandActor, CommandContext, CreateBackupRequest, CreateJobRequest, CreateTaskRequest, Job,
-    JobStatus, RemoveDependencyRequest, ReorderTaskRequest, RestoreJobRequest, TaskHierarchy,
+    Baseline, CommandActor, CommandContext, CreateBackupRequest, CreateBaselineRequest,
+    CreateJobRequest, CreateTaskRequest, Job, JobStatus, RemoveDependencyRequest,
+    ReorderTaskRequest, RestoreJobRequest, SetBaselineComparisonDefaultRequest, TaskHierarchy,
     TaskMutation, UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
     UpdateTaskDurationRequest, UpdateTaskProgressRequest, UpdateTaskRequest,
 };
@@ -290,6 +291,34 @@ fn update_task_progress(
 }
 
 #[tauri::command]
+fn create_baseline(
+    service: State<'_, ApplicationService>,
+    request: CreateBaselineRequest,
+) -> Result<Baseline, CommandError> {
+    service
+        .create_baseline(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn set_baseline_comparison_default(
+    service: State<'_, ApplicationService>,
+    request: SetBaselineComparisonDefaultRequest,
+) -> Result<Baseline, CommandError> {
+    service
+        .set_baseline_comparison_default(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn list_baselines(
+    service: State<'_, ApplicationService>,
+    job_id: String,
+) -> Result<Vec<Baseline>, CommandError> {
+    service.list_baselines(&job_id).map_err(Into::into)
+}
+
+#[tauri::command]
 fn add_dependency(
     service: State<'_, ApplicationService>,
     request: AddDependencyRequest,
@@ -343,6 +372,9 @@ pub fn run() {
             update_task_constraint,
             update_job_data_date,
             update_task_progress,
+            create_baseline,
+            set_baseline_comparison_default,
+            list_baselines,
             add_dependency,
             remove_dependency
         ])

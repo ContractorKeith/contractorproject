@@ -41,6 +41,18 @@ pub struct Task {
     pub version: i64,
 }
 
+/// An immutable named schedule snapshot. Task rows live in `baseline_tasks`;
+/// exactly one baseline per job may be the comparison default.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Baseline {
+    pub id: String,
+    pub job_id: String,
+    pub name: String,
+    pub created_at: String,
+    pub is_comparison_default: bool,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinishStartDependency {

@@ -1695,7 +1695,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 6);
+    assert_eq!(migrated_version, 7);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -1893,8 +1893,8 @@ fn populated_exact_v4_backup_restores_read_only_then_owned_target_migrates_to_v5
                 .get::<_, i64>(
                 0
             ))
-            .expect("v6 version"),
-        6
+            .expect("current version"),
+        7
     );
     assert_eq!(restored.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name IN ('start_no_earlier_than', 'finish_no_later_than')", [], |row| row.get::<_, i64>(0)).expect("constraint fields"), 2);
 }
