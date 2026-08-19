@@ -255,12 +255,14 @@
 }
 
 /* The % Done cell stacks a short "NN%" over a status word that wraps freely, so
-   it yields a point to the annotated Predecessors column. */
+   it yields a point to the annotated Predecessors column. Its numeral clipping
+   is a container-overflow issue tracked separately; width alone cannot fix it. */
 .gantt-treegrid__progress-column {
   width: 6%;
 }
 
-/* Float keeps 15%; the stacked "Constraint / violated" fact needs it. */
+/* Float keeps 15%; the stacked "Constraint / violated" fact needs it
+   (14% fails the constraint-fact fit assertion under wide fallback fonts). */
 .gantt-treegrid__float-column {
   width: 15%;
 }
