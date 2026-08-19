@@ -1141,7 +1141,7 @@ impl SqliteStore {
             return Err(ApplicationError::ValidationFailed {
                 code: "dependency_cycle",
                 field: "successorTaskId",
-                message: "finish-to-start dependencies cannot form a cycle".into(),
+                message: "task dependencies cannot form a cycle".into(),
             });
         }
         transaction.execute("INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, dependency_type, lag_minutes) VALUES (?1, ?2, ?3, ?4, ?5)", params![request.job_id, request.predecessor_task_id, request.successor_task_id, dependency_type.as_code(), request.lag_minutes])?;

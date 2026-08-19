@@ -807,6 +807,7 @@ impl ApplicationService {
         let context = context.validate()?;
         required_version("expectedJobVersion", request.expected_job_version)?;
         let dependency_type = resolve_dependency_type(request.dependency_type.as_deref())?;
+        validate_lag_bound(request.lag_minutes)?;
         let (job_version, tasks, dependencies) = self.store.add_dependency(
             &request,
             dependency_type,
@@ -926,6 +927,21 @@ fn resolve_dependency_type(code: Option<&str>) -> Result<DependencyType, Applica
             message: "must be one of FS, SS, FF, or SF".into(),
         }),
     }
+}
+
+/// The maximum absolute lag a dependency may carry. Bounding it app-side keeps a
+/// pathological value from persisting and then failing every later schedule
+/// calculation with an out-of-range error.
+const MAX_DEPENDENCY_LAG_MINUTES: i64 = 10_000_000;
+
+fn validate_lag_bound(lag_minutes: i64) -> Result<(), ApplicationError> {
+    if lag_minutes.abs() > MAX_DEPENDENCY_LAG_MINUTES {
+        return Err(ApplicationError::InvalidInput {
+            field: "lagMinutes",
+            message: "lag must be between -10,000,000 and 10,000,000 minutes".into(),
+        });
+    }
+    Ok(())
 }
 
 fn required_version(field: &'static str, version: i64) -> Result<(), ApplicationError> {

@@ -4138,6 +4138,32 @@ fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
         hierarchy.dependencies[0].dependency_type,
         DependencyType::FinishStart
     );
+    // The rebuild touches only task_dependencies: the statused progress, job data
+    // date, and baseline snapshot from the v7 database all survive unchanged.
+    let completed_first = hierarchy
+        .tasks
+        .iter()
+        .find(|task| task.id == "first")
+        .expect("first task");
+    assert_eq!(completed_first.percent_complete, Some(100));
+    assert_eq!(completed_first.actual_finish.as_deref(), Some("2026-08-17"));
+    let migrated = Connection::open(&existing_path).expect("open migrated");
+    let data_date: Option<String> = migrated
+        .query_row(
+            "SELECT data_date FROM jobs WHERE id = 'job-v7'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("job data date");
+    assert_eq!(data_date.as_deref(), Some("2026-08-18"));
+    let baseline_rows: i64 = migrated
+        .query_row(
+            "SELECT COUNT(*) FROM baseline_tasks WHERE baseline_id = 'baseline-v7'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("baseline rows");
+    assert_eq!(baseline_rows, 2);
     // The pre-migration-v8 backup retains the original v7 snapshot.
     let backup_path =
         existing_path.with_file_name("contractorproject.sqlite3.pre-migration-v8.bak");
@@ -4271,9 +4297,142 @@ fn write_exact_v7_database_with_dependency(path: &std::path::Path) {
              CREATE TABLE baselines (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL, is_comparison_default INTEGER NOT NULL DEFAULT 0 CHECK (is_comparison_default IN (0, 1)), UNIQUE (job_id, name), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT);
              CREATE TABLE baseline_tasks (baseline_id TEXT NOT NULL, task_id TEXT NOT NULL, start TEXT NOT NULL, finish TEXT NOT NULL, duration_minutes INTEGER NOT NULL CHECK (duration_minutes >= 0), PRIMARY KEY (baseline_id, task_id), FOREIGN KEY (baseline_id) REFERENCES baselines(id) ON DELETE RESTRICT);
              CREATE UNIQUE INDEX baselines_one_default_per_job ON baselines(job_id) WHERE is_comparison_default = 1;
-             INSERT INTO jobs VALUES ('job-v7', 'Existing v7', 'draft', 'UTC', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 5, '2026-08-17', '{\"workingWeekdays\":[\"monday\",\"tuesday\",\"wednesday\",\"thursday\",\"friday\"],\"workdayStartMinute\":480,\"workdayDurationMinutes\":480}', NULL);
-             INSERT INTO tasks VALUES ('first', 'job-v7', NULL, 0, 'First', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, NULL, NULL, NULL), ('second', 'job-v7', NULL, 1, 'Second', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, NULL, NULL, NULL);
-             INSERT INTO task_dependencies VALUES ('job-v7', 'first', 'second', 0);",
+             INSERT INTO jobs VALUES ('job-v7', 'Existing v7', 'draft', 'UTC', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 5, '2026-08-17', '{\"workingWeekdays\":[\"monday\",\"tuesday\",\"wednesday\",\"thursday\",\"friday\"],\"workdayStartMinute\":480,\"workdayDurationMinutes\":480}', '2026-08-18');
+             INSERT INTO tasks VALUES ('first', 'job-v7', NULL, 0, 'First', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, 100, '2026-08-17', '2026-08-17'), ('second', 'job-v7', NULL, 1, 'Second', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, NULL, NULL, NULL);
+             INSERT INTO task_dependencies VALUES ('job-v7', 'first', 'second', 0);
+             INSERT INTO baselines VALUES ('baseline-v7', 'job-v7', 'Locked', '2026-08-16T00:00:00.000Z', 1);
+             INSERT INTO baseline_tasks VALUES
+                ('baseline-v7', 'first', '2026-08-17T08:00:00', '2026-08-17T16:00:00', 480),
+                ('baseline-v7', 'second', '2026-08-18T08:00:00', '2026-08-18T16:00:00', 480);",
         )
         .expect("write exact v7");
+}
+
+// Creates a job with two scheduled leaf tasks and returns
+// (service, job_id, predecessor_id, successor_id, expected_job_version).
+fn seed_two_leaves(path: &std::path::Path) -> (ApplicationService, String, String, String, i64) {
+    let service = ApplicationService::open(path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Links".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "First".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("first");
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Second".into(),
+                expected_job_version: first.job_version,
+            },
+        )
+        .expect("second");
+    let first_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: first.task.version,
+                expected_job_version: second.job_version,
+            },
+        )
+        .expect("first duration");
+    let second_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: second.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: second.task.version,
+                expected_job_version: first_task.job_version,
+            },
+        )
+        .expect("second duration");
+    (
+        service,
+        job.id,
+        first.task.id,
+        second.task.id,
+        second_task.job_version,
+    )
+}
+
+#[test]
+fn add_dependency_request_json_defaults_missing_type_to_finish_start() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, predecessor, successor, job_version) = seed_two_leaves(&path);
+
+    // A client that omits dependencyType (the pre-#47 payload shape) must
+    // deserialize and persist as FS end-to-end.
+    let payload = format!(
+        r#"{{"jobId":"{job_id}","predecessorTaskId":"{predecessor}","successorTaskId":"{successor}","lagMinutes":0,"expectedJobVersion":{job_version}}}"#
+    );
+    let request: AddDependencyRequest =
+        serde_json::from_str(&payload).expect("deserialize legacy payload");
+    let linked = service
+        .add_dependency(command_context(), request)
+        .expect("add default-type dependency");
+    assert_eq!(linked.dependencies.len(), 1);
+    assert_eq!(
+        linked.dependencies[0].dependency_type,
+        DependencyType::FinishStart
+    );
+}
+
+#[test]
+fn add_dependency_rejects_out_of_range_lag_on_both_sides() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let (service, job_id, predecessor, successor, job_version) = seed_two_leaves(&path);
+
+    for lag in [10_000_001, -10_000_001] {
+        let error = service
+            .add_dependency(
+                command_context(),
+                AddDependencyRequest {
+                    job_id: job_id.clone(),
+                    predecessor_task_id: predecessor.clone(),
+                    successor_task_id: successor.clone(),
+                    lag_minutes: lag,
+                    dependency_type: None,
+                    expected_job_version: job_version,
+                },
+            )
+            .expect_err("out-of-range lag");
+        assert_eq!(error.kind(), "invalid_input");
+    }
+    // The inclusive boundary is accepted.
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job_id.clone(),
+                predecessor_task_id: predecessor.clone(),
+                successor_task_id: successor.clone(),
+                lag_minutes: 10_000_000,
+                dependency_type: None,
+                expected_job_version: job_version,
+            },
+        )
+        .expect("boundary lag accepted");
+    assert_eq!(linked.dependencies.len(), 1);
+    assert_eq!(linked.dependencies[0].lag_minutes, 10_000_000);
 }

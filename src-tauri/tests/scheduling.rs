@@ -1496,6 +1496,95 @@ fn default_dependency_type_is_byte_identical_to_finish_start() {
 }
 
 #[test]
+fn json_without_dependency_type_deserializes_as_finish_start() {
+    let dependency: FinishStartDependency =
+        serde_json::from_str(r#"{"predecessorTaskId":"A","successorTaskId":"B","lagMinutes":0}"#)
+            .expect("dependency without a type");
+    assert_eq!(dependency.dependency_type, DependencyType::FinishStart);
+}
+
+#[test]
+fn driving_leaf_with_incomplete_successors_stays_on_the_critical_path() {
+    // Each start/finish-anchored link lets A finish the project while its
+    // successor B is still open; A must remain the terminal driving leaf.
+    for link in [ss("A", "B", 0), ff("A", "B", -480), sf("A", "B", 0)] {
+        let result = calculate_schedule(&progress_input(
+            vec![task("A", 960), task("B", 480)],
+            vec![link.clone()],
+        ))
+        .expect("valid driving schedule");
+        assert_eq!(
+            result.critical_path,
+            vec!["A".to_string()],
+            "unexpected path for {:?}",
+            link.dependency_type
+        );
+    }
+}
+
+#[test]
+fn driving_path_walks_through_a_start_anchored_successor() {
+    // Z -> A finishes the project; A drives B by SS. The path must include both
+    // Z and A even though A has an incomplete SS successor.
+    let result = calculate_schedule(&progress_input(
+        vec![task("Z", 480), task("A", 960), task("B", 480)],
+        vec![fs("Z", "A", 0), ss("A", "B", 0)],
+    ))
+    .expect("valid chained driving schedule");
+    assert_eq!(result.critical_path, vec!["Z".to_string(), "A".to_string()]);
+}
+
+#[test]
+fn negative_lag_on_finish_finish_and_start_finish_clamps_at_start() {
+    let ff_result = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 480)],
+        vec![ff("A", "B", -960)],
+    ))
+    .expect("valid negative FF schedule");
+    assert_eq!(leaf(&ff_result, "B").early_start, at("2026-01-05", "08:00"));
+
+    let sf_result = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 480)],
+        vec![sf("A", "B", -480)],
+    ))
+    .expect("valid negative SF schedule");
+    assert_eq!(leaf(&sf_result, "B").early_start, at("2026-01-05", "08:00"));
+}
+
+#[test]
+fn started_start_anchored_predecessor_imposes_no_late_bound() {
+    // A is in progress; a tight FNLT on its SS successor B would pull A's late
+    // dates back through the edge, but a started leaf's start is immovable, so A
+    // keeps the same float as the no-link control and is not critical.
+    let tasks = || vec![task("A", 960), task("B", 480), task("Z", 4800)];
+    let progress_status = || {
+        status(
+            Some("2026-01-07"),
+            vec![progress("A", 50, Some("2026-01-05"), None)],
+        )
+    };
+
+    let linked = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![ss("A", "B", 0)]),
+        &[constraint("B", None, Some("2026-01-07"))],
+        &progress_status(),
+    )
+    .expect("valid linked schedule");
+    let control = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![]),
+        &[constraint("B", None, Some("2026-01-07"))],
+        &progress_status(),
+    )
+    .expect("valid control schedule");
+
+    assert_eq!(
+        leaf(&linked, "A").total_float_minutes,
+        leaf(&control, "A").total_float_minutes
+    );
+    assert!(!leaf(&linked, "A").critical);
+}
+
+#[test]
 fn data_date_before_schedule_start_is_clamped_to_the_first_working_day() {
     let result = calculate_schedule_with_progress(
         &progress_input(vec![task("A", 480)], vec![]),

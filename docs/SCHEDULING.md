@@ -203,24 +203,30 @@ Scheduling retains the remaining work:
 
 - Remaining duration is `duration - floor(duration * percent / 100)`.
 - Every incomplete leaf's remaining work starts no earlier than the data-date
-  instant and still honors predecessor finishes plus lag and its own SNET.
+  instant and still honors each predecessor's type-appropriate anchor plus lag
+  and its own SNET.
 - A complete leaf anchors its early and late instants at the normalized actuals,
   ignores SNET, evaluates its FNLT violation against the actual finish, reports
   total float 0, is never critical, and is excluded from the primary driving
-  path. A successor of a complete predecessor takes `max(actual finish + lag,
-  data-date instant)` as that predecessor's finish-to-start lower bound.
+  path. A successor of a complete predecessor takes `max(anchor + lag, data-date
+  instant)` as that predecessor's lower bound, where the anchor is the actual
+  finish for FS/FF and the actual start for SS/SF.
 - An in-progress leaf reports its early start at the normalized actual start and
   its early finish at the end of remaining work scheduled from `max(data-date
-  instant, predecessor early finishes + lag, SNET)`. The backward pass and float
+  instant, driving predecessor anchors + lag, SNET)`. The backward pass and float
   are computed over remaining work; negative-float and FNLT reporting are
   otherwise unchanged. Float is measured from the remaining-work start, which is
   not surfaced as a date, so consumers must not derive float by differencing the
-  reported early and late starts.
+  reported early and late starts. Because a started leaf's start is an immovable
+  actual, an SS or SF successor imposes no late-date bound back through it; only
+  FS and FF successors (which anchor on the started leaf's finish) do.
 - The project finish that anchors the backward pass is the latest early finish
   over incomplete leaves, falling back to the latest actual finish only when
   every leaf is complete.
-- The driving path traces incomplete leaves only. When every leaf is complete
-  the path is empty.
+- The driving path traces incomplete leaves only, starting from the lexically
+  first incomplete leaf that finishes the project with zero float (a driving
+  leaf may still have incomplete successors under SS/FF/SF). It is empty only
+  when every leaf is complete.
 
 Schedule start no longer bounds the projection: a complete leaf whose actuals
 fall before schedule start reports an early start before the schedule-start
@@ -269,9 +275,11 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 | `A(480) =SF+960=> B(480)` | EF(B) reaches Tuesday 16:00, so B runs Tuesday. |
 | `A(480)` with FS/SS/FF/SF+0 milestones | FS and FF milestones land Monday 16:00; SS and SF milestones land Monday 08:00. |
 | `A(480) =SS+0=> B(480)` | Driving path is `A, B`; `A(960) =FF+0=> B(480)` also drives `A, B`. |
+| `A(960) =SS+0=> B(480)` (also `FF-480`, `SF+0`) | A finishes the project while B stays open; the driving path is `A`. |
+| `Z(480) =FS=> A(960) =SS+0=> B(480)` | The path walks the project-finishing branch: `Z, A`. |
 | `A(480) =SS+480=> B(480)` with FNLT Monday on B | B has -480 float, is directly violated, and the negative-float path is `A, B`. |
 | Complete `A(480)` Monday, data date Monday | An FS successor resumes Tuesday; an SS successor resumes Monday. |
-| Different-type `SS+0` and `FF+0` between `A(960)` and `B(480)` | Both links apply: B starts Monday but finishes Tuesday with A. |
+| Different-type `SS+0` and `FF+0` between `A(960)` and `B(480)` | Both links apply: the binding FF pulls B's finish to A's Tuesday finish, so B runs Tuesday. |
 | Duplicate `SS` link on the same pair | Calculation returns `dependency_duplicate`. |
 | `A =SS=> B`, `B =FF=> A` | Calculation returns `dependency_cycle`. |
 

@@ -328,8 +328,20 @@ pub fn calculate_schedule_with_progress(
         // Each successor imposes an upper bound on this task's late finish,
         // mirroring the forward-pass rule per type.
         let mut successor_bound = i64::MAX;
+        let predecessor_started = progress.status[task_index] == ProgressStatus::InProgress;
         for edge in &graph.successors[task_index] {
             if progress.status[edge.other] == ProgressStatus::Complete {
+                continue;
+            }
+            // SS/SF anchor on this (predecessor) task's start. Once it is started
+            // that start is an immovable actual, so the successor imposes no late
+            // bound through the edge — mirroring the forward-pass retained anchor.
+            if predecessor_started
+                && matches!(
+                    edge.dep_type,
+                    DependencyType::StartStart | DependencyType::StartFinish
+                )
+            {
                 continue;
             }
             let bound = match edge.dep_type {
@@ -1431,14 +1443,29 @@ impl<'a> LeafGraph<'a> {
             path.reverse();
             return path;
         }
+        // A terminal driving leaf is an incomplete leaf that finishes the project
+        // with zero float. Under SS/FF/SF such a leaf can still have incomplete
+        // successors, so there is no "successors complete" filter; instead a
+        // candidate that drives a deeper candidate is excluded so the deepest
+        // wins, then lexical order breaks ties. The drives relation is acyclic,
+        // so a sink candidate always exists when any candidate does.
+        let is_terminal_candidate = |index: usize| {
+            !completed[index] && total_float[index] == 0 && early_finish[index] == schedule_finish
+        };
         let Some(mut current) = (0..self.tasks.len())
+            .filter(|&index| is_terminal_candidate(index))
             .filter(|&index| {
-                !completed[index]
-                    && self.successors[index]
-                        .iter()
-                        .all(|edge| completed[edge.other])
-                    && total_float[index] == 0
-                    && early_finish[index] == schedule_finish
+                !self.successors[index].iter().any(|edge| {
+                    is_terminal_candidate(edge.other)
+                        && drives(
+                            &Edge {
+                                other: index,
+                                dep_type: edge.dep_type,
+                                lag: edge.lag,
+                            },
+                            edge.other,
+                        )
+                })
             })
             .min_by(|&left, &right| self.tasks[left].id.cmp(&self.tasks[right].id))
         else {
