@@ -5,9 +5,10 @@
 use contractorproject_lib::application::{
     AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, Baseline,
     CommandActor, CommandContext, CreateBackupRequest, CreateBaselineRequest, CreateJobRequest,
-    CreateTaskRequest, RestoreJobRequest, SetBaselineComparisonDefaultRequest, TaskConstraintKind,
-    UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
-    UpdateTaskDurationRequest, UpdateTaskProgressRequest, VerifyRestoreRequest,
+    CreateTaskRequest, RemoveDependencyRequest, RestoreJobRequest,
+    SetBaselineComparisonDefaultRequest, TaskConstraintKind, UpdateJobDataDateRequest,
+    UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
+    UpdateTaskProgressRequest, VerifyRestoreRequest,
 };
 use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
 use rusqlite::Connection;
@@ -148,7 +149,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('baselines', 'baseline_tasks')",
@@ -177,7 +178,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 7);
+    assert_eq!(migrated_version, 8);
     assert_eq!(service.list_tasks("job-v6").expect("tasks").tasks.len(), 1);
     assert!(service
         .list_baselines("job-v6")
@@ -598,7 +599,7 @@ fn verified_backup_and_clean_restore_accept_v7_and_exact_v6() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 7);
+    assert_eq!(restored_version, 8);
 
     // An exact-v6 snapshot is still accepted by the restore preflight.
     let v6_dir = tempfile::tempdir().expect("temp");
@@ -711,6 +712,7 @@ fn baseline_snapshot_matches_the_gantt_projection_for_a_rich_schedule() {
                 predecessor_task_id: a.task.id.clone(),
                 successor_task_id: b.task.id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: c.job_version,
             },
         )
@@ -1060,4 +1062,126 @@ fn write_exact_v6_database(path: &std::path::Path, job_id: &str) {
             [],
         )
         .expect("seed v6 audit");
+}
+
+#[test]
+fn changing_a_dependency_type_leaves_baselines_intact_and_variance_computing() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Replan".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job.id.clone(),
+                schedule_start: Some("2026-08-17".into()),
+                calendar: working_calendar(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("schedule");
+    let make_leaf = |name: &str, jv: i64| {
+        let created = service
+            .create_task(
+                command_context(),
+                CreateTaskRequest {
+                    job_id: job.id.clone(),
+                    parent_task_id: None,
+                    name: name.into(),
+                    expected_job_version: jv,
+                },
+            )
+            .expect("task");
+        service
+            .update_task_duration(
+                command_context(),
+                UpdateTaskDurationRequest {
+                    task_id: created.task.id.clone(),
+                    duration_minutes: Some(480),
+                    expected_version: created.task.version,
+                    expected_job_version: created.job_version,
+                },
+            )
+            .expect("duration")
+    };
+    let a = make_leaf("A", job.version);
+    let b = make_leaf("B", a.job_version);
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: a.task.id.clone(),
+                successor_task_id: b.task.id.clone(),
+                lag_minutes: 0,
+                dependency_type: Some("FS".into()),
+                expected_job_version: b.job_version,
+            },
+        )
+        .expect("FS link");
+
+    let baseline = service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job.id.clone(),
+                name: "Locked".into(),
+                expected_job_version: linked.job_version,
+            },
+        )
+        .expect("baseline");
+    let before = baseline_rows(&path, &baseline.id);
+    assert_eq!(before.len(), 2);
+
+    // Replan: drop the FS link and add an SS link with negative lag. This
+    // reschedules B (from Tuesday to Monday) but must not touch the snapshot.
+    let job_version = current_job_version(&path, &job.id);
+    let unlinked = service
+        .remove_dependency(
+            command_context(),
+            RemoveDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: a.task.id.clone(),
+                successor_task_id: b.task.id.clone(),
+                dependency_type: Some("FS".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("remove FS");
+    service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: a.task.id.clone(),
+                successor_task_id: b.task.id.clone(),
+                lag_minutes: -480,
+                dependency_type: Some("SS".into()),
+                expected_job_version: unlinked.job_version,
+            },
+        )
+        .expect("add SS");
+
+    // The immutable snapshot is byte-for-byte unchanged after the replan.
+    assert_eq!(baseline_rows(&path, &baseline.id), before);
+
+    // Variance still computes for every leaf against the retained snapshot.
+    let read_model = service.get_schedule(&job.id).expect("projection");
+    assert!(read_model.baseline_id.is_some());
+    for row in read_model.rows.iter().filter(|row| !row.summary) {
+        assert!(
+            row.baseline.is_some(),
+            "leaf {} should carry a baseline comparison",
+            row.task_id
+        );
+    }
 }

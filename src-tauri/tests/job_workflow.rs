@@ -9,7 +9,7 @@ use contractorproject_lib::application::{
 use contractorproject_lib::application::{
     ReorderTaskRequest, TaskConstraintKind, UpdateTaskConstraintRequest, UpdateTaskRequest,
 };
-use contractorproject_lib::scheduling::{CalendarWeekday, WorkingCalendar};
+use contractorproject_lib::scheduling::{CalendarWeekday, DependencyType, WorkingCalendar};
 use rusqlite::Connection;
 use std::sync::{
     atomic::{AtomicU64, Ordering},
@@ -630,6 +630,7 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
                 predecessor_task_id: first.id.clone(),
                 successor_task_id: second.id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: 5,
             },
         )
@@ -643,6 +644,7 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
                 predecessor_task_id: second.id.clone(),
                 successor_task_id: first.id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: 5,
             },
         )
@@ -713,6 +715,7 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
                 job_id: job.id.clone(),
                 predecessor_task_id: first.id,
                 successor_task_id: second.id,
+                dependency_type: None,
                 expected_job_version: schedule.version,
             },
         )
@@ -813,6 +816,7 @@ fn get_schedule_rebuilds_the_same_gantt_projection_after_reopen() {
                 predecessor_task_id: activity.id.clone(),
                 successor_task_id: milestone.id,
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: scheduled.version,
             },
         )
@@ -932,16 +936,19 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                 predecessor_task_id: tasks[0].id.clone(),
                 successor_task_id: tasks[0].id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: job_version,
             },
             "validation_failed",
         ),
         (
+            // Negative lag is legal now; an unknown type code is the rejection.
             AddDependencyRequest {
                 job_id: job.id.clone(),
                 predecessor_task_id: tasks[0].id.clone(),
                 successor_task_id: tasks[1].id.clone(),
                 lag_minutes: -1,
+                dependency_type: Some("XX".into()),
                 expected_job_version: job_version,
             },
             "invalid_input",
@@ -952,6 +959,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                 predecessor_task_id: tasks[0].id.clone(),
                 successor_task_id: tasks[3].id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: job_version,
             },
             "validation_failed",
@@ -1000,6 +1008,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                     predecessor_task_id: tasks[0].id.clone(),
                     successor_task_id: other_task.id,
                     lag_minutes: 0,
+                    dependency_type: None,
                     expected_job_version: job_version,
                 },
             )
@@ -1021,6 +1030,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                 predecessor_task_id: tasks[0].id.clone(),
                 successor_task_id: tasks[1].id.clone(),
                 lag_minutes: 60,
+                dependency_type: None,
                 expected_job_version: job_version,
             },
         )
@@ -1037,6 +1047,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                     predecessor_task_id: tasks[0].id.clone(),
                     successor_task_id: tasks[1].id.clone(),
                     lag_minutes: 60,
+                    dependency_type: None,
                     expected_job_version: job_version,
                 },
             )
@@ -1058,6 +1069,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                 predecessor_task_id: tasks[1].id.clone(),
                 successor_task_id: tasks[2].id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: job_version,
             },
         )
@@ -1072,6 +1084,7 @@ fn persisted_dependency_validation_rejects_invalid_graph_changes_atomically() {
                     predecessor_task_id: tasks[2].id.clone(),
                     successor_task_id: tasks[0].id.clone(),
                     lag_minutes: 0,
+                    dependency_type: None,
                     expected_job_version: chain.job_version,
                 },
             )
@@ -1695,7 +1708,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 7);
+    assert_eq!(migrated_version, 8);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -1894,7 +1907,7 @@ fn populated_exact_v4_backup_restores_read_only_then_owned_target_migrates_to_v5
                 0
             ))
             .expect("current version"),
-        7
+        8
     );
     assert_eq!(restored.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name IN ('start_no_earlier_than', 'finish_no_later_than')", [], |row| row.get::<_, i64>(0)).expect("constraint fields"), 2);
 }
@@ -2324,6 +2337,7 @@ fn archive_and_restore_are_atomic_recoverable_and_preserve_schedule_inputs() {
                 predecessor_task_id: activity.task.id.clone(),
                 successor_task_id: milestone.task.id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: scheduled.version,
             },
         )
@@ -2639,6 +2653,7 @@ fn archived_jobs_reject_every_normal_mutation_without_drift() {
                 predecessor_task_id: first.task.id.clone(),
                 successor_task_id: second.task.id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: second.job_version,
             },
         )
@@ -2722,6 +2737,7 @@ fn archived_jobs_reject_every_normal_mutation_without_drift() {
                     predecessor_task_id: second.task.id.clone(),
                     successor_task_id: first.task.id.clone(),
                     lag_minutes: 0,
+                    dependency_type: None,
                     expected_job_version: archived.version,
                 },
             )
@@ -2733,6 +2749,7 @@ fn archived_jobs_reject_every_normal_mutation_without_drift() {
                     job_id: job.id.clone(),
                     predecessor_task_id: first.task.id.clone(),
                     successor_task_id: second.task.id.clone(),
+                    dependency_type: None,
                     expected_job_version: archived.version,
                 },
             )
@@ -2868,6 +2885,7 @@ fn audit_failure_rolls_back_every_schedule_input_mutation() {
                 predecessor_task_id: tasks[0].id.clone(),
                 successor_task_id: tasks[1].id.clone(),
                 lag_minutes: 0,
+                dependency_type: None,
                 expected_job_version: job_version,
             },
         )
@@ -2919,6 +2937,7 @@ fn audit_failure_rolls_back_every_schedule_input_mutation() {
                     predecessor_task_id: tasks[1].id.clone(),
                     successor_task_id: tasks[2].id.clone(),
                     lag_minutes: 0,
+                    dependency_type: None,
                     expected_job_version: job_version,
                 },
             )
@@ -2930,6 +2949,7 @@ fn audit_failure_rolls_back_every_schedule_input_mutation() {
                     job_id: job.id.clone(),
                     predecessor_task_id: tasks[0].id.clone(),
                     successor_task_id: tasks[1].id.clone(),
+                    dependency_type: None,
                     expected_job_version: job_version,
                 },
             )
@@ -3049,6 +3069,7 @@ fn online_backup_preserves_a_consistent_populated_wal_snapshot_without_audit_wri
                 predecessor_task_id: activity.task.id.clone(),
                 successor_task_id: milestone.task.id.clone(),
                 lag_minutes: 30,
+                dependency_type: None,
                 expected_job_version: milestone.job_version,
             },
         )
@@ -3411,6 +3432,7 @@ fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data
                 predecessor_task_id: activity.task.id.clone(),
                 successor_task_id: milestone.task.id.clone(),
                 lag_minutes: 30,
+                dependency_type: None,
                 expected_job_version: milestone.job_version,
             },
         )
@@ -3907,4 +3929,351 @@ fn restore_verification_rejects_a_dangling_target_symlink_without_touching_it() 
         std::fs::read(&backup_path).expect("backup unchanged"),
         backup_before
     );
+}
+
+#[test]
+fn typed_dependencies_persist_and_remove_by_type_across_restart() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Typed links".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "First".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("first");
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Second".into(),
+                expected_job_version: first.job_version,
+            },
+        )
+        .expect("second");
+    let first_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: first.task.version,
+                expected_job_version: second.job_version,
+            },
+        )
+        .expect("first duration");
+    let second_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: second.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: second.task.version,
+                expected_job_version: first_task.job_version,
+            },
+        )
+        .expect("second duration");
+    let mut job_version = second_task.job_version;
+
+    // A typed SS link with negative lag persists exactly as entered.
+    let linked = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: -60,
+                dependency_type: Some("SS".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("add SS link");
+    job_version = linked.job_version;
+    assert_eq!(linked.dependencies.len(), 1);
+    assert_eq!(
+        linked.dependencies[0].dependency_type,
+        DependencyType::StartStart
+    );
+    assert_eq!(linked.dependencies[0].lag_minutes, -60);
+
+    // The same pair with a different type is legal.
+    let dual = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: 0,
+                dependency_type: Some("FS".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("add FS link on the same pair");
+    job_version = dual.job_version;
+    assert_eq!(dual.dependencies.len(), 2);
+
+    // An exact repeat of an existing typed link is rejected atomically.
+    let before = service.list_tasks(&job.id).expect("before duplicate");
+    let audit_before = command_log_count(&path);
+    let duplicate = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: 999,
+                dependency_type: Some("SS".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect_err("duplicate typed link");
+    assert_eq!(duplicate.kind(), "validation_failed");
+    // An unknown type code is rejected before any mutation.
+    let bad_type = service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: 0,
+                dependency_type: Some("ZZ".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect_err("unknown type code");
+    assert_eq!(bad_type.kind(), "invalid_input");
+    assert_eq!(service.list_tasks(&job.id).expect("unchanged"), before);
+    assert_eq!(command_log_count(&path), audit_before);
+
+    // Reopen: both typed links survive the restart.
+    drop(service);
+    let reopened = ApplicationService::open(&path).expect("reopen");
+    let hierarchy = reopened.list_tasks(&job.id).expect("links");
+    assert_eq!(hierarchy.dependencies.len(), 2);
+    let types: Vec<DependencyType> = hierarchy
+        .dependencies
+        .iter()
+        .map(|dependency| dependency.dependency_type)
+        .collect();
+    assert!(types.contains(&DependencyType::StartStart));
+    assert!(types.contains(&DependencyType::FinishStart));
+
+    // Removing identifies the row by type, leaving the other link intact.
+    let removed = reopened
+        .remove_dependency(
+            command_context(),
+            RemoveDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                dependency_type: Some("SS".into()),
+                expected_job_version: job_version,
+            },
+        )
+        .expect("remove SS link");
+    assert_eq!(removed.dependencies.len(), 1);
+    assert_eq!(
+        removed.dependencies[0].dependency_type,
+        DependencyType::FinishStart
+    );
+}
+
+#[test]
+fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
+    // A fresh database opens at v8 with the typed dependency column.
+    let fresh = tempfile::tempdir().expect("temp");
+    let fresh_path = fresh.path().join("contractorproject.sqlite3");
+    let _service = ApplicationService::open(&fresh_path).expect("open fresh");
+    let connection = Connection::open(&fresh_path).expect("inspect fresh");
+    let version: i64 = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("schema version");
+    assert_eq!(version, 8);
+    let typed_column: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('task_dependencies') WHERE name = 'dependency_type'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("dependency_type column");
+    assert_eq!(typed_column, 1);
+
+    // An existing exact-v7 database migrates its FS rows forward.
+    let existing = tempfile::tempdir().expect("temp");
+    let existing_path = existing.path().join("contractorproject.sqlite3");
+    write_exact_v7_database_with_dependency(&existing_path);
+    let service = ApplicationService::open(&existing_path).expect("migrate v7");
+    let migrated_version: i64 = Connection::open(&existing_path)
+        .expect("open migrated")
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("migrated version");
+    assert_eq!(migrated_version, 8);
+    let hierarchy = service.list_tasks("job-v7").expect("preserved links");
+    assert_eq!(hierarchy.dependencies.len(), 1);
+    assert_eq!(
+        hierarchy.dependencies[0].dependency_type,
+        DependencyType::FinishStart
+    );
+    // The pre-migration-v8 backup retains the original v7 snapshot.
+    let backup_path =
+        existing_path.with_file_name("contractorproject.sqlite3.pre-migration-v8.bak");
+    let backup_version: i64 =
+        Connection::open_with_flags(&backup_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("open pre-migration backup")
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+                row.get(0)
+            })
+            .expect("backup version");
+    assert_eq!(backup_version, 7);
+}
+
+#[test]
+fn verified_backup_and_clean_restore_accept_v8() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job = service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Backup".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job");
+    let first = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "First".into(),
+                expected_job_version: 1,
+            },
+        )
+        .expect("first");
+    let second = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job.id.clone(),
+                parent_task_id: None,
+                name: "Second".into(),
+                expected_job_version: first.job_version,
+            },
+        )
+        .expect("second");
+    let first_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: first.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: first.task.version,
+                expected_job_version: second.job_version,
+            },
+        )
+        .expect("first duration");
+    let second_task = service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: second.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: second.task.version,
+                expected_job_version: first_task.job_version,
+            },
+        )
+        .expect("second duration");
+    service
+        .add_dependency(
+            command_context(),
+            AddDependencyRequest {
+                job_id: job.id.clone(),
+                predecessor_task_id: first.task.id.clone(),
+                successor_task_id: second.task.id.clone(),
+                lag_minutes: -30,
+                dependency_type: Some("FF".into()),
+                expected_job_version: second_task.job_version,
+            },
+        )
+        .expect("typed link");
+
+    let backup_dir = tempfile::tempdir().expect("temp");
+    let backup_path = backup_dir.path().join("v8.backup.sqlite3");
+    let backup = service
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup_path.to_string_lossy().into_owned(),
+        })
+        .expect("verify v8 backup");
+    assert!(backup.verified);
+    let target = backup_dir.path().join("restored-v8");
+    let result = service
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: backup_path.to_string_lossy().into_owned(),
+            target_app_data_dir: target.to_string_lossy().into_owned(),
+        })
+        .expect("restore v8");
+    assert!(result.verified);
+    assert_eq!(result.dependency_count, 1);
+    let restored_version: i64 = Connection::open(target.join("contractorproject.sqlite3"))
+        .expect("open restored")
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .expect("restored version");
+    assert_eq!(restored_version, 8);
+}
+
+// Writes an exact-v7 database with one FS dependency for migration testing.
+fn write_exact_v7_database_with_dependency(path: &std::path::Path) {
+    let connection = Connection::open(path).expect("create v7");
+    connection
+        .execute_batch(
+            "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+             INSERT INTO schema_migrations VALUES
+                (1, '2026-08-16T00:00:00.000Z'), (2, '2026-08-16T00:00:00.000Z'),
+                (3, '2026-08-16T00:00:00.000Z'), (4, '2026-08-16T00:00:00.000Z'),
+                (5, '2026-08-16T00:00:00.000Z'), (6, '2026-08-16T00:00:00.000Z'),
+                (7, '2026-08-16T00:00:00.000Z');
+             CREATE TABLE jobs (id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL, timezone TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), schedule_start TEXT, calendar_json TEXT NOT NULL DEFAULT '[]', data_date TEXT);
+             CREATE TABLE tasks (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, parent_task_id TEXT, sort_key INTEGER NOT NULL CHECK (sort_key >= 0), name TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, version INTEGER NOT NULL CHECK (version > 0), duration_minutes INTEGER CHECK (duration_minutes >= 0), start_no_earlier_than TEXT, finish_no_later_than TEXT, percent_complete INTEGER, actual_start TEXT, actual_finish TEXT, UNIQUE (job_id, id), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT, FOREIGN KEY (job_id, parent_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT);
+             CREATE INDEX tasks_job_parent_order ON tasks(job_id, parent_task_id, sort_key, id);
+             CREATE UNIQUE INDEX tasks_root_sibling_order ON tasks(job_id, sort_key) WHERE parent_task_id IS NULL;
+             CREATE UNIQUE INDEX tasks_child_sibling_order ON tasks(job_id, parent_task_id, sort_key) WHERE parent_task_id IS NOT NULL;
+             CREATE TABLE command_log (command_id TEXT NOT NULL PRIMARY KEY CHECK (length(command_id) BETWEEN 1 AND 128), actor TEXT NOT NULL CHECK (actor IN ('user', 'agent', 'import')), client_name TEXT NOT NULL CHECK (length(client_name) BETWEEN 1 AND 120), created_at TEXT NOT NULL, summary TEXT NOT NULL CHECK (length(summary) <= 240));
+             CREATE TABLE task_dependencies (job_id TEXT NOT NULL, predecessor_task_id TEXT NOT NULL, successor_task_id TEXT NOT NULL, lag_minutes INTEGER NOT NULL CHECK (lag_minutes >= 0), PRIMARY KEY (predecessor_task_id, successor_task_id), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT, FOREIGN KEY (job_id, predecessor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT, FOREIGN KEY (job_id, successor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT, CHECK (predecessor_task_id <> successor_task_id));
+             CREATE INDEX task_dependencies_job_successor ON task_dependencies(job_id, successor_task_id);
+             CREATE TABLE baselines (id TEXT PRIMARY KEY, job_id TEXT NOT NULL, name TEXT NOT NULL, created_at TEXT NOT NULL, is_comparison_default INTEGER NOT NULL DEFAULT 0 CHECK (is_comparison_default IN (0, 1)), UNIQUE (job_id, name), FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT);
+             CREATE TABLE baseline_tasks (baseline_id TEXT NOT NULL, task_id TEXT NOT NULL, start TEXT NOT NULL, finish TEXT NOT NULL, duration_minutes INTEGER NOT NULL CHECK (duration_minutes >= 0), PRIMARY KEY (baseline_id, task_id), FOREIGN KEY (baseline_id) REFERENCES baselines(id) ON DELETE RESTRICT);
+             CREATE UNIQUE INDEX baselines_one_default_per_job ON baselines(job_id) WHERE is_comparison_default = 1;
+             INSERT INTO jobs VALUES ('job-v7', 'Existing v7', 'draft', 'UTC', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 5, '2026-08-17', '{\"workingWeekdays\":[\"monday\",\"tuesday\",\"wednesday\",\"thursday\",\"friday\"],\"workdayStartMinute\":480,\"workdayDurationMinutes\":480}', NULL);
+             INSERT INTO tasks VALUES ('first', 'job-v7', NULL, 0, 'First', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, NULL, NULL, NULL), ('second', 'job-v7', NULL, 1, 'Second', '2026-08-16T00:00:00.000Z', '2026-08-16T00:00:00.000Z', 1, 480, NULL, NULL, NULL, NULL, NULL);
+             INSERT INTO task_dependencies VALUES ('job-v7', 'first', 'second', 0);",
+        )
+        .expect("write exact v7");
 }

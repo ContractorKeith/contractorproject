@@ -12,8 +12,8 @@ use crate::gantt::{
     GanttReadModel, GanttReadModelSource, GanttTaskSource,
 };
 use crate::scheduling::{
-    calculate_schedule_with_progress, CalendarWeekday, ScheduleInput, ScheduleProgress,
-    ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
+    calculate_schedule_with_progress, CalendarWeekday, DependencyType, ScheduleInput,
+    ScheduleProgress, ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use crate::storage::SqliteStore;
 
@@ -220,6 +220,9 @@ pub struct AddDependencyRequest {
     pub job_id: String,
     pub predecessor_task_id: String,
     pub successor_task_id: String,
+    /// Canonical `FS`/`SS`/`FF`/`SF` code; `None` defaults to `FS`.
+    #[serde(default)]
+    pub dependency_type: Option<String>,
     pub lag_minutes: i64,
     pub expected_job_version: i64,
 }
@@ -230,6 +233,9 @@ pub struct RemoveDependencyRequest {
     pub job_id: String,
     pub predecessor_task_id: String,
     pub successor_task_id: String,
+    /// Canonical `FS`/`SS`/`FF`/`SF` code; `None` defaults to `FS`.
+    #[serde(default)]
+    pub dependency_type: Option<String>,
     pub expected_job_version: i64,
 }
 
@@ -509,6 +515,7 @@ impl ApplicationService {
                     .map(|dependency| crate::scheduling::FinishStartDependency {
                         predecessor_task_id: dependency.predecessor_task_id.clone(),
                         successor_task_id: dependency.successor_task_id.clone(),
+                        dependency_type: dependency.dependency_type,
                         lag_minutes: dependency.lag_minutes,
                     })
                     .collect(),
@@ -799,14 +806,10 @@ impl ApplicationService {
     ) -> Result<TaskHierarchy, ApplicationError> {
         let context = context.validate()?;
         required_version("expectedJobVersion", request.expected_job_version)?;
-        if request.lag_minutes < 0 {
-            return Err(ApplicationError::InvalidInput {
-                field: "lagMinutes",
-                message: "must be zero or greater".into(),
-            });
-        }
+        let dependency_type = resolve_dependency_type(request.dependency_type.as_deref())?;
         let (job_version, tasks, dependencies) = self.store.add_dependency(
             &request,
+            dependency_type,
             &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             &context,
         )?;
@@ -825,8 +828,10 @@ impl ApplicationService {
     ) -> Result<TaskHierarchy, ApplicationError> {
         let context = context.validate()?;
         required_version("expectedJobVersion", request.expected_job_version)?;
+        let dependency_type = resolve_dependency_type(request.dependency_type.as_deref())?;
         let (job_version, tasks, dependencies) = self.store.remove_dependency(
             &request,
+            dependency_type,
             &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
             &context,
         )?;
@@ -909,6 +914,18 @@ fn parse_iso_date(field: &'static str, value: &str) -> Result<(), ApplicationErr
         });
     }
     Ok(())
+}
+
+/// Resolves an optional dependency-type code into a `DependencyType`, defaulting
+/// to `FS` when omitted and rejecting unknown codes with a friendly error.
+fn resolve_dependency_type(code: Option<&str>) -> Result<DependencyType, ApplicationError> {
+    match code {
+        None => Ok(DependencyType::default()),
+        Some(code) => DependencyType::from_code(code).ok_or(ApplicationError::InvalidInput {
+            field: "dependencyType",
+            message: "must be one of FS, SS, FF, or SF".into(),
+        }),
+    }
 }
 
 fn required_version(field: &'static str, version: i64) -> Result<(), ApplicationError> {

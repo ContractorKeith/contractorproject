@@ -20,8 +20,9 @@ use crate::application::{
 use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
 use crate::scheduling::{
-    calculate_schedule_with_progress, FinishStartDependency as ScheduleDependency, ScheduleInput,
-    ScheduleProgress, ScheduleResult, ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
+    calculate_schedule_with_progress, DependencyType, FinishStartDependency as ScheduleDependency,
+    ScheduleInput, ScheduleProgress, ScheduleResult, ScheduleTask, TaskConstraint, TaskProgress,
+    WorkingCalendar,
 };
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
@@ -1071,6 +1072,7 @@ impl SqliteStore {
     pub(crate) fn add_dependency(
         &self,
         request: &AddDependencyRequest,
+        dependency_type: DependencyType,
         updated_at: &str,
         context: &CommandContext,
     ) -> Result<(i64, Vec<Task>, Vec<FinishStartDependency>), ApplicationError> {
@@ -1126,12 +1128,12 @@ impl SqliteStore {
                 });
             }
         }
-        let duplicate: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM task_dependencies WHERE predecessor_task_id = ?1 AND successor_task_id = ?2)", params![request.predecessor_task_id, request.successor_task_id], |row| row.get(0))?;
+        let duplicate: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM task_dependencies WHERE predecessor_task_id = ?1 AND successor_task_id = ?2 AND dependency_type = ?3)", params![request.predecessor_task_id, request.successor_task_id, dependency_type.as_code()], |row| row.get(0))?;
         if duplicate {
             return Err(ApplicationError::ValidationFailed {
                 code: "dependency_duplicate",
                 field: "successorTaskId",
-                message: "that finish-to-start dependency already exists".into(),
+                message: "that dependency already exists".into(),
             });
         }
         let reaches_predecessor: bool = transaction.query_row("WITH RECURSIVE reach(id) AS (SELECT successor_task_id FROM task_dependencies WHERE predecessor_task_id = ?1 UNION SELECT d.successor_task_id FROM task_dependencies d JOIN reach r ON d.predecessor_task_id = r.id) SELECT EXISTS(SELECT 1 FROM reach WHERE id = ?2)", params![request.successor_task_id, request.predecessor_task_id], |row| row.get(0))?;
@@ -1142,17 +1144,12 @@ impl SqliteStore {
                 message: "finish-to-start dependencies cannot form a cycle".into(),
             });
         }
-        transaction.execute("INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, lag_minutes) VALUES (?1, ?2, ?3, ?4)", params![request.job_id, request.predecessor_task_id, request.successor_task_id, request.lag_minutes])?;
+        transaction.execute("INSERT INTO task_dependencies (job_id, predecessor_task_id, successor_task_id, dependency_type, lag_minutes) VALUES (?1, ?2, ?3, ?4, ?5)", params![request.job_id, request.predecessor_task_id, request.successor_task_id, dependency_type.as_code(), request.lag_minutes])?;
         transaction.execute(
             "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
             params![updated_at, current + 1, request.job_id],
         )?;
-        write_audit_record(
-            &transaction,
-            context,
-            updated_at,
-            "added finish-to-start dependency",
-        )?;
+        write_audit_record(&transaction, context, updated_at, "added dependency")?;
         let (_, tasks, dependencies) = read_task_hierarchy(&transaction, &request.job_id)?;
         transaction.commit()?;
         Ok((current + 1, tasks, dependencies))
@@ -1161,6 +1158,7 @@ impl SqliteStore {
     pub(crate) fn remove_dependency(
         &self,
         request: &RemoveDependencyRequest,
+        dependency_type: DependencyType,
         updated_at: &str,
         context: &CommandContext,
     ) -> Result<(i64, Vec<Task>, Vec<FinishStartDependency>), ApplicationError> {
@@ -1172,7 +1170,7 @@ impl SqliteStore {
             &request.job_id,
             Some(request.expected_job_version),
         )?;
-        let deleted = transaction.execute("DELETE FROM task_dependencies WHERE job_id = ?1 AND predecessor_task_id = ?2 AND successor_task_id = ?3", params![request.job_id, request.predecessor_task_id, request.successor_task_id])?;
+        let deleted = transaction.execute("DELETE FROM task_dependencies WHERE job_id = ?1 AND predecessor_task_id = ?2 AND successor_task_id = ?3 AND dependency_type = ?4", params![request.job_id, request.predecessor_task_id, request.successor_task_id, dependency_type.as_code()])?;
         if deleted == 0 {
             return Err(ApplicationError::NotFound {
                 resource: "dependency",
@@ -1186,12 +1184,7 @@ impl SqliteStore {
             "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
             params![updated_at, current + 1, request.job_id],
         )?;
-        write_audit_record(
-            &transaction,
-            context,
-            updated_at,
-            "removed finish-to-start dependency",
-        )?;
+        write_audit_record(&transaction, context, updated_at, "removed dependency")?;
         let (_, tasks, dependencies) = read_task_hierarchy(&transaction, &request.job_id)?;
         transaction.commit()?;
         Ok((current + 1, tasks, dependencies))
@@ -1584,6 +1577,41 @@ impl SqliteStore {
                     ON baselines(job_id) WHERE is_comparison_default = 1;
                  INSERT INTO schema_migrations (version, applied_at)
                  VALUES (7, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
+        if !migration_applied(&connection, 8)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 8)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Rebuild task_dependencies to add the typed relationship column, drop
+            // the non-negative-lag CHECK (signed lag is now legal), and widen the
+            // primary key to include the type. Existing rows migrate as FS.
+            transaction.execute_batch(
+                "CREATE TABLE task_dependencies_v8 (
+                    job_id TEXT NOT NULL,
+                    predecessor_task_id TEXT NOT NULL,
+                    successor_task_id TEXT NOT NULL,
+                    dependency_type TEXT NOT NULL
+                        CHECK (dependency_type IN ('FS', 'SS', 'FF', 'SF')),
+                    lag_minutes INTEGER NOT NULL,
+                    PRIMARY KEY (predecessor_task_id, successor_task_id, dependency_type),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT,
+                    FOREIGN KEY (job_id, predecessor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT,
+                    FOREIGN KEY (job_id, successor_task_id) REFERENCES tasks(job_id, id) ON DELETE RESTRICT,
+                    CHECK (predecessor_task_id <> successor_task_id)
+                 );
+                 INSERT INTO task_dependencies_v8
+                    (job_id, predecessor_task_id, successor_task_id, dependency_type, lag_minutes)
+                 SELECT job_id, predecessor_task_id, successor_task_id, 'FS', lag_minutes
+                 FROM task_dependencies;
+                 DROP TABLE task_dependencies;
+                 ALTER TABLE task_dependencies_v8 RENAME TO task_dependencies;
+                 CREATE INDEX task_dependencies_job_successor ON task_dependencies(job_id, successor_task_id);
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (8, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
             )?;
             transaction.commit()?;
         }
@@ -1996,6 +2024,40 @@ const DEPENDENCY_COLUMNS: [ColumnSpec; 4] = [
         primary_key_position: 0,
     },
 ];
+// v8 adds the typed relationship column and widens the primary key to include
+// it; lag is no longer part of a non-negative CHECK.
+const DEPENDENCY_V8_COLUMNS: [ColumnSpec; 5] = [
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "predecessor_task_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "successor_task_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 2,
+    },
+    ColumnSpec {
+        name: "dependency_type",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 3,
+    },
+    ColumnSpec {
+        name: "lag_minutes",
+        data_type: "INTEGER",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
 
 fn create_incomplete_backup_path(destination: &Path) -> Result<PathBuf, ApplicationError> {
     let file_name = destination.file_name().and_then(|name| name.to_str());
@@ -2231,7 +2293,7 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if !matches!(schema_version, 4..=7) {
+    if !matches!(schema_version, 4..=8) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
     // The base tables are required at every version; the baseline tables are
@@ -2276,6 +2338,9 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
     if schema_version >= 7 {
         verify_v7_baseline_domain(&connection)?;
     }
+    if schema_version >= 8 {
+        verify_v8_dependency_domain(&connection)?;
+    }
 
     // These bounded counts prove the core domain tables are readable without
     // exposing any customer or job content in the result or error surface.
@@ -2307,7 +2372,8 @@ fn verify_supported_schema(
         4 => &[1, 2, 3, 4],
         5 => &[1, 2, 3, 4, 5],
         6 => &[1, 2, 3, 4, 5, 6],
-        _ => &[1, 2, 3, 4, 5, 6, 7],
+        7 => &[1, 2, 3, 4, 5, 6, 7],
+        _ => &[1, 2, 3, 4, 5, 6, 7, 8],
     };
     if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
@@ -2333,7 +2399,15 @@ fn verify_supported_schema(
         },
     )?;
     verify_table_columns(connection, "command_log", &COMMAND_LOG_COLUMNS)?;
-    verify_table_columns(connection, "task_dependencies", &DEPENDENCY_COLUMNS)?;
+    verify_table_columns(
+        connection,
+        "task_dependencies",
+        if schema_version >= 8 {
+            &DEPENDENCY_V8_COLUMNS[..]
+        } else {
+            &DEPENDENCY_COLUMNS[..]
+        },
+    )?;
     verify_foreign_keys(
         connection,
         "tasks",
@@ -2410,7 +2484,11 @@ fn verify_supported_schema(
         ),
         (
             "task_dependencies",
-            "createtabletask_dependenciesjob_idtextnotnullpredecessor_task_idtextnotnullsuccessor_task_idtextnotnulllag_minutesintegernotnullchecklag_minutes>=0primarykeypredecessor_task_idsuccessor_task_idforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idpredecessor_task_idreferencestasksjob_ididondeleterestrictforeignkeyjob_idsuccessor_task_idreferencestasksjob_ididondeleterestrictcheckpredecessor_task_id<>successor_task_id",
+            if schema_version >= 8 {
+                "createtabletask_dependenciesjob_idtextnotnullpredecessor_task_idtextnotnullsuccessor_task_idtextnotnulldependency_typetextnotnullcheckdependency_typeinfsssffsflag_minutesintegernotnullprimarykeypredecessor_task_idsuccessor_task_iddependency_typeforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idpredecessor_task_idreferencestasksjob_ididondeleterestrictforeignkeyjob_idsuccessor_task_idreferencestasksjob_ididondeleterestrictcheckpredecessor_task_id<>successor_task_id"
+            } else {
+                "createtabletask_dependenciesjob_idtextnotnullpredecessor_task_idtextnotnullsuccessor_task_idtextnotnulllag_minutesintegernotnullchecklag_minutes>=0primarykeypredecessor_task_idsuccessor_task_idforeignkeyjob_idreferencesjobsidondeleterestrictforeignkeyjob_idpredecessor_task_idreferencestasksjob_ididondeleterestrictforeignkeyjob_idsuccessor_task_idreferencestasksjob_ididondeleterestrictcheckpredecessor_task_id<>successor_task_id"
+            },
         ),
     ] {
         let sql: String = connection
@@ -2478,10 +2556,15 @@ fn verify_supported_schema(
     } else {
         "SELECT id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version FROM jobs ORDER BY created_at DESC, id DESC LIMIT 1"
     };
+    let dependency_query = if schema_version >= 8 {
+        "SELECT job_id, predecessor_task_id, successor_task_id, dependency_type, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id, dependency_type LIMIT 1"
+    } else {
+        "SELECT job_id, predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id LIMIT 1"
+    };
     for query in [
         job_query,
         task_query,
-        "SELECT job_id, predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id LIMIT 1",
+        dependency_query,
         "SELECT command_id, actor, client_name, created_at, summary FROM command_log ORDER BY command_id LIMIT 1",
     ] {
         connection
@@ -2657,6 +2740,25 @@ fn verify_v7_baseline_domain(connection: &Connection) -> Result<(), ApplicationE
             if canonical_instant(&value).is_none() {
                 return Err(ApplicationError::BackupVerificationFailed);
             }
+        }
+    }
+    Ok(())
+}
+
+/// Read-only v8 preflight for the typed dependency table. The CHECK constraint
+/// is verified structurally elsewhere; this proves every stored type code is one
+/// of the four legal strings before an untrusted snapshot is copied.
+fn verify_v8_dependency_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let mut statement = connection
+        .prepare("SELECT DISTINCT dependency_type FROM task_dependencies")
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    for row in rows {
+        let code = row.map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if DependencyType::from_code(&code).is_none() {
+            return Err(ApplicationError::BackupVerificationFailed);
         }
     }
     Ok(())
@@ -2931,17 +3033,37 @@ fn read_task_hierarchy(
             "job {job_id} has an invalid task hierarchy"
         )));
     }
-    let mut statement = connection.prepare("SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id")?;
-    let dependencies = statement
+    let mut statement = connection.prepare("SELECT predecessor_task_id, successor_task_id, dependency_type, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id, dependency_type")?;
+    let rows = statement
         .query_map([job_id], |row| {
-            Ok(FinishStartDependency {
-                predecessor_task_id: row.get(0)?,
-                successor_task_id: row.get(1)?,
-                lag_minutes: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let dependencies = rows
+        .into_iter()
+        .map(|(predecessor, successor, dependency_type, lag)| {
+            Ok(FinishStartDependency {
+                predecessor_task_id: predecessor,
+                successor_task_id: successor,
+                dependency_type: parse_dependency_type(&dependency_type)?,
+                lag_minutes: lag,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
     Ok((job_version, tasks, dependencies))
+}
+
+/// Parses a stored dependency-type code. The v8 CHECK constraint already limits
+/// the column, so an unknown code means the snapshot is corrupt.
+fn parse_dependency_type(code: &str) -> Result<DependencyType, ApplicationError> {
+    DependencyType::from_code(code).ok_or_else(|| {
+        ApplicationError::InvalidStoredData(format!("unknown dependency type {code}"))
+    })
 }
 
 fn find_task(
@@ -3163,17 +3285,29 @@ fn validate_proposed_schedule(
         }
     }
     let mut statement = transaction.prepare(
-        "SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id",
+        "SELECT predecessor_task_id, successor_task_id, dependency_type, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id, dependency_type",
     )?;
-    let dependencies = statement
+    let dependency_rows = statement
         .query_map([job_id], |row| {
-            Ok(ScheduleDependency {
-                predecessor_task_id: row.get(0)?,
-                successor_task_id: row.get(1)?,
-                lag_minutes: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let dependencies = dependency_rows
+        .into_iter()
+        .map(|(predecessor, successor, dependency_type, lag)| {
+            Ok(ScheduleDependency {
+                predecessor_task_id: predecessor,
+                successor_task_id: successor,
+                dependency_type: parse_dependency_type(&dependency_type)?,
+                lag_minutes: lag,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
 
     // A Schedule edit only changes the schedule start, calendar, and (never)
     // data date, so the task rows are identical across the current and proposed
@@ -3429,17 +3563,29 @@ fn compute_current_schedule(
         }
     }
     let mut statement = transaction.prepare(
-        "SELECT predecessor_task_id, successor_task_id, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id",
+        "SELECT predecessor_task_id, successor_task_id, dependency_type, lag_minutes FROM task_dependencies WHERE job_id = ?1 ORDER BY predecessor_task_id, successor_task_id, dependency_type",
     )?;
-    let dependencies = statement
+    let dependency_rows = statement
         .query_map([job_id], |row| {
-            Ok(ScheduleDependency {
-                predecessor_task_id: row.get(0)?,
-                successor_task_id: row.get(1)?,
-                lag_minutes: row.get(2)?,
-            })
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let dependencies = dependency_rows
+        .into_iter()
+        .map(|(predecessor, successor, dependency_type, lag)| {
+            Ok(ScheduleDependency {
+                predecessor_task_id: predecessor,
+                successor_task_id: successor,
+                dependency_type: parse_dependency_type(&dependency_type)?,
+                lag_minutes: lag,
+            })
+        })
+        .collect::<Result<Vec<_>, ApplicationError>>()?;
 
     calculate_schedule_with_progress(
         &ScheduleInput {

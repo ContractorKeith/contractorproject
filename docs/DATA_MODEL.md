@@ -1,7 +1,7 @@
 # Initial data model
 
 Status: planning baseline
-Updated: 2026-08-18
+Updated: 2026-08-19
 
 ## Domain language
 
@@ -55,7 +55,7 @@ Summary tasks are ordinary tasks with children. Their calculated dates, duration
 
 Persisted input rules: leaf duration is either zero (milestone) or positive
 (normal work); `NULL` is used by summaries and permitted while schedule setup
-is incomplete. Finish-to-start dependency endpoints must be scheduled leaves.
+is incomplete. Dependency endpoints must be scheduled leaves.
 Summary tasks cannot carry constraints or progress. Schedule-setting,
 constraint, data-date, and task-progress edits all validate the complete
 proposed schedule (including every persisted constraint and progress entry plus
@@ -83,8 +83,10 @@ duplicated in storage.
 Migration v5 adds the two nullable constraint columns. Migration v6 adds the
 nullable `jobs.data_date` and the nullable `tasks.percent_complete`,
 `tasks.actual_start`, and `tasks.actual_finish` columns. Existing null values
-retain their unstatused meaning. Verified-backup preflight accepts exact v4, v5,
-v6, or v7 snapshots without migration; new databases and verified backups use v7.
+retain their unstatused meaning. Migration v8 rebuilds `task_dependencies` for
+typed, signed-lag links (see the `task_dependencies` section). Verified-backup
+preflight accepts exact v4 through v8 snapshots without migration; new databases
+and verified backups use v8.
 
 The implemented FS scheduling semantics, including working-minute boundaries,
 summary rollups, float, and deterministic path selection, are defined in
@@ -101,10 +103,22 @@ Task hierarchy writes use two concurrency levels: each task has its own `version
 - `lag_minutes`
 - unique predecessor/successor/type tuple
 
-The application rejects self-links, cross-job links, duplicate links, and dependency cycles before commit.
+The application rejects self-links, cross-job links, duplicate links, and
+dependency cycles before commit. Duplicate identity is the
+`(predecessor, successor, dependency_type)` tuple, so different-type links
+between the same pair are legal while an exact repeat is rejected. Cycle
+detection is type-agnostic reachability over the predecessor→successor
+multigraph.
 
-The first scheduling slice calculates FS links with non-negative working-time
-lag. Other relationship types and negative lag remain deferred.
+Migration v8 implements this table as specced: it rebuilds `task_dependencies`
+to add `dependency_type` (`CHECK (dependency_type IN ('FS','SS','FF','SF'))`),
+drops the old `lag_minutes >= 0` CHECK so lag is signed, and widens the primary
+key to `(predecessor_task_id, successor_task_id, dependency_type)`. Existing
+rows migrate as `FS`. `add_dependency` defaults an omitted type to `FS`,
+validates the type code app-side with a friendly error, and accepts signed lag;
+`remove_dependency` identifies a row by `(predecessor, successor, type)`. All
+four relationship types and negative lag are calculated by the scheduler
+([`SCHEDULING.md`](SCHEDULING.md)).
 
 ### `calendars`
 
@@ -141,8 +155,8 @@ job becomes the comparison default automatically. Baselines have no update or
 delete command — the snapshot is immutable.
 
 Migration v7 adds the `baselines` and `baseline_tasks` tables and the
-single-default-per-job index. Verified-backup preflight accepts exact v4, v5, v6,
-or v7 snapshots without migration; new databases and verified backups use v7.
+single-default-per-job index. Verified-backup preflight accepts exact v4 through
+v8 snapshots without migration; new databases and verified backups use v8.
 
 ### `job_notes` and `attachments`
 
@@ -169,7 +183,7 @@ Notes are Markdown text owned by a job or task. Attachments store metadata and a
 - A baseline is immutable.
 - Calculated schedule fields are reproducible from canonical inputs.
 - The schedule read projection is rebuilt from one SQLite snapshot of the job,
-  weekly calendar, ordered hierarchy, leaf durations, FS dependencies, leaf
+  weekly calendar, ordered hierarchy, leaf durations, typed dependencies, leaf
   constraints, the job data date, and leaf progress; it is not persisted and
   reads never mutate the canonical inputs.
 - Imports use stable external IDs or an explicit mapping table so retries do not duplicate records.
@@ -199,11 +213,12 @@ modified and backup creation is not a domain command, so it has no
 Before reporting success, the completed snapshot is opened read-only without
 running migrations. Verification requires `integrity_check` to return exactly
 `ok`, no `foreign_key_check` rows, an exact supported schema migration version
-(4, 5, 6, or 7), the required canonical tables, and bounded count reads from the
+(4 through 8), the required canonical tables, and bounded count reads from the
 job, task, dependency, and audit tables. For v5 and later the preflight also
-read-checks that constraint and progress values are canonical leaf inputs, and
-for v7 that baseline snapshot rows carry parseable instants, non-negative
-durations, references to existing baselines, and at most one default per job. A
+read-checks that constraint and progress values are canonical leaf inputs, for
+v7 that baseline snapshot rows carry parseable instants, non-negative durations,
+references to existing baselines, and at most one default per job, and for v8
+that every stored dependency type is one of the four legal codes. A
 failed backup removes only the newly reserved incomplete
 destination; it never changes the live database or an existing file.
 
@@ -213,7 +228,7 @@ Restore verification is a developer-facing recovery check, not a normal-app
 import flow. It first opens the selected backup read-only and applies the same
 integrity, foreign-key, schema-version, required-table, and bounded domain-read
 checks as backup creation. The verifier requires a complete supported migration
-sequence (through v4, v5, v6, or v7), supported
+sequence (through v4 up to v8), supported
 column/type/nullability/primary-key layouts, required
 foreign keys, and exact normalized supported DDL signatures for every required
 table and named index, including constraints and partial-index predicates. It

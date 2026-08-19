@@ -169,7 +169,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 7);
+    assert_eq!(version, 8);
     let job_columns: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'data_date'",
@@ -198,7 +198,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 7);
+    assert_eq!(migrated_version, 8);
     let hierarchy = service.list_tasks("job-v5").expect("preserved tasks");
     assert_eq!(hierarchy.tasks.len(), 1);
     let leaf = &hierarchy.tasks[0];
@@ -783,7 +783,7 @@ fn backup_and_restore_verification_accept_v6_and_exact_v5_snapshots() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 7);
+    assert_eq!(restored_version, 8);
 }
 
 #[test]
