@@ -10,11 +10,12 @@ ContractorProject is a local-first, AI-native project and job management tool fo
 ## Status
 
 v0.1 scheduled-job tracer — persisted work breakdown, schedule inputs,
-SNET/FNLT constraints, audited data-date/progress statusing, and immutable
-named baselines now flow through the pure Rust scheduler into the production
-Gantt (read-model v4 with progress facts, a data-date marker, baseline ghost
-bars, and start/finish/duration variance) in the normal desktop workflow.
-Last touched 2026-08-19.
+SNET/FNLT constraints, audited data-date/progress statusing, immutable named
+baselines, and all four dependency types (FS/SS/FF/SF with signed lag) now
+flow through the pure Rust scheduler into the production Gantt (read-model v5
+with typed link annotations and geometry, progress facts, a data-date marker,
+baseline ghost bars, and start/finish/duration variance) in the normal
+desktop workflow. Last touched 2026-08-19.
 
 ## Commands
 
