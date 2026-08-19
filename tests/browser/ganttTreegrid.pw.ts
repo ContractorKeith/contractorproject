@@ -584,6 +584,7 @@ test("renders typed predecessor annotations with accessible names and stays acce
       const trackLines = Math.max(1, Math.round(element.clientHeight / line));
       return {
         clientWidth: element.clientWidth,
+        scrollWidth: element.scrollWidth,
         widestLine: Math.round(widestLine * 10) / 10,
         margin: Math.round((element.clientWidth - widestLine) * 10) / 10,
         lineCount,
@@ -592,8 +593,14 @@ test("renders typed predecessor annotations with accessible names and stays acce
       };
     });
     console.log(`PRED_FIT ${width} ${JSON.stringify(fit)}`);
-    expect(fit.widestLine, `predecessors horizontal fit @${width}`).toBeLessThanOrEqual(fit.clientWidth);
-    expect(fit.spareLines, `predecessors spare lines @${width}`).toBeGreaterThanOrEqual(1);
+    // Greedy wrapping fills the line box, so the range-rect width can round a
+    // sub-pixel over the floored clientWidth without a real overflow; the honest
+    // clip guard is the integer scrollWidth (as the constraint facts use) plus,
+    // for wrapping cells, vertical spare track lines.
+    expect(fit.scrollWidth, `predecessors horizontal clip @${width}`).toBeLessThanOrEqual(fit.clientWidth);
+    // >=2 spare track lines locally so a wider Linux glyph set (which inflated
+    // the annotation by ~1 line in CI) still leaves at least one spare line.
+    expect(fit.spareLines, `predecessors spare lines @${width}`).toBeGreaterThanOrEqual(2);
   }
   await page.setViewportSize({ width: 1100, height: 700 });
 

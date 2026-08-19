@@ -236,14 +236,16 @@
   pointer-events: none;
 }
 
+/* WBS strings ("10.99" worst case) measure well under this share (content ~17px
+   in the old 43px cell); the reclaimed width funds the Predecessors column. */
 .gantt-treegrid__wbs-column {
-  width: 6%;
+  width: 5%;
 }
 
 /* Name is the primary reading column, so it keeps a usable width; the date facts
    are shortened to a civil date (time lives in the accessible name) to pay for it. */
 .gantt-treegrid__name-column {
-  width: 8%;
+  width: 7%;
 }
 
 /* Widened to seat the stacked baseline duration variance fact ("Baseline" alone
@@ -267,9 +269,11 @@
 }
 
 /* Widened from 5% to seat the explicit per-link annotations ("T2 SS +120 min").
-   Long task ids break within the cell so a line never overflows horizontally. */
+   Long task ids break within the cell so a line never overflows horizontally.
+   The cell also drops to the tighter date-cell inline padding (see below) so the
+   usable text width stays generous at the 460px minimum layout. */
 .gantt-treegrid__predecessor-column {
-  width: 10%;
+  width: 12%;
 }
 
 .gantt-treegrid th,
@@ -287,7 +291,8 @@
 /* Tighten the date cells by content class so column insertions can't drift the
    rule off them; keeps Start and Finish at padding parity. */
 .gantt-treegrid td:has(.gantt-treegrid__date),
-.gantt-treegrid td:has(.gantt-treegrid__duration) {
+.gantt-treegrid td:has(.gantt-treegrid__duration),
+.gantt-treegrid td:has(.gantt-treegrid__predecessors) {
   padding-inline: var(--space-1);
 }
 
@@ -488,10 +493,15 @@
   min-height: 36px;
   color: var(--color-neutral-700);
   font-size: 9px;
-  line-height: 12px;
+  /* Tighter than the 12px facts so the fixed row seats an extra track line,
+     buying vertical headroom for wider fallback/Linux glyph metrics. */
+  line-height: 11px;
   text-align: right;
   white-space: normal;
-  overflow-wrap: anywhere;
+  /* break-word (not anywhere) prefers natural break points — spaces and the
+     hyphens in task ids — so a wrapped line stops short of the content box and
+     keeps real horizontal headroom instead of filling to the sub-pixel edge. */
+  overflow-wrap: break-word;
   font-variant-numeric: tabular-nums;
 }
 
