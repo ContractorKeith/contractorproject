@@ -2,6 +2,7 @@ pub mod application;
 mod domain;
 mod error;
 pub mod gantt;
+pub mod handoff_import;
 pub mod scheduling;
 mod storage;
 mod work_breakdown;

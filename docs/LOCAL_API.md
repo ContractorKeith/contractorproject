@@ -126,6 +126,26 @@ Its bounded result reports only verification plus job, task, dependency, and
 audit-row counts. It never replaces a running database, migrates the selected
 backup, returns database contents, or writes a command-log row.
 
+## Hand-off import (ContractorCRM envelope)
+
+The `handoff-import` binary turns a ContractorCRM hand-off envelope into a job:
+
+```
+handoff-import --envelope <path> --database <path> [--timezone <tz>]
+```
+
+It validates the envelope's `schemaVersion` (1) and `kind`
+(`opportunity_handoff`), refuses a newer major version with a message telling
+the user to update ContractorProject, and ignores unknown fields — the envelope
+contract is additive within a major version. The job is created through
+`ApplicationService::create_job` with actor `import`, so it is validated and
+audited like any other write. On success it prints one JSON line,
+`{"jobId","jobName","createdAt"}`; errors go to stderr with a nonzero exit.
+
+The envelope file is the whole interface: ContractorProject does not link
+against CRM code, does not read a CRM database, and does not deduplicate
+imports (the same envelope imported twice creates two jobs).
+
 ## Context and privacy
 
 - Read tools return bounded projections selected by job and requested fields.
