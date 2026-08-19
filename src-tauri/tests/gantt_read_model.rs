@@ -6,8 +6,8 @@ use contractorproject_lib::gantt::{
 };
 use contractorproject_lib::scheduling::{
     calculate_schedule, calculate_schedule_with_constraints, calculate_schedule_with_progress,
-    CalendarWeekday, FinishStartDependency, ScheduleInput, ScheduleProgress, ScheduleTask,
-    TaskConstraint, TaskProgress, WorkingCalendar,
+    CalendarWeekday, DependencyType, FinishStartDependency, ScheduleInput, ScheduleProgress,
+    ScheduleTask, TaskConstraint, TaskProgress, WorkingCalendar,
 };
 use serde_json::json;
 
@@ -183,6 +183,7 @@ fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
             dependencies: vec![FinishStartDependency {
                 predecessor_task_id: "running".into(),
                 successor_task_id: "waiting".into(),
+                dependency_type: DependencyType::default(),
                 lag_minutes: 0,
             }],
         },
@@ -402,6 +403,7 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
         dependencies: vec![FinishStartDependency {
             predecessor_task_id: "layout".into(),
             successor_task_id: "excavate".into(),
+            dependency_type: DependencyType::default(),
             lag_minutes: 0,
         }],
     })

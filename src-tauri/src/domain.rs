@@ -58,6 +58,8 @@ pub struct Baseline {
 pub struct FinishStartDependency {
     pub predecessor_task_id: String,
     pub successor_task_id: String,
+    #[serde(default)]
+    pub dependency_type: crate::scheduling::DependencyType,
     pub lag_minutes: i64,
 }
 

@@ -1,7 +1,8 @@
 # Deterministic scheduling contract
 
-Status: implemented FS slice with leaf constraints and data-date/progress
-Updated: 2026-08-18
+Status: implemented FS/SS/FF/SF slice with signed lag, leaf constraints, and
+data-date/progress
+Updated: 2026-08-19
 
 The scheduling core is a pure Rust projection. It accepts canonical task,
 dependency, and weekly-calendar inputs and returns calculated dates, total
@@ -27,9 +28,9 @@ the public `contractorproject_lib::scheduling::calculate_schedule` seam.
 - A finish or milestone at a working-day boundary is reported at that day's
   finish time. A positive-duration FS successor resumes at the next available
   working instant. A milestone can occur exactly at its predecessor's finish.
-- Positive FS lag consumes working minutes after the predecessor finish.
-  Negative lag is rejected by this slice and remains part of the expanded
-  dependency work.
+- Lag is signed working minutes. Positive lag consumes working minutes after
+  the driving anchor; negative lag pulls the successor earlier and clamps at
+  schedule start (see "Dependency types and lag").
 
 The core intentionally accepts the weekly calendar explicitly. Persisted
 default-calendar selection, dated holidays/exceptions, split shifts, and
@@ -59,17 +60,17 @@ Summary values are derived recursively after leaf scheduling:
 - critical: true when the derived total float is zero or negative
 - constraint violated: true when any descendant leaf violates its own finish-no-later-than
 
-## Finish-to-start graph
+## Dependency graph
 
-Dependencies in this slice are FS links with non-negative working-minute lag.
-Unknown endpoints, self-links, duplicates, summary endpoints, and cycles are
-rejected before a schedule is returned. Persistence adapters must call the
-same validation before committing future dependency mutations.
+Dependencies are typed leaf-to-leaf links with signed working-minute lag.
+Unknown endpoints, self-links, summary endpoints, and cycles are rejected
+before a schedule is returned. Persistence adapters must call the same
+validation before committing dependency mutations.
 
 For every leaf task `t`, the forward pass calculates:
 
 ```text
-ES(t) = max(schedule start, EF(predecessor) + lag for every predecessor)
+ES(t) = max(schedule start, driving bound of every predecessor)
 EF(t) = ES(t) + duration(t)
 ```
 
@@ -77,10 +78,64 @@ The unconstrained project finish is the maximum leaf early finish. The
 backward pass anchors terminal tasks there and calculates:
 
 ```text
-LF(t) = min(LS(successor) - lag for every successor)
+LF(t) = min(late bound of every successor)
 LS(t) = LF(t) - duration(t)
 total float(t) = LS(t) - ES(t)
 ```
+
+The bounds per link type are defined below. An all-FS graph with non-negative
+lag is byte-identical to the earlier FS-only slice.
+
+## Dependency types and lag
+
+Every link carries a type and a signed integer working-minute lag. The four
+forward constraints, where the anchor is a predecessor date and the bound is on
+the successor, are:
+
+```text
+FS: ES(successor) >= EF(predecessor) + lag
+SS: ES(successor) >= ES(predecessor) + lag
+FF: EF(successor) >= EF(predecessor) + lag
+SF: EF(successor) >= ES(predecessor) + lag
+```
+
+FF and SF bound the successor's (remaining-work) finish; the scheduler derives
+its start by subtracting the successor's remaining duration. The backward pass
+mirrors each rule as an upper bound on the predecessor late dates (SS/SF add the
+predecessor's remaining duration when converting a start bound to a finish
+bound).
+
+Negative lag is legal on all four types. A computed date that would fall before
+schedule start clamps at the existing `max(0, ...)` floor; clamping is
+documented behavior, never an error. Late dates and floats stay signed as
+before.
+
+Cycles: any directed cycle in the predecessor→successor multigraph is rejected
+regardless of link type (stricter than P6, and deterministic). Links are unique
+on `(predecessor, successor, type)`; multiple different-type links between the
+same pair are legal.
+
+Progress and the data date compose per type: a complete predecessor contributes
+its type-appropriate actual anchor — the actual start for SS/SF, the actual
+finish for FS/FF — plus lag, maxed with the data-date instant. Incomplete-work
+bounds and retained logic are unchanged, and SNET/FNLT still compose via
+max/min. Dependencies remain leaf-only, so summary rollups are unchanged.
+
+The critical-path driving condition generalizes on the same offset arrays: a
+predecessor `p` drives the current leaf `s` when
+
+```text
+FS: EF(p) + lag == remaining_start(s)
+SS: ES(p) + lag == remaining_start(s)
+FF: EF(p) + lag == EF(s)
+SF: ES(p) + lag == EF(s)
+```
+
+Lexical tie-breaks and the negative-float path rules are unchanged. Boundary
+aliasing is intentional: an `SS+0` link starts the successor at the
+predecessor's day-start instant, an `FF+0` link (and an `FF+0`/`FS+0`
+milestone) lands on the predecessor's day-finish instant, and prior-day finish
+instants are preserved rather than aliased to schedule start.
 
 A leaf may have optional job-local civil-date `startNoEarlierThan` (SNET) and
 `finishNoLaterThan` (FNLT) constraints. Constraints are supplied separately to
@@ -148,24 +203,30 @@ Scheduling retains the remaining work:
 
 - Remaining duration is `duration - floor(duration * percent / 100)`.
 - Every incomplete leaf's remaining work starts no earlier than the data-date
-  instant and still honors predecessor finishes plus lag and its own SNET.
+  instant and still honors each predecessor's type-appropriate anchor plus lag
+  and its own SNET.
 - A complete leaf anchors its early and late instants at the normalized actuals,
   ignores SNET, evaluates its FNLT violation against the actual finish, reports
   total float 0, is never critical, and is excluded from the primary driving
-  path. A successor of a complete predecessor takes `max(actual finish + lag,
-  data-date instant)` as that predecessor's finish-to-start lower bound.
+  path. A successor of a complete predecessor takes `max(anchor + lag, data-date
+  instant)` as that predecessor's lower bound, where the anchor is the actual
+  finish for FS/FF and the actual start for SS/SF.
 - An in-progress leaf reports its early start at the normalized actual start and
   its early finish at the end of remaining work scheduled from `max(data-date
-  instant, predecessor early finishes + lag, SNET)`. The backward pass and float
+  instant, driving predecessor anchors + lag, SNET)`. The backward pass and float
   are computed over remaining work; negative-float and FNLT reporting are
   otherwise unchanged. Float is measured from the remaining-work start, which is
   not surfaced as a date, so consumers must not derive float by differencing the
-  reported early and late starts.
+  reported early and late starts. Because a started leaf's start is an immovable
+  actual, an SS or SF successor imposes no late-date bound back through it; only
+  FS and FF successors (which anchor on the started leaf's finish) do.
 - The project finish that anchors the backward pass is the latest early finish
   over incomplete leaves, falling back to the latest actual finish only when
   every leaf is complete.
-- The driving path traces incomplete leaves only. When every leaf is complete
-  the path is empty.
+- The driving path traces incomplete leaves only, starting from the lexically
+  first incomplete leaf that finishes the project with zero float (a driving
+  leaf may still have incomplete successors under SS/FF/SF). It is empty only
+  when every leaf is complete.
 
 Schedule start no longer bounds the projection: a complete leaf whose actuals
 fall before schedule start reports an early start before the schedule-start
@@ -208,11 +269,23 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 | Summary over complete `A(480)` and not-started `B(480)` beside a long chain | The summary reports B's 2400 float; an all-complete summary reports zero float and is not critical. |
 | Complete `A` with equal Saturday actuals under a Monday-Friday calendar | Normalization inverts the civil window and returns `progress_normalized_order`. |
 | Data date before schedule start | It clamps to the first working day's start. |
+| `A(480) =SS+0=> B(480)` | B starts Monday alongside A; SS+480 pushes B to Tuesday. |
+| `A =FS+0=> B(480)`, `B =SS-480=> C(480)` | B starts Tuesday; SS-480 pulls C back to Monday; `A =SS-480=> C` clamps C at Monday. |
+| `A(960) =FF+0=> B(480)` | B finishes Tuesday 16:00 with A; FF+480 moves B's finish to Wednesday. |
+| `A(480) =SF+960=> B(480)` | EF(B) reaches Tuesday 16:00, so B runs Tuesday. |
+| `A(480)` with FS/SS/FF/SF+0 milestones | FS and FF milestones land Monday 16:00; SS and SF milestones land Monday 08:00. |
+| `A(480) =SS+0=> B(480)` | Driving path is `A, B`; `A(960) =FF+0=> B(480)` also drives `A, B`. |
+| `A(960) =SS+0=> B(480)` (also `FF-480`, `SF+0`) | A finishes the project while B stays open; the driving path is `A`. |
+| `Z(480) =FS=> A(960) =SS+0=> B(480)` | The path walks the project-finishing branch: `Z, A`. |
+| `A(480) =SS+480=> B(480)` with FNLT Monday on B | B has -480 float, is directly violated, and the negative-float path is `A, B`. |
+| Complete `A(480)` Monday, data date Monday | An FS successor resumes Tuesday; an SS successor resumes Monday. |
+| Different-type `SS+0` and `FF+0` between `A(960)` and `B(480)` | Both links apply: the binding FF pulls B's finish to A's Tuesday finish, so B runs Tuesday. |
+| Duplicate `SS` link on the same pair | Calculation returns `dependency_duplicate`. |
+| `A =SS=> B`, `B =FF=> A` | Calculation returns `dependency_cycle`. |
 
 ## Deferred semantics
 
-SS, FF, and SF links; negative lag; manual scheduling; dated calendar
-exceptions; baselines; progress persistence columns and read-model projection;
-multiple daily intervals; and resource calendars are outside this slice.
-Unsupported inputs must be rejected by the adapter that introduces them, never
-partially interpreted.
+Manual scheduling, dated calendar exceptions, multiple daily intervals, resource
+calendars, and schedule explanations are outside this slice. Unsupported inputs
+must be rejected by the adapter that introduces them, never partially
+interpreted.

@@ -49,11 +49,58 @@ pub struct ScheduleTask {
     pub duration_minutes: Option<i64>,
 }
 
+/// The four dependency relationship types. Serialized as the two-letter codes
+/// `FS`, `SS`, `FF`, `SF`. The declaration order is the deterministic tie-break
+/// order for edges that share a predecessor/successor pair.
+#[derive(
+    Clone, Copy, Debug, Default, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize,
+)]
+pub enum DependencyType {
+    #[default]
+    #[serde(rename = "FS")]
+    FinishStart,
+    #[serde(rename = "SS")]
+    StartStart,
+    #[serde(rename = "FF")]
+    FinishFinish,
+    #[serde(rename = "SF")]
+    StartFinish,
+}
+
+impl DependencyType {
+    /// The canonical two-letter code used in persistence and JSON.
+    pub fn as_code(self) -> &'static str {
+        match self {
+            Self::FinishStart => "FS",
+            Self::StartStart => "SS",
+            Self::FinishFinish => "FF",
+            Self::StartFinish => "SF",
+        }
+    }
+
+    /// Parses a canonical two-letter code, returning `None` for anything else.
+    pub fn from_code(code: &str) -> Option<Self> {
+        match code {
+            "FS" => Some(Self::FinishStart),
+            "SS" => Some(Self::StartStart),
+            "FF" => Some(Self::FinishFinish),
+            "SF" => Some(Self::StartFinish),
+            _ => None,
+        }
+    }
+}
+
+/// A typed dependency between two leaf tasks. The name is retained for
+/// compatibility; the `dependency_type` field generalizes it to all four
+/// relationship types. An omitted type deserializes as `FS`, so FS-only inputs
+/// are byte-identical to earlier slices.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FinishStartDependency {
     pub predecessor_task_id: String,
     pub successor_task_id: String,
+    #[serde(default)]
+    pub dependency_type: DependencyType,
     pub lag_minutes: i64,
 }
 
@@ -144,7 +191,7 @@ pub enum ScheduleError {
     InvalidDependency { code: &'static str, message: String },
     #[error("{message}")]
     InvalidProgress { code: &'static str, message: String },
-    #[error("finish-to-start dependencies contain a cycle")]
+    #[error("task dependencies contain a cycle")]
     DependencyCycle { task_ids: Vec<String> },
     #[error("the calculated schedule exceeds the supported date range")]
     ScheduleOutOfRange,
@@ -228,16 +275,32 @@ pub fn calculate_schedule_with_progress(
                     .ok_or(ScheduleError::ScheduleOutOfRange)?;
             }
         }
-        for &(successor, lag) in &graph.successors[task_index] {
-            let mut contribution = early_finish[task_index]
-                .checked_add(lag)
+        for edge in &graph.successors[task_index] {
+            // FS/FF bind the successor to the predecessor finish; SS/SF bind it
+            // to the predecessor start (its actual start when progressed).
+            let anchor = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::FinishFinish => {
+                    early_finish[task_index]
+                }
+                DependencyType::StartStart | DependencyType::StartFinish => early_start[task_index],
+            };
+            let mut contribution = anchor
+                .checked_add(edge.lag)
                 .ok_or(ScheduleError::ScheduleOutOfRange)?;
             if progress.status[task_index] == ProgressStatus::Complete {
                 if let Some(data_date) = progress.data_date_offset {
                     contribution = contribution.max(data_date);
                 }
             }
-            early_bound[successor] = early_bound[successor].max(contribution);
+            // FF/SF bound the successor finish; derive its start by subtracting
+            // the successor's remaining duration.
+            let start_bound = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::StartStart => contribution,
+                DependencyType::FinishFinish | DependencyType::StartFinish => contribution
+                    .checked_sub(progress.remaining_duration[edge.other])
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+            };
+            early_bound[edge.other] = early_bound[edge.other].max(start_bound);
         }
     }
 
@@ -261,19 +324,46 @@ pub fn calculate_schedule_with_progress(
         }
         late_finish[task_index] =
             late_finish[task_index].min(constraints.finish_no_later_than[task_index]);
-        let mut earliest_successor_start = i64::MAX;
-        for &(successor, lag) in &graph.successors[task_index] {
-            if progress.status[successor] == ProgressStatus::Complete {
+        let remaining = progress.remaining_duration[task_index];
+        // Each successor imposes an upper bound on this task's late finish,
+        // mirroring the forward-pass rule per type.
+        let mut successor_bound = i64::MAX;
+        let predecessor_started = progress.status[task_index] == ProgressStatus::InProgress;
+        for edge in &graph.successors[task_index] {
+            if progress.status[edge.other] == ProgressStatus::Complete {
                 continue;
             }
-            earliest_successor_start = earliest_successor_start.min(
-                late_start[successor]
-                    .checked_sub(lag)
+            // SS/SF anchor on this (predecessor) task's start. Once it is started
+            // that start is an immovable actual, so the successor imposes no late
+            // bound through the edge — mirroring the forward-pass retained anchor.
+            if predecessor_started
+                && matches!(
+                    edge.dep_type,
+                    DependencyType::StartStart | DependencyType::StartFinish
+                )
+            {
+                continue;
+            }
+            let bound = match edge.dep_type {
+                DependencyType::FinishStart => late_start[edge.other]
+                    .checked_sub(edge.lag)
                     .ok_or(ScheduleError::ScheduleOutOfRange)?,
-            );
+                DependencyType::StartStart => late_start[edge.other]
+                    .checked_sub(edge.lag)
+                    .and_then(|value| value.checked_add(remaining))
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                DependencyType::FinishFinish => late_finish[edge.other]
+                    .checked_sub(edge.lag)
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                DependencyType::StartFinish => late_finish[edge.other]
+                    .checked_sub(edge.lag)
+                    .and_then(|value| value.checked_add(remaining))
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+            };
+            successor_bound = successor_bound.min(bound);
         }
-        if earliest_successor_start != i64::MAX {
-            late_finish[task_index] = late_finish[task_index].min(earliest_successor_start);
+        if successor_bound != i64::MAX {
+            late_finish[task_index] = late_finish[task_index].min(successor_bound);
         }
         late_start[task_index] = late_finish[task_index]
             .checked_sub(progress.remaining_duration[task_index])
@@ -322,6 +412,7 @@ pub fn calculate_schedule_with_progress(
         .collect::<Vec<_>>();
     let critical_path_indices = graph.critical_path(
         &remaining_start,
+        &early_start,
         &early_finish,
         &total_float,
         schedule_finish_offset,
@@ -1169,12 +1260,22 @@ impl ProgressSet {
     }
 }
 
+/// One directed dependency edge in the leaf graph. `other` is the leaf index at
+/// the far end (successor in a successor list, predecessor in a predecessor
+/// list); `dep_type` and `lag` carry the typed, signed relationship.
+#[derive(Clone, Copy)]
+struct Edge {
+    other: usize,
+    dep_type: DependencyType,
+    lag: i64,
+}
+
 struct LeafGraph<'a> {
     tasks: Vec<&'a ScheduleTask>,
     original_indices: Vec<usize>,
     durations: Vec<i64>,
-    predecessors: Vec<Vec<(usize, i64)>>,
-    successors: Vec<Vec<(usize, i64)>>,
+    predecessors: Vec<Vec<Edge>>,
+    successors: Vec<Vec<Edge>>,
     topological_order: Vec<usize>,
 }
 
@@ -1201,12 +1302,8 @@ impl<'a> LeafGraph<'a> {
         let mut successors = vec![Vec::new(); leaf_tasks.len()];
         let mut seen = HashSet::new();
         for dependency in dependencies {
-            if dependency.lag_minutes < 0 {
-                return Err(invalid_dependency(
-                    "dependency_lag_negative",
-                    "negative lag is not supported in the FS slice",
-                ));
-            }
+            // Signed lag is legal on every type; the forward pass clamps floored
+            // dates at schedule start rather than rejecting negative lag.
             let predecessor_original = hierarchy
                 .task_indices
                 .get(dependency.predecessor_task_id.as_str())
@@ -1249,18 +1346,31 @@ impl<'a> LeafGraph<'a> {
                     "a task cannot depend on itself",
                 ));
             }
-            if !seen.insert((predecessor, successor)) {
+            // Identity includes the type, so different-type links between the
+            // same pair are legal while an exact repeat is rejected.
+            if !seen.insert((predecessor, successor, dependency.dependency_type)) {
                 return Err(invalid_dependency(
                     "dependency_duplicate",
-                    "the finish-to-start dependency already exists",
+                    "that dependency already exists",
                 ));
             }
-            successors[predecessor].push((successor, dependency.lag_minutes));
-            predecessors[successor].push((predecessor, dependency.lag_minutes));
+            successors[predecessor].push(Edge {
+                other: successor,
+                dep_type: dependency.dependency_type,
+                lag: dependency.lag_minutes,
+            });
+            predecessors[successor].push(Edge {
+                other: predecessor,
+                dep_type: dependency.dependency_type,
+                lag: dependency.lag_minutes,
+            });
         }
         for edges in successors.iter_mut().chain(predecessors.iter_mut()) {
-            edges.sort_unstable_by(|&(left, _), &(right, _)| {
-                leaf_tasks[left].id.cmp(&leaf_tasks[right].id)
+            edges.sort_unstable_by(|left, right| {
+                leaf_tasks[left.other]
+                    .id
+                    .cmp(&leaf_tasks[right.other].id)
+                    .then_with(|| left.dep_type.cmp(&right.dep_type))
             });
         }
 
@@ -1275,8 +1385,12 @@ impl<'a> LeafGraph<'a> {
         })
     }
 
+    // The offset arrays are threaded positionally rather than bundled to keep
+    // the driving-path math close to the forward/backward passes.
+    #[allow(clippy::too_many_arguments)]
     fn critical_path(
         &self,
+        remaining_start: &[i64],
         early_start: &[i64],
         early_finish: &[i64],
         total_float: &[i64],
@@ -1284,6 +1398,23 @@ impl<'a> LeafGraph<'a> {
         directly_violated: &[usize],
         completed: &[bool],
     ) -> Vec<usize> {
+        // A predecessor drives the current leaf when its type-appropriate anchor
+        // plus lag exactly meets the current leaf's type-appropriate target.
+        let drives = |edge: &Edge, current: usize| -> bool {
+            let anchor = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::FinishFinish => {
+                    early_finish[edge.other]
+                }
+                DependencyType::StartStart | DependencyType::StartFinish => early_start[edge.other],
+            };
+            let target = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::StartStart => {
+                    remaining_start[current]
+                }
+                DependencyType::FinishFinish | DependencyType::StartFinish => early_finish[current],
+            };
+            anchor.checked_add(edge.lag) == Some(target)
+        };
         // The primary driving path traces incomplete leaves only.
         if directly_violated
             .iter()
@@ -1300,39 +1431,50 @@ impl<'a> LeafGraph<'a> {
                 })
                 .expect("non-empty directly violated task list");
             let mut path = vec![current];
-            while let Some(predecessor) =
-                self.predecessors[current].iter().find_map(|&(index, lag)| {
-                    (!completed[index]
-                        && total_float[index] == total_float[current]
-                        && early_finish[index].checked_add(lag) == Some(early_start[current]))
-                    .then_some(index)
-                })
-            {
+            while let Some(predecessor) = self.predecessors[current].iter().find_map(|edge| {
+                (!completed[edge.other]
+                    && total_float[edge.other] == total_float[current]
+                    && drives(edge, current))
+                .then_some(edge.other)
+            }) {
                 path.push(predecessor);
                 current = predecessor;
             }
             path.reverse();
             return path;
         }
+        // A terminal driving leaf is an incomplete leaf that finishes the project
+        // with zero float. Under SS/FF/SF such a leaf can still have incomplete
+        // successors, so there is no "successors complete" filter; instead a
+        // candidate that drives a deeper candidate is excluded so the deepest
+        // wins, then lexical order breaks ties. The drives relation is acyclic,
+        // so a sink candidate always exists when any candidate does.
+        let is_terminal_candidate = |index: usize| {
+            !completed[index] && total_float[index] == 0 && early_finish[index] == schedule_finish
+        };
         let Some(mut current) = (0..self.tasks.len())
+            .filter(|&index| is_terminal_candidate(index))
             .filter(|&index| {
-                !completed[index]
-                    && self.successors[index]
-                        .iter()
-                        .all(|&(successor, _)| completed[successor])
-                    && total_float[index] == 0
-                    && early_finish[index] == schedule_finish
+                !self.successors[index].iter().any(|edge| {
+                    is_terminal_candidate(edge.other)
+                        && drives(
+                            &Edge {
+                                other: index,
+                                dep_type: edge.dep_type,
+                                lag: edge.lag,
+                            },
+                            edge.other,
+                        )
+                })
             })
             .min_by(|&left, &right| self.tasks[left].id.cmp(&self.tasks[right].id))
         else {
             return Vec::new();
         };
         let mut path = vec![current];
-        while let Some(predecessor) = self.predecessors[current].iter().find_map(|&(index, lag)| {
-            (!completed[index]
-                && total_float[index] == 0
-                && early_finish[index].checked_add(lag) == Some(early_start[current]))
-            .then_some(index)
+        while let Some(predecessor) = self.predecessors[current].iter().find_map(|edge| {
+            (!completed[edge.other] && total_float[edge.other] == 0 && drives(edge, current))
+                .then_some(edge.other)
         }) {
             path.push(predecessor);
             current = predecessor;
@@ -1344,9 +1486,11 @@ impl<'a> LeafGraph<'a> {
 
 fn topological_order(
     tasks: &[&ScheduleTask],
-    successors: &[Vec<(usize, i64)>],
-    predecessors: &[Vec<(usize, i64)>],
+    successors: &[Vec<Edge>],
+    predecessors: &[Vec<Edge>],
 ) -> Result<Vec<usize>, ScheduleError> {
+    // Any directed cycle is rejected regardless of link type: each parallel edge
+    // counts toward the in-degree, so the multigraph resolves like a simple one.
     let mut remaining_predecessors = predecessors.iter().map(Vec::len).collect::<Vec<_>>();
     let mut ready = remaining_predecessors
         .iter()
@@ -1357,10 +1501,10 @@ fn topological_order(
     let mut order = Vec::with_capacity(tasks.len());
     while let Some((_, index)) = ready.pop_first() {
         order.push(index);
-        for &(successor, _) in &successors[index] {
-            remaining_predecessors[successor] -= 1;
-            if remaining_predecessors[successor] == 0 {
-                ready.insert((tasks[successor].id.clone(), successor));
+        for edge in &successors[index] {
+            remaining_predecessors[edge.other] -= 1;
+            if remaining_predecessors[edge.other] == 0 {
+                ready.insert((tasks[edge.other].id.clone(), edge.other));
             }
         }
     }
