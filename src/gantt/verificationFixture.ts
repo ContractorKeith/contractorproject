@@ -85,6 +85,15 @@ export function createGanttVerificationReadModel(): GanttReadModel {
           return { taskId: priorId, dependencyType: "FF", lagMinutes: -60 };
         if (task === 6)
           return { taskId: priorId, dependencyType: "SF", lagMinutes: 240 };
+        // A deliberately leftward link: the predecessor is a later-day activity,
+        // so an FF anchor puts the successor finish LEFT of the predecessor finish
+        // and the elbow path routes backward. Exercises finite reversed geometry.
+        if (task === 8)
+          return {
+            taskId: `${summaryId}-task-12`,
+            dependencyType: "FF",
+            lagMinutes: -240,
+          };
         return { taskId: priorId, dependencyType: "FS", lagMinutes: 0 };
       };
       const predecessors: GanttPredecessorLink[] =

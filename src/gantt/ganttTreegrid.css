@@ -236,10 +236,10 @@
   pointer-events: none;
 }
 
-/* WBS strings ("10.99" worst case) measure well under this share (content ~17px
-   in the old 43px cell); the reclaimed width funds the Predecessors column. */
+/* Sized (with the tighter space-1 inline padding below) so no mounted WBS cell
+   clips at the default layout; "1.10"/"1.40"-style strings fit under system-ui. */
 .gantt-treegrid__wbs-column {
-  width: 5%;
+  width: 6%;
 }
 
 /* Name is the primary reading column, so it keeps a usable width; the date facts
@@ -254,8 +254,10 @@
   width: 12%;
 }
 
+/* The % Done cell stacks a short "NN%" over a status word that wraps freely, so
+   it yields a point to the annotated Predecessors column. */
 .gantt-treegrid__progress-column {
-  width: 7%;
+  width: 6%;
 }
 
 /* Float keeps 15%; the stacked "Constraint / violated" fact needs it. */
@@ -292,7 +294,8 @@
    rule off them; keeps Start and Finish at padding parity. */
 .gantt-treegrid td:has(.gantt-treegrid__date),
 .gantt-treegrid td:has(.gantt-treegrid__duration),
-.gantt-treegrid td:has(.gantt-treegrid__predecessors) {
+.gantt-treegrid td:has(.gantt-treegrid__predecessors),
+.gantt-treegrid :is(th, td):first-child {
   padding-inline: var(--space-1);
 }
 
@@ -334,6 +337,13 @@
 
 .gantt-treegrid__summary-row > :is(th, td) {
   color: var(--summary-text);
+}
+
+/* Hierarchy emphasis (heading family + weight) stays on the Name cell only. The
+   date/number cells keep the body weight so a summary's Start/Finish facts hold
+   their >=5% width headroom at the 21% date columns (weight 600 was the widest
+   instance and clipped the bar at the 460px minimum layout). */
+.gantt-treegrid__summary-row > th[role="rowheader"] {
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
 }
@@ -483,30 +493,31 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Predecessor links stack one per line and stretch to the row track, mirroring
-   the baseline facts. Long task ids break within a line so nothing overflows. */
+/* Predecessor links flow comma-separated and wrap as one block, stretched to the
+   row track. The inline flow (vs one-per-line) keeps a two-link cell to ~3 lines
+   instead of 4 so it holds >=2 spare track lines at the compact 54px wide-screen
+   row. Long task ids break within a line so nothing overflows horizontally. */
 .gantt-treegrid__predecessors {
   display: grid;
-  gap: 1px;
   align-content: center;
   height: 100%;
   min-height: 36px;
   color: var(--color-neutral-700);
-  font-size: 9px;
-  /* Tighter than the 12px facts so the fixed row seats an extra track line,
-     buying vertical headroom for wider fallback/Linux glyph metrics. */
-  line-height: 11px;
+  /* Heading family so the wide-font stress protocol (which swaps --font-heading)
+     actually covers this cell instead of leaving it on the body font. */
+  font-family: var(--font-heading);
+  /* 8px/9px keeps a two-link cell of long ids to ~4 wrapped lines and seats 6-7
+     track lines in the compact 54-64px rows, so it holds >=2 spare lines (with
+     margin for wider Linux glyph metrics) at both stress layouts. */
+  font-size: 8px;
+  line-height: 9px;
   text-align: right;
   white-space: normal;
-  /* break-word (not anywhere) prefers natural break points — spaces and the
-     hyphens in task ids — so a wrapped line stops short of the content box and
-     keeps real horizontal headroom instead of filling to the sub-pixel edge. */
-  overflow-wrap: break-word;
+  /* anywhere packs each line greedily (fewest wrapped lines, so multi-link cells
+     keep spare track lines); horizontal clipping is guarded by the integer
+     scrollWidth in the fit test, not the sub-pixel range-rect width. */
+  overflow-wrap: anywhere;
   font-variant-numeric: tabular-nums;
-}
-
-.gantt-treegrid__predecessor-link {
-  min-width: 0;
 }
 
 .gantt-treegrid__progress {

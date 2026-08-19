@@ -375,8 +375,12 @@ function TimelineRow({
           dayWidth,
         );
         const successorX = successorAtStart ? x : finishX;
-        const dependencyId = `${predecessorId}->${row.taskId}`;
-        const critical = criticalEdges.has(dependencyId);
+        // The link node id carries the type so parallel different-type links
+        // between the same pair are addressable. Critical highlighting stays
+        // pair-keyed: criticalPath carries no type (see GANTT_READ_MODEL.md).
+        const pairId = `${predecessorId}->${row.taskId}`;
+        const dependencyId = `${pairId}:${link.dependencyType}`;
+        const critical = criticalEdges.has(pairId);
         const active = hoveredTaskId === predecessorId || hoveredTaskId === row.taskId;
         return (
           <path

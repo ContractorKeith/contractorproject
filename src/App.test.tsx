@@ -742,6 +742,85 @@ describe("job workspace", () => {
     );
   });
 
+  it("rejects a non-integer lag client-side without calling the store", async () => {
+    const user = userEvent.setup();
+    const job = { ...fixtureJob(), version: 3, calendar: defaultCalendar() };
+    const first = fixtureTask(job, "first", null, "Excavate", 0, 1);
+    const second = fixtureTask(job, "second", null, "Inspection", 1, 1);
+    const hierarchy = {
+      jobId: job.id,
+      jobVersion: 3,
+      tasks: [first, second],
+      dependencies: [],
+    };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue(hierarchy),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      addDependency: vi.fn(),
+      removeDependency: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+    );
+    await user.selectOptions(screen.getByLabelText("Dependency predecessor"), first.id);
+    await user.selectOptions(screen.getByLabelText("Dependency successor"), second.id);
+    // A decimal (or any non-integer that would reach NaN, like a bare "-") must be
+    // rejected client-side rather than sent to the store.
+    await user.clear(screen.getByLabelText("Dependency lag minutes"));
+    await user.type(screen.getByLabelText("Dependency lag minutes"), "1.5");
+    await user.click(screen.getByRole("button", { name: "Add dependency" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /whole number of minutes/i,
+    );
+    expect(client.addDependency).not.toHaveBeenCalled();
+  });
+
+  it("surfaces a typed dependency rejection from the server path", async () => {
+    const user = userEvent.setup();
+    const job = { ...fixtureJob(), version: 3, calendar: defaultCalendar() };
+    const first = fixtureTask(job, "first", null, "Excavate", 0, 1);
+    const second = fixtureTask(job, "second", null, "Inspection", 1, 1);
+    const hierarchy = {
+      jobId: job.id,
+      jobVersion: 3,
+      tasks: [first, second],
+      dependencies: [],
+    };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue(hierarchy),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      addDependency: vi
+        .fn()
+        .mockRejectedValue({ message: "dependency_cycle", kind: "validation" }),
+      removeDependency: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+    );
+    await user.selectOptions(screen.getByLabelText("Dependency predecessor"), first.id);
+    await user.selectOptions(screen.getByLabelText("Dependency successor"), second.id);
+    await user.selectOptions(screen.getByLabelText("Dependency type"), "SF");
+    await user.click(screen.getByRole("button", { name: "Add dependency" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("dependency_cycle");
+    expect(client.addDependency).toHaveBeenCalledWith(
+      expect.objectContaining({ dependencyType: "SF", lagMinutes: 0 }),
+    );
+  });
+
   it("preserves stale schedule input and exposes an explicit refresh path", async () => {
     const user = userEvent.setup();
     const job = { ...fixtureJob(), version: 3, calendar: defaultCalendar() };

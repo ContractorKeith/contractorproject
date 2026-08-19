@@ -1729,9 +1729,10 @@ function DependencyControls({
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setMessage(null);
-    // Reject a non-integer lag client-side so a decimal never reaches the store.
-    // Lag is signed working minutes; the store bounds the magnitude.
-    if (lagMinutes.trim() !== "" && lagMinutes.trim() !== "-") {
+    // Reject a non-integer lag client-side so a decimal — or a bare "-" that
+    // would coerce to NaN — never reaches the store. Lag is signed working
+    // minutes; the store bounds the magnitude.
+    if (lagMinutes.trim() !== "") {
       const parsed = Number(lagMinutes);
       if (!Number.isInteger(parsed) || Math.abs(parsed) > 10_000_000) {
         setMessage("Lag must be a whole number of minutes within ±10,000,000.");
@@ -1752,7 +1753,7 @@ function DependencyControls({
   return (
     <section
       className="dependency-controls"
-      aria-label="Finish-to-start dependencies"
+      aria-label="Task dependencies"
     >
       <form onSubmit={submit}>
         <label>

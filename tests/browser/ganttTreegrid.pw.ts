@@ -127,6 +127,16 @@ test("announces visible constraint values and direct violations without color-on
     expect(currentFit.widthHeadroom, `schedule-current width headroom @${width}`).toBeGreaterThanOrEqual(0.05);
     expect(currentFit.lineCount, `schedule-current vertical fit @${width}`).toBeLessThanOrEqual(currentFit.trackLines);
 
+    // Summary rows render the heaviest Start/Finish weight, so measure the
+    // summary Start fact too: hierarchy emphasis now lives on the Name cell only,
+    // so the summary date fact keeps the same >=5% single-line width headroom.
+    const summaryCurrent = await measure(
+      page.locator('tr[data-task-id="phase-1"] [data-testid="schedule-current"]').nth(0),
+    );
+    console.log(`FACT_FIT ${width} summary-current ${JSON.stringify(summaryCurrent)}`);
+    expect(summaryCurrent.widthHeadroom, `summary schedule-current width headroom @${width}`).toBeGreaterThanOrEqual(0.05);
+    expect(summaryCurrent.lineCount, `summary schedule-current vertical fit @${width}`).toBeLessThanOrEqual(summaryCurrent.trackLines);
+
     // Constraint facts (single line each) must remain visible and unclipped.
     const factDimensions = await visibleFacts.evaluateAll((elements) => elements.map((element) => ({
       fact: element.getAttribute("data-testid") ?? element.className,
@@ -419,7 +429,7 @@ test("clips a long-distance predecessor path into the mounted successor window",
     const rowHeight = Number.parseFloat(getComputedStyle(element).getPropertyValue("--row-h"));
     element.scrollTop = rowHeight * 42;
   });
-  await expect(page.locator('[data-dependency="phase-1-task-1->phase-1-task-51"]')).toHaveCount(1);
+  await expect(page.locator('[data-dependency="phase-1-task-1->phase-1-task-51:FS"]')).toHaveCount(1);
   await expect(page.locator('tr[data-task-id="phase-1-task-1"]')).toHaveCount(0);
 });
 
@@ -438,10 +448,10 @@ test("keeps the work breakdown pinned and emphasizes hovered task dependencies",
   expect(Math.abs((pinned.tableLeft ?? 0) - pinned.scrollportLeft)).toBeLessThanOrEqual(1.1);
 
   await page.locator('tr[data-task-id="phase-1-task-2"]').hover();
-  await expect(page.locator('[data-dependency="phase-1-task-1->phase-1-task-2"]')).toHaveClass(
+  await expect(page.locator('[data-dependency="phase-1-task-1->phase-1-task-2:FS"]')).toHaveClass(
     /gantt-timeline__dependency--active/,
   );
-  await expect(page.locator('[data-dependency="phase-1-task-3->phase-1-task-4"]')).toHaveClass(
+  await expect(page.locator('[data-dependency="phase-1-task-3->phase-1-task-4:FS"]')).toHaveClass(
     /gantt-timeline__dependency--muted/,
   );
 });
@@ -562,18 +572,11 @@ test("renders typed predecessor annotations with accessible names and stays acce
   // A plain FS+0 link drops the lag text entirely.
   await expect(page.getByTestId("predecessors-phase-1-task-2")).toHaveText(/^phase-1-task-1 FS$/);
 
-  // Fit discipline: the annotated Predecessors cell must not overflow horizontally
-  // and keeps at least one spare vertical track line at both layouts.
-  for (const width of [1100, 760]) {
-    await page.setViewportSize({ width, height: 700 });
-    if (width === 760) {
-      await page.getByTestId("gantt-scrollport").evaluate((scrollport) => {
-        const schedule = scrollport.closest<HTMLElement>(".gantt-schedule");
-        if (!schedule) throw new Error("Schedule surface is missing");
-        schedule.style.width = "724px";
-      });
-    }
-    const fit = await page.getByTestId("predecessors-phase-1-task-2").evaluate((element) => {
+  // Fit discipline: measure the WIDEST predecessor cells — the SF +240 single
+  // link (phase-1-task-7) and the two-link cell (phase-1-task-11) — at both
+  // layouts. Each must not clip horizontally and must keep >=2 spare track lines.
+  const measurePred = (testId: string) =>
+    page.getByTestId(testId).evaluate((element) => {
       const line = parseFloat(getComputedStyle(element).lineHeight) || element.clientHeight;
       const range = document.createRange();
       range.selectNodeContents(element);
@@ -592,15 +595,27 @@ test("renders typed predecessor annotations with accessible names and stays acce
         spareLines: trackLines - lineCount,
       };
     });
-    console.log(`PRED_FIT ${width} ${JSON.stringify(fit)}`);
-    // Greedy wrapping fills the line box, so the range-rect width can round a
-    // sub-pixel over the floored clientWidth without a real overflow; the honest
-    // clip guard is the integer scrollWidth (as the constraint facts use) plus,
-    // for wrapping cells, vertical spare track lines.
-    expect(fit.scrollWidth, `predecessors horizontal clip @${width}`).toBeLessThanOrEqual(fit.clientWidth);
-    // >=2 spare track lines locally so a wider Linux glyph set (which inflated
-    // the annotation by ~1 line in CI) still leaves at least one spare line.
-    expect(fit.spareLines, `predecessors spare lines @${width}`).toBeGreaterThanOrEqual(2);
+  for (const width of [1100, 760]) {
+    await page.setViewportSize({ width, height: 700 });
+    if (width === 760) {
+      await page.getByTestId("gantt-scrollport").evaluate((scrollport) => {
+        const schedule = scrollport.closest<HTMLElement>(".gantt-schedule");
+        if (!schedule) throw new Error("Schedule surface is missing");
+        schedule.style.width = "724px";
+      });
+    }
+    for (const testId of ["predecessors-phase-1-task-7", "predecessors-phase-1-task-11"]) {
+      const fit = await measurePred(testId);
+      console.log(`PRED_FIT ${width} ${testId} ${JSON.stringify(fit)}`);
+      // Greedy wrapping fills the line box, so the range-rect width can round a
+      // sub-pixel over the floored clientWidth without a real overflow; the honest
+      // clip guard is the integer scrollWidth (as the constraint facts use) plus,
+      // for wrapping cells, vertical spare track lines.
+      expect(fit.scrollWidth, `${testId} horizontal clip @${width}`).toBeLessThanOrEqual(fit.clientWidth);
+      // >=2 spare track lines locally so a wider Linux glyph set (which inflated
+      // the annotation by ~1 line in CI) still leaves at least one spare line.
+      expect(fit.spareLines, `${testId} spare lines @${width}`).toBeGreaterThanOrEqual(2);
+    }
   }
   await page.setViewportSize({ width: 1100, height: 700 });
 
@@ -621,20 +636,31 @@ test("draws type-aware dependency-line anchors for SS, FF, and SF links", async 
     };
     const link = (dependency: string) => {
       const path = document.querySelector<SVGPathElement>(`[data-dependency="${dependency}"]`)!;
+      const totalLength = path.getTotalLength();
       const start = path.getPointAtLength(0);
-      const end = path.getPointAtLength(path.getTotalLength());
+      const end = path.getPointAtLength(totalLength);
       return {
         predecessorAnchor: path.dataset.predecessorAnchor,
         successorAnchor: path.dataset.successorAnchor,
         type: path.dataset.dependencyType,
         startX: start.x,
         endX: end.x,
+        totalLength,
+        d: path.getAttribute("d") ?? "",
       };
     };
     return {
-      ss: { link: link("phase-1-task-4->phase-1-task-5"), pred: bar("phase-1-task-4"), succ: bar("phase-1-task-5") },
-      ff: { link: link("phase-1-task-5->phase-1-task-6"), pred: bar("phase-1-task-5"), succ: bar("phase-1-task-6") },
-      sf: { link: link("phase-1-task-6->phase-1-task-7"), pred: bar("phase-1-task-6"), succ: bar("phase-1-task-7") },
+      ss: { link: link("phase-1-task-4->phase-1-task-5:SS"), pred: bar("phase-1-task-4"), succ: bar("phase-1-task-5") },
+      ff: { link: link("phase-1-task-5->phase-1-task-6:FF"), pred: bar("phase-1-task-5"), succ: bar("phase-1-task-6") },
+      sf: { link: link("phase-1-task-6->phase-1-task-7:SF"), pred: bar("phase-1-task-6"), succ: bar("phase-1-task-7") },
+      // A leftward link (predecessor phase-1-task-12 is a later-day activity, so
+      // the FF successor finish lands left of the predecessor finish). The elbow
+      // routes backward and must still render finitely.
+      leftward: {
+        link: link("phase-1-task-12->phase-1-task-9:FF"),
+        pred: bar("phase-1-task-12"),
+        succ: bar("phase-1-task-9"),
+      },
     };
   });
 
@@ -658,4 +684,14 @@ test("draws type-aware dependency-line anchors for SS, FF, and SF links", async 
   expect(geometry.sf.link.successorAnchor).toBe("finish");
   expect(geometry.sf.link.startX).toBeCloseTo(geometry.sf.pred.left, 0);
   expect(geometry.sf.link.endX).toBeCloseTo(geometry.sf.succ.right, 0);
+
+  // Leftward FF link: successor finish anchor sits left of the predecessor finish
+  // anchor, so the elbow routes backward. The path must render with finite length.
+  expect(geometry.leftward.link.type).toBe("FF");
+  expect(geometry.leftward.link.endX).toBeLessThan(geometry.leftward.link.startX);
+  expect(geometry.leftward.link.startX).toBeCloseTo(geometry.leftward.pred.right, 0);
+  expect(geometry.leftward.link.endX).toBeCloseTo(geometry.leftward.succ.right, 0);
+  expect(Number.isFinite(geometry.leftward.link.totalLength)).toBe(true);
+  expect(geometry.leftward.link.totalLength).toBeGreaterThan(0);
+  expect(geometry.leftward.link.d).not.toMatch(/NaN|Infinity/);
 });

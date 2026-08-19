@@ -234,11 +234,11 @@ describe("GanttTreegrid", () => {
     const milestoneCenter = Number(milestone.getAttribute("y")) + Number(milestone.getAttribute("height")) / 2;
     const rotatedMilestoneBottom = milestoneCenter + Math.sqrt(50);
     expect(rotatedMilestoneBottom).toBeLessThan(Number(milestoneBaseline.getAttribute("y")));
-    const tightDependency = timeline.querySelector<SVGPathElement>('[data-dependency="task-a->task-c"]')!;
+    const tightDependency = timeline.querySelector<SVGPathElement>('[data-dependency="task-a->task-c:FS"]')!;
     expect(tightDependency).toBeInTheDocument();
     expect(Number(tightDependency.dataset.approachX)).toBeLessThan(Number(tightDependency.dataset.finishX));
     expect(tightDependency.getAttribute("d")).toMatch(/Q .* H /);
-    expect(timeline.querySelector('[data-dependency="task-b->task-c"]')).toBeInTheDocument();
+    expect(timeline.querySelector('[data-dependency="task-b->task-c:FF"]')).toBeInTheDocument();
   });
 
   it("draws proportional progress fill and an accessible data-date marker", () => {

@@ -68,6 +68,12 @@ Each row exposes:
   appear. React renders these facts and derives no geometry math from them
   beyond choosing the anchor edge per type. Contract v4 exposed a bare
   `predecessorIds: string[]`; v5 replaces it with the `predecessors` object list.
+  The timeline gives each link node a type-qualified id
+  (`<predecessor>-><successor>:<type>`), but critical-line highlighting is keyed
+  on the `(predecessor, successor)` pair because `criticalPath` carries no link
+  type. A non-driving parallel link between two critical tasks therefore renders
+  as critical too — a known limitation pending a typed-critical-edges contract
+  bump.
 - an optional baseline comparison with baseline start/finish/duration and
   signed start/finish/duration variance minutes derived by Rust from the current
   and baseline values. `durationVarianceMinutes` is the current row duration

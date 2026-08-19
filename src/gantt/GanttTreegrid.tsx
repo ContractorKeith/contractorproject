@@ -636,21 +636,16 @@ function FloatValue({ row }: { row: GanttRow }) {
 
 // The Predecessors cell always renders explicit per-link annotations so a bare
 // id can never be mistaken for FS+0. Each link reads "T2 SS +120 min" (the lag
-// text is dropped at zero: "T2 FS"). Links wrap in reading order.
+// text is dropped at zero: "T2 FS"). Links flow comma-separated and wrap in
+// reading order; the inline flow keeps multi-link cells compact enough to hold
+// spare vertical track lines at the compact wide-screen row height.
 function PredecessorValue({ row }: { row: GanttRow }) {
   if (row.predecessors.length === 0) {
     return <span data-testid={`predecessors-${row.taskId}`}>None</span>;
   }
   return (
     <span className="gantt-treegrid__predecessors" data-testid={`predecessors-${row.taskId}`}>
-      {row.predecessors.map((link) => (
-        <span
-          className="gantt-treegrid__predecessor-link"
-          key={`${link.taskId}-${link.dependencyType}`}
-        >
-          {predecessorAnnotation(link)}
-        </span>
-      ))}
+      {row.predecessors.map(predecessorAnnotation).join(", ")}
     </span>
   );
 }

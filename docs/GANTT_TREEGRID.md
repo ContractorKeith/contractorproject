@@ -4,7 +4,7 @@ Status: implemented
 Updated: 2026-08-19
 
 `src/gantt/GanttTreegrid.tsx` is the authoritative work-breakdown surface for
-Gantt read-model contract v3. It renders a native HTML table with
+Gantt read-model contract v5. It renders a native HTML table with
 `role="treegrid"` and uses TanStack Virtual to mount only the visible task rows
 plus overscan. The implemented supplemental SVG timeline remains a separate
 renderer and introduces no schedule facts that are absent from this table, with

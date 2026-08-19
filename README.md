@@ -19,8 +19,9 @@ Status: v0.1 persisted scheduled-job tracer
 - [Packaged Gantt platform verification](docs/GANTT_PLATFORM_VERIFICATION.md)
 
 The Tauri desktop app now creates and edits a persisted work breakdown, stores
-weekly-calendar and finish-to-start schedule inputs, computes the deterministic
-schedule in Rust, and renders the production Gantt in the normal job workflow.
+weekly-calendar inputs and typed dependencies (FS, SS, FF, and SF with signed
+lag), computes the deterministic schedule in Rust, and renders the production
+Gantt in the normal job workflow.
 The same projection is reproduced after reopening the SQLite database.
 
 ## Development

@@ -26,7 +26,7 @@ A contractor can create a job, build a hierarchical work plan, connect task depe
 
 - Job-centric organization
 - Hierarchical tasks and summary tasks
-- Finish-to-start dependencies for the first complete slice; additional dependency types before v1 release
+- All four dependency types (FS, SS, FF, SF) with signed lag
 - Deterministic scheduling, float, and critical path
 - Gantt view with baseline and variance
 - Basic resource and crew assignment
