@@ -5,6 +5,7 @@ import { BrandMark } from "./components/BrandMark";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
+  Baseline,
   CalendarWeekday,
   Job,
   Task,
@@ -512,6 +513,13 @@ function TaskPanel({
         onJobChange={onJobChange}
       />
       <ScheduleSettings
+        job={job}
+        hierarchy={state.hierarchy}
+        client={client}
+        onHierarchyChange={onHierarchyChange}
+        onJobChange={onJobChange}
+      />
+      <BaselineSettings
         job={job}
         hierarchy={state.hierarchy}
         client={client}
@@ -1220,17 +1228,37 @@ function ScheduleSettings({
   const [dataDateBaseVersion, setDataDateBaseVersion] = useState<number | null>(
     null,
   );
+  // The persisted values a dirty draft was based on. When a sibling command (a
+  // baseline create/switch) bumps the job version without touching schedule
+  // inputs, we silently rebase the draft instead of raising a phantom conflict;
+  // a genuinely changed persisted input still raises it.
+  const scheduleBaseRef = useRef<{ start: string; calendar: WorkingCalendar } | null>(null);
+  const dataDateBaseRef = useRef<{ value: string } | null>(null);
   useEffect(() => {
     if (baseVersion === null) {
       setStart(job.scheduleStart ?? "");
       setCalendar(job.calendar ?? DEFAULT_CALENDAR);
     } else if (hierarchy.jobVersion !== baseVersion) {
-      setConflict(true);
+      const base = scheduleBaseRef.current;
+      if (
+        base !== null &&
+        base.start === (job.scheduleStart ?? "") &&
+        calendarsEqual(base.calendar, job.calendar ?? DEFAULT_CALENDAR)
+      ) {
+        setBaseVersion(hierarchy.jobVersion);
+      } else {
+        setConflict(true);
+      }
     }
     if (dataDateBaseVersion === null) {
       setDataDate(job.dataDate ?? "");
     } else if (hierarchy.jobVersion !== dataDateBaseVersion) {
-      setConflict(true);
+      const base = dataDateBaseRef.current;
+      if (base !== null && base.value === (job.dataDate ?? "")) {
+        setDataDateBaseVersion(hierarchy.jobVersion);
+      } else {
+        setConflict(true);
+      }
     }
   }, [
     baseVersion,
@@ -1268,7 +1296,15 @@ function ScheduleSettings({
     }
   }
   const markDirty = () =>
-    setBaseVersion((current) => current ?? hierarchy.jobVersion);
+    setBaseVersion((current) => {
+      if (current === null) {
+        scheduleBaseRef.current = {
+          start: job.scheduleStart ?? "",
+          calendar: job.calendar ?? DEFAULT_CALENDAR,
+        };
+      }
+      return current ?? hierarchy.jobVersion;
+    });
   const refresh = async () => {
     setSaving(true);
     setMessage(null);
@@ -1278,10 +1314,17 @@ function ScheduleSettings({
       onJobChange(snapshot.job);
       onHierarchyChange(refreshedHierarchy);
       setBaseVersion(refreshedHierarchy.jobVersion);
+      // Re-baseline the persisted refs too, or the next sibling version bump
+      // rebases against stale values and re-raises a phantom conflict.
+      scheduleBaseRef.current = {
+        start: snapshot.job.scheduleStart ?? "",
+        calendar: snapshot.job.calendar ?? DEFAULT_CALENDAR,
+      };
       // Re-baseline the data-date draft too, or a dirty field plus a job-version
       // bump wedges the conflict banner until the component remounts.
       if (dataDateBaseVersion !== null) {
         setDataDateBaseVersion(refreshedHierarchy.jobVersion);
+        dataDateBaseRef.current = { value: snapshot.job.dataDate ?? "" };
       }
       setConflict(false);
     } catch (reason: unknown) {
@@ -1342,7 +1385,12 @@ function ScheduleSettings({
               disabled={saving}
               onChange={(event) => {
                 setDataDate(event.target.value);
-                setDataDateBaseVersion((current) => current ?? hierarchy.jobVersion);
+                setDataDateBaseVersion((current) => {
+                  if (current === null) {
+                    dataDateBaseRef.current = { value: job.dataDate ?? "" };
+                  }
+                  return current ?? hierarchy.jobVersion;
+                });
               }}
             />
           </label>
@@ -1435,6 +1483,204 @@ function ScheduleSettings({
         <span role="status">{message}</span>
       ) : null}
     </form>
+  );
+}
+
+// Baseline management: list existing baselines, create a named baseline, and
+// switch the comparison default. Mirrors the data-date flow (typed rejections,
+// version-conflict recovery). A successful command reloads the job snapshot so
+// the version bump re-drives the Gantt getSchedule effect onto the new baseline.
+function BaselineSettings({
+  job,
+  hierarchy,
+  client,
+  onHierarchyChange,
+  onJobChange,
+}: {
+  job: Job;
+  hierarchy: TaskHierarchy;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
+  onJobChange: (job: Job) => void;
+}) {
+  const [baselines, setBaselines] = useState<Baseline[]>([]);
+  const [name, setName] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  const [conflict, setConflict] = useState(false);
+
+  const listBaselines = client.listBaselines;
+  useEffect(() => {
+    if (!listBaselines) return;
+    let active = true;
+    listBaselines(job.id)
+      .then((list) => {
+        if (active) setBaselines(list);
+      })
+      .catch((reason: unknown) => {
+        if (active) setMessage(errorMessage(reason));
+      });
+    return () => {
+      active = false;
+    };
+    // Re-list whenever the job version advances (create/switch bumps it).
+  }, [listBaselines, job.id, job.version]);
+
+  if (
+    !client.listBaselines ||
+    !client.createBaseline ||
+    !client.setBaselineComparisonDefault
+  )
+    return null;
+
+  // A successful command advanced the job version: reload the canonical snapshot
+  // so the Gantt and the list rebase onto it, clearing any phantom conflict.
+  const applied = async (status: string) => {
+    const snapshot = await loadJobSnapshot(client, job.id);
+    onJobChange(snapshot.job);
+    onHierarchyChange(snapshot.hierarchy);
+    setConflict(false);
+    setMessage(status);
+  };
+  const failed = (reason: unknown) => {
+    setConflict(isVersionConflict(reason));
+    setMessage(errorMessage(reason));
+  };
+  const refresh = async () => {
+    setSaving(true);
+    try {
+      const snapshot = await loadJobSnapshot(client, job.id);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      setConflict(false);
+      setMessage(null);
+    } catch (reason: unknown) {
+      setMessage(errorMessage(reason));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  async function createBaseline() {
+    if (!client.createBaseline || saving) return;
+    const trimmed = name.trim();
+    if (trimmed === "") {
+      setMessage("Enter a baseline name.");
+      return;
+    }
+    setSaving(true);
+    setMessage(null);
+    try {
+      await client.createBaseline({
+        jobId: job.id,
+        name: trimmed,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+    } catch (reason: unknown) {
+      failed(reason);
+      setSaving(false);
+      return;
+    }
+    // The baseline is committed. A post-command reload failure must never report
+    // the create as failed; clear the name only once the reload succeeds.
+    try {
+      await applied(`Baseline “${trimmed}” created.`);
+      setName("");
+    } catch {
+      setConflict(true);
+      setMessage(
+        `Baseline “${trimmed}” was created, but refreshing the view failed. Refresh to see it.`,
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function setDefault(baselineId: string) {
+    if (!client.setBaselineComparisonDefault || saving) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      await client.setBaselineComparisonDefault({
+        jobId: job.id,
+        baselineId,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+    } catch (reason: unknown) {
+      failed(reason);
+      setSaving(false);
+      return;
+    }
+    // The switch is committed. A post-command reload failure must never report
+    // the switch as failed.
+    try {
+      await applied("Comparison baseline updated.");
+    } catch {
+      setConflict(true);
+      setMessage("Comparison baseline updated, but refreshing the view failed. Refresh to see it.");
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="baseline-settings" aria-labelledby="baseline-settings-heading">
+      <h3 id="baseline-settings-heading">Baselines</h3>
+      <div className="baseline-settings__create">
+        <label>
+          New baseline name{" "}
+          <input
+            aria-label={`New baseline name for ${job.name}`}
+            type="text"
+            value={name}
+            disabled={saving}
+            onChange={(event) => setName(event.target.value)}
+          />
+        </label>
+        <button
+          type="button"
+          disabled={saving || name.trim() === ""}
+          onClick={() => void createBaseline()}
+        >
+          Create baseline
+        </button>
+      </div>
+      {baselines.length > 0 ? (
+        <ul className="baseline-settings__list">
+          {baselines.map((baseline) => (
+            <li key={baseline.id} className="baseline-settings__item">
+              <span className="baseline-settings__name">{baseline.name}</span>
+              <span className="baseline-settings__created">
+                Created {formatLocalDate(baseline.createdAt)}
+              </span>
+              {baseline.isComparisonDefault ? (
+                <span className="baseline-settings__default">Comparison default</span>
+              ) : (
+                <button
+                  type="button"
+                  disabled={saving}
+                  onClick={() => void setDefault(baseline.id)}
+                >
+                  {`Set "${baseline.name}" as comparison default`}
+                </button>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>No baselines yet.</p>
+      )}
+      {conflict ? (
+        <span role="alert">
+          Baselines changed elsewhere. Your entry is still here.{" "}
+          <button type="button" onClick={() => void refresh()} disabled={saving}>
+            Refresh baselines
+          </button>
+        </span>
+      ) : message ? (
+        <span role="status">{message}</span>
+      ) : null}
+    </section>
   );
 }
 
@@ -1617,6 +1863,32 @@ async function loadJobSnapshot(
   throw new Error(
     "The job changed while refreshing. Refresh again before saving.",
   );
+}
+
+// Content equality for working calendars (weekday set plus workday window),
+// used to tell an unchanged persisted schedule from a genuine external edit.
+function calendarsEqual(left: WorkingCalendar, right: WorkingCalendar): boolean {
+  if (
+    left.workdayStartMinute !== right.workdayStartMinute ||
+    left.workdayDurationMinutes !== right.workdayDurationMinutes ||
+    left.workingWeekdays.length !== right.workingWeekdays.length
+  ) {
+    return false;
+  }
+  const leftDays = [...left.workingWeekdays].sort();
+  const rightDays = [...right.workingWeekdays].sort();
+  return leftDays.every((day, index) => day === rightDays[index]);
+}
+
+// Renders a stored UTC timestamp as a local ISO calendar date (YYYY-MM-DD),
+// matching every other date shown in the app.
+function formatLocalDate(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  const year = parsed.getFullYear();
+  const month = `${parsed.getMonth() + 1}`.padStart(2, "0");
+  const day = `${parsed.getDate()}`.padStart(2, "0");
+  return `${year}-${month}-${day}`;
 }
 
 function errorMessage(reason: unknown): string {

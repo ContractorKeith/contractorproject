@@ -36,7 +36,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 3,
+    contractVersion: 4,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -80,9 +80,10 @@ const fixtureRows = [
     baseline: {
       start: "2026-08-17T07:00:00",
       finish: "2026-08-17T16:00:00",
-      durationMinutes: 480,
+      durationMinutes: 420,
       startVarianceMinutes: 60,
       finishVarianceMinutes: 60,
+      durationVarianceMinutes: 60,
     },
   }),
   row({
@@ -107,6 +108,7 @@ const fixtureRows = [
       durationMinutes: 0,
       startVarianceMinutes: 1_440,
       finishVarianceMinutes: 1_440,
+      durationVarianceMinutes: 0,
     },
   }),
   row({
@@ -142,7 +144,29 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).toHaveAttribute("aria-setsize", "2");
     expect(layoutRow).not.toHaveAttribute("aria-expanded");
     expect(layoutRow).toHaveTextContent("2026-08-17 08:00");
-    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 07:00 +60 min");
+    // The visible baseline fact shows the civil date only; the clock time stays
+    // in the accessible name.
+    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 +60 min");
+    expect(
+      screen.getByRole("gridcell", {
+        name: /1\.1 Layout, start, 2026-08-17 08:00, baseline start 2026-08-17 07:00, variance \+60 min/,
+      }),
+    ).toBeInTheDocument();
+    // Duration cell surfaces the Rust-derived baseline duration variance fact
+    // (unit dropped from the first number to shorten the narrow-cell fragment).
+    expect(screen.getByTestId("duration-baseline-task-a")).toHaveTextContent(
+      "Baseline 420 +60 min",
+    );
+    expect(
+      screen.getByRole("gridcell", {
+        name: /1\.1 Layout, duration, 480 min, baseline duration 420 min, variance \+60 min/,
+      }),
+    ).toBeInTheDocument();
+    // The milestone row suppresses the duration baseline fact and its label.
+    expect(screen.queryByTestId("duration-baseline-task-b")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("gridcell", { name: /1\.2 Inspection, duration, milestone, no baseline/ }),
+    ).toBeInTheDocument();
     expect(layoutRow).toHaveTextContent("Critical");
     expect(layoutRow).toHaveTextContent("survey-control");
     expect(layoutRow).toHaveTextContent("≥ 2026-08-18");

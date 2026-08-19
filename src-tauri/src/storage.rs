@@ -1335,6 +1335,54 @@ impl SqliteStore {
         Ok(baselines)
     }
 
+    /// Loads the job's comparison-default baseline leaf snapshot for the Gantt
+    /// read model. Returns None when the job has no default baseline. Stored
+    /// instant text is round-trip validated against the canonical serialized
+    /// format; corrupt text surfaces as InvalidStoredData.
+    pub(crate) fn load_comparison_baseline(
+        &self,
+        job_id: &str,
+    ) -> Result<Option<BaselineSnapshot>, ApplicationError> {
+        let connection = self.connection()?;
+        let baseline_id: Option<String> = connection
+            .query_row(
+                "SELECT id FROM baselines WHERE job_id = ?1 AND is_comparison_default = 1",
+                [job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(baseline_id) = baseline_id else {
+            return Ok(None);
+        };
+        let mut statement = connection.prepare(
+            "SELECT task_id, start, finish, duration_minutes
+             FROM baseline_tasks WHERE baseline_id = ?1 ORDER BY task_id",
+        )?;
+        let rows = statement
+            .query_map([&baseline_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut tasks = Vec::with_capacity(rows.len());
+        for (task_id, start, finish, duration_minutes) in rows {
+            tasks.push(BaselineTaskSnapshot {
+                task_id,
+                start: parse_baseline_instant(&start)?,
+                finish: parse_baseline_instant(&finish)?,
+                duration_minutes,
+            });
+        }
+        Ok(Some(BaselineSnapshot {
+            id: baseline_id,
+            tasks,
+        }))
+    }
+
     fn connection(&self) -> Result<Connection, ApplicationError> {
         let connection = Connection::open(&self.database_path)?;
         connection.execute_batch("PRAGMA foreign_keys = ON;")?;
@@ -2603,11 +2651,10 @@ fn verify_v7_baseline_domain(connection: &Connection) -> Result<(), ApplicationE
             return Err(ApplicationError::BackupVerificationFailed);
         }
         // Round-trip the instant so non-canonical text (e.g. "2026-8-1T5:00:00")
-        // is rejected; #44 joins these strings against serialized instants.
+        // is rejected; #44 joins these strings against serialized instants. Shares
+        // the same canonical parser get_schedule uses to load the snapshot.
         for value in [start, finish] {
-            let parsed = NaiveDateTime::parse_from_str(&value, "%Y-%m-%dT%H:%M:%S")
-                .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-            if parsed.format("%Y-%m-%dT%H:%M:%S").to_string() != value {
+            if canonical_instant(&value).is_none() {
                 return Err(ApplicationError::BackupVerificationFailed);
             }
         }
@@ -3225,6 +3272,35 @@ fn validate_proposed_schedule(
 /// projection's serialized `NaiveDateTime` format (`YYYY-MM-DDTHH:MM:SS`).
 fn format_baseline_instant(instant: NaiveDateTime) -> String {
     instant.format("%Y-%m-%dT%H:%M:%S").to_string()
+}
+
+/// Round-trips a stored instant through the canonical serialized format,
+/// returning None when the text is non-canonical (e.g. "2026-8-1T5:00:00").
+/// Shared by the read path and the v7 backup preflight.
+fn canonical_instant(value: &str) -> Option<NaiveDateTime> {
+    let parsed = NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S").ok()?;
+    (parsed.format("%Y-%m-%dT%H:%M:%S").to_string() == value).then_some(parsed)
+}
+
+/// Parses a stored baseline instant; corrupt text surfaces as InvalidStoredData.
+fn parse_baseline_instant(value: &str) -> Result<NaiveDateTime, ApplicationError> {
+    canonical_instant(value).ok_or_else(|| {
+        ApplicationError::InvalidStoredData("baseline has an invalid instant".into())
+    })
+}
+
+/// Comparison-default baseline leaf snapshot loaded for the Gantt read model.
+pub(crate) struct BaselineSnapshot {
+    pub id: String,
+    pub tasks: Vec<BaselineTaskSnapshot>,
+}
+
+/// One leaf row of a baseline snapshot with parsed canonical instants.
+pub(crate) struct BaselineTaskSnapshot {
+    pub task_id: String,
+    pub start: NaiveDateTime,
+    pub finish: NaiveDateTime,
+    pub duration_minutes: i64,
 }
 
 fn baseline_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Baseline> {

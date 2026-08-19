@@ -1,6 +1,6 @@
 # Versioned Gantt read model
 
-Status: implemented contract v3
+Status: implemented contract v4
 Updated: 2026-08-18
 
 The Gantt read model is the only schedule shape consumed by the production
@@ -11,7 +11,7 @@ virtualize them, but it does not calculate dates, hierarchy positions,
 variance, float, or critical state.
 
 The Rust contract lives in `src-tauri/src/gantt.rs`. Its TypeScript mirror is
-`src/types/gantt.ts`. Both currently use `contractVersion: 3`; a breaking
+`src/types/gantt.ts`. Both currently use `contractVersion: 4`; a breaking
 field or semantic change requires a new version.
 
 ## Top-level projection
@@ -60,17 +60,27 @@ Each row exposes:
   Neither is inferred from propagated negative float.
 - stable, sorted predecessor task IDs
 - an optional baseline comparison with baseline start/finish/duration and
-  signed start/finish variance minutes derived by Rust from the current and
-  baseline local civil timestamps
+  signed start/finish/duration variance minutes derived by Rust from the current
+  and baseline values. `durationVarianceMinutes` is the current row duration
+  minus the baseline duration (added in contract v4).
 
 A baseline may omit a row when that task was created after the immutable
 snapshot. The baseline identity remains present at the top level while the
 row's `baseline` value is `null`.
 
-Positive variance means the current date is later than its baseline date;
-negative variance means it is earlier. Contract v2 reports the exact local
-civil-time difference in minutes. React displays that value and never
-recalculates it.
+Positive start/finish variance means the current date is later than its baseline
+date; negative variance means it is earlier. Positive duration variance means
+the current task runs longer than its baseline. Contract v2+ reports the exact
+local civil-time difference in minutes; v4 adds the duration difference. React
+displays these values and never recalculates them.
+
+The application adapter loads the job's comparison-default baseline leaf
+snapshot into `GanttBaselineSource`. Only tasks that are still leaves at read
+time contribute a comparison: a snapshot row whose task later became a summary
+(gained children) or was deleted is filtered out before the join, so summaries
+stay derived-only and the builder's defensive `gantt_baseline_task_unknown`
+invariant is never tripped by that legal editing history. The comparison-default
+baseline's `id` is surfaced as the top-level `baselineId`.
 
 ## Query boundary
 
@@ -118,10 +128,19 @@ math beyond proportioning:
 `src-tauri/tests/gantt_read_model.rs` covers:
 
 - an empty schedule and exact camel-case serialization
-- a nested summary with current dates, baseline variance, and predecessor IDs
+- a nested summary with current dates, baseline start/finish/duration variance,
+  and predecessor IDs, asserting the exact v4 camel-case baseline serialization
+- a partial baseline whose later-added task reports a `null` comparison
+- the baseline error paths (`gantt_baseline_task_unknown`,
+  `gantt_baseline_task_duplicate`)
 - a statused job with a data date and complete, in-progress, and not-started
-  rows, asserting the exact v3 progress facts and camel-case serialization
+  rows, asserting the exact v4 progress facts and camel-case serialization
 - rejected metadata/schedule joins and constrained summaries
+
+`src-tauri/tests/baseline_persistence.rs` additionally proves the application
+`get_schedule` path loads the comparison-default baseline into the projection
+(exact duration variance) and drops the comparison for a snapshot task that has
+since become a summary.
 - a deterministic 1,000-row hierarchy with stable WBS, logical index, depth,
   sibling position, and JSON row count
 

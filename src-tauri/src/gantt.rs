@@ -6,7 +6,7 @@ use thiserror::Error;
 
 use crate::scheduling::{ScheduleResult, ScheduledTask};
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 3;
+pub const GANTT_READ_MODEL_VERSION: u16 = 4;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -81,6 +81,9 @@ pub struct GanttBaselineComparison {
     pub duration_minutes: i64,
     pub start_variance_minutes: i64,
     pub finish_variance_minutes: i64,
+    /// Signed current-minus-baseline duration difference. Positive means the
+    /// current task takes longer than its baseline; negative means shorter.
+    pub duration_variance_minutes: i64,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -275,6 +278,11 @@ pub fn build_gantt_read_model(
                             .early_finish
                             .signed_duration_since(baseline.finish)
                             .num_minutes(),
+                        // saturating so a hand-edited absurd stored duration
+                        // cannot panic or wrap the signed difference.
+                        duration_variance_minutes: scheduled
+                            .duration_minutes
+                            .saturating_sub(baseline.duration_minutes),
                     }
                 }),
             })

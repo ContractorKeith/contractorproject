@@ -53,7 +53,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 3,
+            "contractVersion": 4,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -69,7 +69,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
 }
 
 #[test]
-fn constrained_violating_leaf_serializes_the_exact_v3_contract() {
+fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
     let schedule = calculate_schedule_with_constraints(
         &ScheduleInput {
             schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
@@ -108,7 +108,7 @@ fn constrained_violating_leaf_serializes_the_exact_v3_contract() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 3,
+            "contractVersion": 4,
             "jobId": "job-1",
             "jobVersion": 1,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -152,7 +152,7 @@ fn constrained_violating_leaf_serializes_the_exact_v3_contract() {
 }
 
 #[test]
-fn statused_schedule_projects_the_v3_progress_facts_and_data_date() {
+fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
     let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
     let schedule = calculate_schedule_with_progress(
         &ScheduleInput {
@@ -253,7 +253,7 @@ fn statused_schedule_projects_the_v3_progress_facts_and_data_date() {
     })
     .expect("build statused read model");
 
-    assert_eq!(read_model.contract_version, 3);
+    assert_eq!(read_model.contract_version, 4);
     assert_eq!(read_model.data_date, Some(date_time("2026-01-07T08:00:00")));
 
     let summary = &read_model.rows[0];
@@ -282,7 +282,7 @@ fn statused_schedule_projects_the_v3_progress_facts_and_data_date() {
     assert!(waiting.actual_start.is_none());
     assert!(waiting.actual_finish.is_none());
 
-    // The completed leaf serializes the exact camel-case v3 progress facts.
+    // The completed leaf serializes the exact camel-case v4 progress facts.
     let value = serde_json::to_value(&read_model).expect("serialize statused projection");
     assert_eq!(value["dataDate"], json!("2026-01-07T08:00:00"));
     assert_eq!(value["rows"][1]["percentComplete"], json!(100));
@@ -443,7 +443,7 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
                 task_id: "excavate".into(),
                 start: date_time("2026-01-05T08:00:00"),
                 finish: date_time("2026-01-05T16:00:00"),
-                duration_minutes: 480,
+                duration_minutes: 300,
             }],
         }),
         predecessors: vec![GanttPredecessorSource {
@@ -489,6 +489,178 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
     let baseline = excavate.baseline.as_ref().expect("baseline comparison");
     assert_eq!(baseline.start_variance_minutes, 1_440);
     assert_eq!(baseline.finish_variance_minutes, 1_440);
+    // Current duration (480) minus baseline duration (300) = +180.
+    assert_eq!(baseline.duration_variance_minutes, 180);
+
+    // The baseline comparison serializes the exact camel-case v4 facts.
+    let value = serde_json::to_value(&read_model).expect("serialize baseline projection");
+    assert_eq!(
+        value["rows"][2]["baseline"],
+        json!({
+            "start": "2026-01-05T08:00:00",
+            "finish": "2026-01-05T16:00:00",
+            "durationMinutes": 300,
+            "startVarianceMinutes": 1_440,
+            "finishVarianceMinutes": 1_440,
+            "durationVarianceMinutes": 180
+        })
+    );
+}
+
+#[test]
+fn baseline_omitting_a_later_added_task_reports_a_null_comparison() {
+    // A baseline captured before "excavate" existed omits that row. The task
+    // still schedules and projects, but its baseline comparison stays null while
+    // the covered "layout" row carries its comparison.
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![
+            ScheduleTask {
+                id: "layout".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+            ScheduleTask {
+                id: "excavate".into(),
+                parent_task_id: None,
+                duration_minutes: Some(480),
+            },
+        ],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![
+            GanttTaskSource {
+                id: "layout".into(),
+                parent_task_id: None,
+                sort_key: 0,
+                name: "Layout".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+            GanttTaskSource {
+                id: "excavate".into(),
+                parent_task_id: None,
+                sort_key: 1,
+                name: "Excavate".into(),
+                start_no_earlier_than: None,
+                finish_no_later_than: None,
+            },
+        ],
+        schedule,
+        baseline: Some(GanttBaselineSource {
+            id: "baseline-1".into(),
+            tasks: vec![GanttBaselineTaskSource {
+                task_id: "layout".into(),
+                start: date_time("2026-01-05T08:00:00"),
+                finish: date_time("2026-01-05T16:00:00"),
+                duration_minutes: 480,
+            }],
+        }),
+        predecessors: vec![],
+    })
+    .expect("build partial-baseline read model");
+
+    assert_eq!(read_model.baseline_id.as_deref(), Some("baseline-1"));
+    assert!(read_model.rows[0].baseline.is_some());
+    assert!(read_model.rows[1].baseline.is_none());
+}
+
+#[test]
+fn rejects_a_baseline_row_for_an_unknown_task() {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![ScheduleTask {
+            id: "leaf".into(),
+            parent_task_id: None,
+            duration_minutes: Some(480),
+        }],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+    let error = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![GanttTaskSource {
+            id: "leaf".into(),
+            parent_task_id: None,
+            sort_key: 0,
+            name: "Leaf".into(),
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
+        }],
+        schedule,
+        baseline: Some(GanttBaselineSource {
+            id: "baseline-1".into(),
+            tasks: vec![GanttBaselineTaskSource {
+                task_id: "ghost".into(),
+                start: date_time("2026-01-05T08:00:00"),
+                finish: date_time("2026-01-05T16:00:00"),
+                duration_minutes: 480,
+            }],
+        }),
+        predecessors: vec![],
+    })
+    .expect_err("reject unknown baseline task");
+    assert_eq!(error.code(), "gantt_baseline_task_unknown");
+    assert_eq!(
+        error,
+        GanttReadModelError::UnknownBaselineTask {
+            task_id: "ghost".into()
+        }
+    );
+}
+
+#[test]
+fn rejects_a_duplicate_baseline_row() {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![ScheduleTask {
+            id: "leaf".into(),
+            parent_task_id: None,
+            duration_minutes: Some(480),
+        }],
+        dependencies: vec![],
+    })
+    .expect("calculate schedule");
+    let baseline_row = |duration: i64| GanttBaselineTaskSource {
+        task_id: "leaf".into(),
+        start: date_time("2026-01-05T08:00:00"),
+        finish: date_time("2026-01-05T16:00:00"),
+        duration_minutes: duration,
+    };
+    let error = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![GanttTaskSource {
+            id: "leaf".into(),
+            parent_task_id: None,
+            sort_key: 0,
+            name: "Leaf".into(),
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
+        }],
+        schedule,
+        baseline: Some(GanttBaselineSource {
+            id: "baseline-1".into(),
+            tasks: vec![baseline_row(480), baseline_row(300)],
+        }),
+        predecessors: vec![],
+    })
+    .expect_err("reject duplicate baseline task");
+    assert_eq!(error.code(), "gantt_baseline_task_duplicate");
+    assert_eq!(
+        error,
+        GanttReadModelError::DuplicateBaselineTask {
+            task_id: "leaf".into()
+        }
+    );
 }
 
 #[test]

@@ -18,6 +18,9 @@ import type {
   UpdateJobDataDateRequest,
   UpdateTaskProgressRequest,
   RemoveDependencyRequest,
+  Baseline,
+  CreateBaselineRequest,
+  SetBaselineComparisonDefaultRequest,
 } from "../types/jobs";
 import type { GanttReadModel } from "../types/gantt";
 
@@ -39,6 +42,9 @@ export interface JobClient {
   updateTaskProgress?(request: UpdateTaskProgressRequest): Promise<TaskMutation>;
   addDependency?(request: AddDependencyRequest): Promise<TaskHierarchy>;
   removeDependency?(request: RemoveDependencyRequest): Promise<TaskHierarchy>;
+  listBaselines?(jobId: string): Promise<Baseline[]>;
+  createBaseline?(request: CreateBaselineRequest): Promise<Baseline>;
+  setBaselineComparisonDefault?(request: SetBaselineComparisonDefaultRequest): Promise<Baseline>;
 }
 
 export const tauriJobClient: JobClient = {
@@ -73,4 +79,8 @@ export const tauriJobClient: JobClient = {
     invoke<TaskMutation>("update_task_progress", { request }),
   addDependency: (request) => invoke<TaskHierarchy>("add_dependency", { request }),
   removeDependency: (request) => invoke<TaskHierarchy>("remove_dependency", { request }),
+  listBaselines: (jobId) => invoke<Baseline[]>("list_baselines", { jobId }),
+  createBaseline: (request) => invoke<Baseline>("create_baseline", { request }),
+  setBaselineComparisonDefault: (request) =>
+    invoke<Baseline>("set_baseline_comparison_default", { request }),
 };

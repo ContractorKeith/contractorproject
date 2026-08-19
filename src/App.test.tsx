@@ -1130,6 +1130,179 @@ describe("job workspace", () => {
     expect(await screen.findByText("Data date saved.")).toBeVisible();
     expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
   });
+
+  it("creates a named baseline, surfaces a duplicate-name rejection, and lists it", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 2, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = { ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1), durationMinutes: 480 };
+    let currentJob = baseJob;
+    let currentBaselines: import("./types/jobs").Baseline[] = [];
+    const createBaseline = vi
+      .fn()
+      .mockImplementationOnce(() =>
+        Promise.reject({
+          kind: "validation_failed",
+          message: "a baseline with this name already exists for the job",
+        }),
+      )
+      .mockImplementationOnce(() => {
+        currentJob = { ...baseJob, version: 3 };
+        currentBaselines = [
+          {
+            id: "baseline-1",
+            jobId: baseJob.id,
+            name: "Original plan",
+            createdAt: "2026-08-18T12:00:00.000Z",
+            isComparisonDefault: true,
+          },
+        ];
+        return Promise.resolve(currentBaselines[0]);
+      });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve({ jobId: baseJob.id, jobVersion: currentJob.version, tasks: [leaf], dependencies: [] }),
+        ),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      listBaselines: vi.fn().mockImplementation(() => Promise.resolve(currentBaselines)),
+      createBaseline,
+      setBaselineComparisonDefault: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    expect(await screen.findByText("No baselines yet.")).toBeVisible();
+
+    const nameField = screen.getByLabelText(`New baseline name for ${baseJob.name}`);
+    await user.type(nameField, "Original plan");
+    await user.click(screen.getByRole("button", { name: "Create baseline" }));
+
+    // The typed duplicate-name rejection surfaces without wedging the form.
+    expect(await screen.findByText(/a baseline with this name already exists/)).toBeVisible();
+    expect(createBaseline).toHaveBeenLastCalledWith({
+      jobId: baseJob.id, name: "Original plan", expectedJobVersion: 2,
+    });
+
+    await user.click(screen.getByRole("button", { name: "Create baseline" }));
+    await waitFor(() =>
+      expect(screen.getByText("Original plan")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Comparison default")).toBeVisible();
+    // The created date renders as a local ISO date, not a locale-formatted one.
+    expect(screen.getByText("Created 2026-08-18")).toBeVisible();
+  });
+
+  it("switches the comparison default baseline and reloads the snapshot", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 5, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = { ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1), durationMinutes: 480 };
+    let currentJob = baseJob;
+    let currentBaselines: import("./types/jobs").Baseline[] = [
+      { id: "b1", jobId: baseJob.id, name: "First", createdAt: "2026-08-18T12:00:00.000Z", isComparisonDefault: true },
+      { id: "b2", jobId: baseJob.id, name: "Second", createdAt: "2026-08-18T13:00:00.000Z", isComparisonDefault: false },
+      { id: "b3", jobId: baseJob.id, name: "Third", createdAt: "2026-08-18T14:00:00.000Z", isComparisonDefault: false },
+    ];
+    const setBaselineComparisonDefault = vi.fn().mockImplementation(() => {
+      currentJob = { ...baseJob, version: 6 };
+      currentBaselines = currentBaselines.map((baseline) => ({
+        ...baseline,
+        isComparisonDefault: baseline.id === "b2",
+      }));
+      return Promise.resolve(currentBaselines[1]);
+    });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve({ jobId: baseJob.id, jobVersion: currentJob.version, tasks: [leaf], dependencies: [] }),
+        ),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      listBaselines: vi.fn().mockImplementation(() => Promise.resolve(currentBaselines)),
+      createBaseline: vi.fn(),
+      setBaselineComparisonDefault,
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await screen.findByText("First");
+
+    // Each non-default baseline exposes a distinctly named switch control; the
+    // default ("First") shows a badge instead of a button.
+    expect(screen.queryByRole("button", { name: 'Set "First" as comparison default' })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: 'Set "Third" as comparison default' })).toBeInTheDocument();
+    const switchButton = await screen.findByRole("button", { name: 'Set "Second" as comparison default' });
+    await user.click(switchButton);
+    await waitFor(() =>
+      expect(setBaselineComparisonDefault).toHaveBeenCalledWith({
+        jobId: baseJob.id, baselineId: "b2", expectedJobVersion: 5,
+      }),
+    );
+    expect(await screen.findByText("Comparison baseline updated.")).toBeVisible();
+  });
+
+  it("does not raise a phantom schedule conflict after a sibling baseline create", async () => {
+    const user = userEvent.setup();
+    const baseJob = { ...fixtureJob(), version: 2, scheduleStart: "2026-08-17", calendar: defaultCalendar() };
+    const leaf = { ...fixtureTask(baseJob, "leaf", null, "Excavate", 0, 1), durationMinutes: 480 };
+    let currentJob = baseJob;
+    let currentBaselines: import("./types/jobs").Baseline[] = [];
+    const updateJobDataDate = vi.fn().mockImplementation(() => {
+      currentJob = { ...currentJob, version: currentJob.version + 1, dataDate: "2026-08-18" };
+      return Promise.resolve(currentJob);
+    });
+    const createBaseline = vi.fn().mockImplementation(() => {
+      // Creating a baseline bumps the job version WITHOUT changing schedule inputs.
+      currentJob = { ...currentJob, version: currentJob.version + 1 };
+      currentBaselines = [
+        { id: "b1", jobId: baseJob.id, name: "Plan", createdAt: "2026-08-18T12:00:00.000Z", isComparisonDefault: true },
+      ];
+      return Promise.resolve(currentBaselines[0]);
+    });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([currentJob])),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockImplementation(() =>
+          Promise.resolve({ jobId: baseJob.id, jobVersion: currentJob.version, tasks: [leaf], dependencies: [] }),
+        ),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(), updateJobDataDate,
+      listBaselines: vi.fn().mockImplementation(() => Promise.resolve(currentBaselines)),
+      createBaseline,
+      setBaselineComparisonDefault: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+
+    // Draft a data date (dirty, based on job version 2) without saving it.
+    const dateField = screen.getByLabelText(`Data date for ${baseJob.name}`);
+    await user.type(dateField, "2026-08-18");
+
+    // Create a baseline; its version bump must NOT wedge the dirty data-date draft.
+    await user.type(screen.getByLabelText(`New baseline name for ${baseJob.name}`), "Plan");
+    await user.click(screen.getByRole("button", { name: "Create baseline" }));
+    expect(await screen.findByText(/Baseline .* created/)).toBeVisible();
+    expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
+    expect(dateField).toHaveValue("2026-08-18");
+
+    // The retried save re-baselines to the bumped version and succeeds.
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+    await waitFor(() =>
+      expect(updateJobDataDate).toHaveBeenLastCalledWith({
+        jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
+      }),
+    );
+    expect(await screen.findByText("Data date saved.")).toBeVisible();
+  });
 });
 
 function defaultCalendar(): WorkingCalendar {
@@ -1175,7 +1348,7 @@ function fixtureTask(
 
 function ganttReadModel(jobId: string) {
   return {
-    contractVersion: 3 as const, jobId, jobVersion: 1,
+    contractVersion: 4 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
     dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
     rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessorIds: [], baseline: null }],
