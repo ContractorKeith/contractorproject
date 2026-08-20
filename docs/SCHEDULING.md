@@ -335,19 +335,24 @@ SS/SF), the entered SNET date, the normalized data-date civil date, or the
 normalized schedule-start civil date. The arrival date is chosen by the primary
 reference's anchor kind: an FF predecessor measures to the leaf's reported
 early-finish civil date; an FS predecessor uses the reported early-start civil
-date when the leaf is not started and the remaining-work start when it is; and
-every start-anchored reference (SS, SF, startConstraint, dataDate,
-scheduleStart) uses the remaining-work start converted with the same
-start-instant primitive that backs the data-date instant, for both started and
-not-started leaves. An undisplaced milestone reports no gap whichever driver is
-primary, because a start-anchored reference lands the arrival on the milestone's
-actual working-day start and a finish-anchored FS/FF reference coincides with
-the milestone's event instant. `fromDate` and `toDate` are the two dates in
-ascending order (negative lag can pull the arrival before the reference); the
-count covers `[fromDate, toDate)`, counting only non-working days, and the fact
-is omitted when the count is zero. The arrival instant inside an explanation is
-informational — for a started leaf with a non-FF primary it is the
-remaining-work start rather than a reported date; float must still never be
+date when the leaf is not started and the remaining-work start when it is; an
+SF predecessor bounds the leaf's finish, so it converts the remaining-work
+finish offset with the same start-instant primitive that backs the data-date
+instant (never the leaf's start, which would sweep the leaf's own duration into
+the gap); and the remaining start-anchored references (SS, startConstraint,
+dataDate, scheduleStart) convert the remaining-work start the same way, for
+both started and not-started leaves. A milestone whose remaining work is
+undisplaced from its primary driver reports no gap — a start-anchored reference
+lands the arrival on the working-day-start alias of the milestone's offset and
+a plain FS/FF hand-off coincides with its event instant — but a co-binding SNET
+that pins a milestone's reported instant onto the constraint day can still
+surface the civil gap between the displayed dates. `fromDate` and `toDate` are
+the two dates in ascending order (negative lag can pull the arrival before the
+reference); the count covers `[fromDate, toDate)`, counting only non-working
+days, and the fact is omitted when the count is zero. The arrival instant
+inside an explanation is informational — for a started leaf with a non-FF
+primary, and for milestones under start-anchored or SF references, it is a
+derived working instant rather than a reported date; float must still never be
 derived by differencing reported dates.
 
 ### Float rationale

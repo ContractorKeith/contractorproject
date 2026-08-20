@@ -841,12 +841,15 @@ fn compute_explanations(
         // reported early-finish civil date. A finish-anchored FS reference keeps
         // the reported early-start date when not started (a milestone's event
         // instant aligns with the predecessor finish, preserving no-gap) and the
-        // remaining-work start when in progress. Every start-anchored reference
-        // (SS, SF, startConstraint, dataDate, scheduleStart) uses the
-        // remaining-work start converted with the same start-instant primitive
-        // that backs the data-date instant, for both started and not-started
-        // leaves; that lands a milestone on its actual working-day start instead
-        // of the prior-day event instant, so undisplaced milestones report no gap.
+        // remaining-work start when in progress. A start-anchored SF reference
+        // bounds the leaf's finish, so it converts the remaining-work finish
+        // offset with the start-instant primitive — never the leaf's start,
+        // which would sweep the leaf's own duration into the gap. The remaining
+        // start-anchored references (SS, startConstraint, dataDate,
+        // scheduleStart) use the remaining-work start converted the same way,
+        // for both started and not-started leaves; that lands a milestone on
+        // its actual working-day start instead of the prior-day event instant,
+        // so undisplaced hand-offs report no gap.
         let leaf_instants = instants[original_index].as_ref().expect("leaf instants");
         let arrival_date: NaiveDate = match &primary_driver {
             ScheduleDriver::Predecessor {
@@ -857,6 +860,15 @@ fn compute_explanations(
                 dependency_type: DependencyType::FinishStart,
                 ..
             } if !in_progress => leaf_instants.early_start.date(),
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::StartFinish,
+                ..
+            } => {
+                let finish_offset = rem_start
+                    .checked_add(progress.remaining_duration[li])
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?;
+                calendar.start_instant(finish_offset)?.date()
+            }
             _ => calendar.start_instant(rem_start)?.date(),
         };
         let (from_date, to_date) = if reference_date <= arrival_date {

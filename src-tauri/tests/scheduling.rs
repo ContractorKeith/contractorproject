@@ -2732,3 +2732,94 @@ fn explanation_chain_timing() {
     samples.sort();
     println!("median calculate_schedule_with_progress: {:?}", samples[2]);
 }
+
+#[test]
+fn positive_duration_start_finish_gap_measures_the_hand_off_not_the_duration() {
+    // A is pinned to Monday 2026-01-19; SF+0 bounds B's finish at A's start, so
+    // six-day B runs 2026-01-09 through Friday 2026-01-16. The SF arrival is the
+    // working-day-start alias of B's remaining-work finish (Monday 2026-01-19),
+    // which coincides with the reference, so the undisplaced hand-off reports no
+    // gap — B's own internal weekend never counts as displacement.
+    let result = calculate_schedule_with_constraints(
+        &progress_input(
+            vec![task("A", 480), task("B", 2880)],
+            vec![dep("A", "B", DependencyType::StartFinish, 0)],
+        ),
+        &[constraint("A", Some("2026-01-19"), None)],
+    )
+    .expect("valid schedule");
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::StartFinish, 0),
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 480,
+            critical: false,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
+        }
+    );
+    assert_eq!(
+        explanation(&result, "A"),
+        &TaskExplanation::Scheduled {
+            task_id: "A".into(),
+            primary_driver: ScheduleDriver::StartConstraint {
+                date: ymd("2026-01-19"),
+                normalized_date: ymd("2026-01-19"),
+            },
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
+        }
+    );
+}
+
+#[test]
+fn displaced_start_finish_gap_counts_the_closed_day_in_the_lag() {
+    // SF+960 from A's Monday start lands B's finish two working days later, and
+    // the closed Tuesday inside the lag displaces the hand-off: B runs Wednesday
+    // and the gap reads A's Monday start to the Thursday alias of B's finish,
+    // counting exactly the closed Tuesday.
+    let result = calculate_schedule(&ScheduleInput {
+        schedule_start: ymd("2026-01-05"),
+        calendar: calendar_with_exceptions(&["2026-01-06"]),
+        tasks: vec![task("A", 480), task("B", 480)],
+        dependencies: vec![dep("A", "B", DependencyType::StartFinish, 960)],
+    })
+    .expect("valid schedule");
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::StartFinish, 960),
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: Some(CalendarGap {
+                from_date: ymd("2026-01-05"),
+                to_date: ymd("2026-01-08"),
+                non_working_day_count: 1,
+            }),
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
+        }
+    );
+    match explanation(&result, "A") {
+        TaskExplanation::Scheduled {
+            late_finish_limit, ..
+        } => assert_eq!(
+            late_finish_limit,
+            &LateFinishLimit::Successor {
+                task_id: "B".into(),
+                dependency_type: DependencyType::StartFinish,
+                lag_minutes: 960,
+            }
+        ),
+        other => panic!("expected scheduled explanation for A, got {other:?}"),
+    }
+}
