@@ -1,6 +1,6 @@
 # Versioned Gantt read model
 
-Status: implemented contract v6
+Status: implemented contract v7
 Updated: 2026-08-20
 
 The Gantt read model is the only schedule shape consumed by the production
@@ -11,7 +11,7 @@ virtualize them, but it does not calculate dates, hierarchy positions,
 variance, float, or critical state.
 
 The Rust contract lives in `src-tauri/src/gantt.rs`. Its TypeScript mirror is
-`src/types/gantt.ts`. Both currently use `contractVersion: 6`; a breaking
+`src/types/gantt.ts`. Both currently use `contractVersion: 7`; a breaking
 field or semantic change requires a new version.
 
 ## Top-level projection
@@ -101,6 +101,18 @@ Each row exposes:
   and baseline values. `durationVarianceMinutes` is the current row duration
   minus the baseline duration (added in contract v4).
 
+- a typed schedule `explanation` (added in contract v7), reused directly from the
+  scheduler as the row's last field. It is one kind-tagged `TaskExplanation`:
+  `summary` (dates derived from children, no drivers), `complete` (anchored at its
+  normalized actuals), or `scheduled` (a `primaryDriver`, zero or more
+  `otherBindingDrivers`, an optional `startedActualStart`, an optional
+  `calendarGap`, `totalFloatMinutes`, `critical`, and one `lateFinishLimit`).
+  Every driver, calendar-gap, and limit fact is the scheduler's own typed data;
+  the model is specified in [`SCHEDULING.md`](SCHEDULING.md) "Schedule
+  explanations". React renders these facts and derives none. Every other v6 field
+  keeps identical values, so a consumer that ignores `explanation` reads
+  byte-identical data.
+
 A baseline may omit a row when that task was created after the immutable
 snapshot. The baseline identity remains present at the top level while the
 row's `baseline` value is `null`.
@@ -130,6 +142,16 @@ to React. A scheduled summary with either leaf constraint is rejected with
 `gantt_summary_constraint_invalid`; valid summary rows have null constraint
 values, while `constraintViolated` remains the scheduler-derived descendant
 state.
+
+The builder also joins each row's explanation from `schedule.explanations` by
+task id (contract v7). A repeated explanation id is rejected up front with
+`gantt_explanation_duplicate`, and a task whose row finds no explanation is
+rejected with `gantt_explanation_missing`, so a projection can never carry a
+row with a fabricated or absent explanation. An explanation whose id is not a
+projection task is deliberately skipped rather than errored — it can only
+surface as some real task's `gantt_explanation_missing`, and duplicates among
+such orphans are ignored — so the two codes stay a bijection check over the
+projected tasks.
 
 The application adapter loads canonical SQLite job schedule inputs, tasks,
 durations, FS dependencies, weekly calendar, leaf constraints, the job data
@@ -178,6 +200,12 @@ math beyond proportioning:
   rows, asserting the exact v4 progress facts and camel-case serialization
 - the v6 calendar facts, asserting `workingWeekdays` canonicalize to
   Monday-to-Sunday order and `exceptionDates` sort and de-duplicate
+- the v7 row explanation, asserting the exact camel-case kind-tagged
+  serialization of a scheduled leaf (`scheduleStart` driver, `projectFinish`
+  limit), a `dataDate` driver paired with a `successor` late-finish limit, a
+  non-null `calendarGap` with ascending `fromDate`/`toDate` and its count, a
+  `deadline` limit whose entered and normalized dates differ, and the two join
+  error paths (`gantt_explanation_missing`, `gantt_explanation_duplicate`)
 - rejected metadata/schedule joins and constrained summaries
 
 `src-tauri/tests/baseline_persistence.rs` additionally proves the application

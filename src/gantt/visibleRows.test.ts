@@ -38,6 +38,19 @@ function row(
     progressStatus: "notStarted",
     predecessors: [],
     baseline: null,
+    explanation: hasChildren
+      ? { kind: "summary", taskId }
+      : {
+          kind: "scheduled",
+          taskId,
+          primaryDriver: { kind: "scheduleStart" },
+          otherBindingDrivers: [],
+          startedActualStart: null,
+          calendarGap: null,
+          totalFloatMinutes: 0,
+          critical: true,
+          lateFinishLimit: { kind: "projectFinish" },
+        },
   };
 }
 

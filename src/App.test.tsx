@@ -149,6 +149,83 @@ describe("job workspace", () => {
     expect(client.getSchedule).toHaveBeenCalledWith(job.id);
   });
 
+  it("renders the focused task's facts in the explanation panel", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
+      getSchedule: vi.fn().mockResolvedValue(ganttReadModelTwoRows(job.id)),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await screen.findByRole("treegrid", { name: `Schedule for ${job.name}` });
+
+    // Focusing the second task's name cell drives the panel to its facts.
+    screen.getByRole("rowheader", { name: /2 Backfill, task/ }).focus();
+    const panel = await screen.findByRole("region", {
+      name: "Schedule explanation for Backfill",
+    });
+    expect(panel).toHaveTextContent("Finish limited by deadline 2026-08-20");
+  });
+
+  it("recovers the panel to the surviving task when the focused task leaves the projection", async () => {
+    const user = userEvent.setup();
+    // A tiny in-memory store: the first projection has two tasks; a version bump
+    // (a calendar-exception add) reloads a projection missing the focused task.
+    let version = 3;
+    const base = { ...fixtureJob(), calendar: defaultCalendar() };
+    const jobState = () => ({ ...base, version, calendarExceptions: [] as string[] });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([jobState()])),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockImplementation(() =>
+        Promise.resolve({ jobId: base.id, jobVersion: version, tasks: [], dependencies: [] }),
+      ),
+      getSchedule: vi.fn().mockImplementation(() =>
+        // Before the bump two tasks exist; after it only "task" remains.
+        Promise.resolve(version === 3 ? ganttReadModelTwoRows(base.id) : ganttReadModel(base.id)),
+      ),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      addCalendarException: vi.fn().mockImplementation(async () => {
+        version += 1;
+        return jobState();
+      }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `View tasks for ${base.name}` }));
+    await screen.findByRole("treegrid", { name: `Schedule for ${base.name}` });
+    screen.getByRole("rowheader", { name: /2 Backfill, task/ }).focus();
+    await screen.findByRole("region", { name: "Schedule explanation for Backfill" });
+
+    // Bump the job version so the schedule reloads without "task-2".
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${base.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+
+    // The stale focused task no longer resolves to a row; its facts drop out.
+    await waitFor(() =>
+      expect(screen.queryByText("Finish limited by deadline 2026-08-20")).not.toBeInTheDocument(),
+    );
+    // The treegrid's focus recovery re-points the roving cell at the first
+    // visible row of the reloaded projection, so the panel settles on the
+    // surviving task's facts rather than a stale or empty state.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    await waitFor(() => {
+      expect(
+        screen.getByRole("region", { name: "Schedule explanation for Excavate" }),
+      ).toBeInTheDocument();
+    });
+  });
+
   it("shows schedule loading and empty states", async () => {
     const user = userEvent.setup();
     const job = fixtureJob();
@@ -1789,10 +1866,51 @@ function fixtureTask(
 
 function ganttReadModel(jobId: string) {
   return {
-    contractVersion: 6 as const, jobId, jobVersion: 1,
+    contractVersion: 7 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
     dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
     calendar: { workingWeekdays: ["monday", "tuesday", "wednesday", "thursday", "friday"], exceptionDates: [] },
-    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null }],
+    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null, explanation: { kind: "scheduled" as const, taskId: "task", primaryDriver: { kind: "scheduleStart" as const }, otherBindingDrivers: [], startedActualStart: null, calendarGap: null, totalFloatMinutes: 0, critical: true, lateFinishLimit: { kind: "projectFinish" as const } } }],
+  };
+}
+
+// A two-root projection whose second task carries a distinctive deadline limit so
+// the explanation panel's focused-task facts are unambiguous.
+function ganttReadModelTwoRows(jobId: string) {
+  const base = ganttReadModel(jobId);
+  return {
+    ...base,
+    rowCount: 2,
+    criticalTaskIds: ["task", "task-2"],
+    criticalPath: ["task", "task-2"],
+    rows: [
+      base.rows[0]!,
+      {
+        ...base.rows[0]!,
+        taskId: "task-2",
+        logicalIndex: 1,
+        positionInSet: 2,
+        setSize: 2,
+        sortKey: 1,
+        wbs: "2",
+        name: "Backfill",
+        finishNoLaterThan: "2026-08-20",
+        explanation: {
+          kind: "scheduled" as const,
+          taskId: "task-2",
+          primaryDriver: { kind: "scheduleStart" as const },
+          otherBindingDrivers: [],
+          startedActualStart: null,
+          calendarGap: null,
+          totalFloatMinutes: 0,
+          critical: true,
+          lateFinishLimit: {
+            kind: "deadline" as const,
+            date: "2026-08-20",
+            normalizedDate: "2026-08-20",
+          },
+        },
+      },
+    ],
   };
 }

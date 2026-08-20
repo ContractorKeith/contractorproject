@@ -1,4 +1,4 @@
-export const GANTT_READ_MODEL_VERSION = 6 as const;
+export const GANTT_READ_MODEL_VERSION = 7 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
 
@@ -48,6 +48,63 @@ export interface GanttBaselineComparison {
   durationVarianceMinutes: number;
 }
 
+/**
+ * One forward-pass lower bound on a scheduled leaf's remaining work. Kind-tagged
+ * to mirror the Rust `ScheduleDriver` serde output exactly (contract v7).
+ */
+export type GanttScheduleDriver =
+  | { kind: "scheduleStart" }
+  | { kind: "startConstraint"; date: string; normalizedDate: string }
+  | { kind: "dataDate"; date: string }
+  | {
+      kind: "predecessor";
+      taskId: string;
+      dependencyType: GanttDependencyType;
+      lagMinutes: number;
+    };
+
+/**
+ * A run of non-working civil days between a driver's reference date and the
+ * leaf's arrival date. Endpoints ascend; the count covers `[fromDate, toDate)`.
+ * Rust emits this as a plain (untagged) struct.
+ */
+export interface GanttCalendarGap {
+  fromDate: string;
+  toDate: string;
+  nonWorkingDayCount: number;
+}
+
+/** What bounded a scheduled leaf's late finish (one level only), kind-tagged. */
+export type GanttLateFinishLimit =
+  | { kind: "deadline"; date: string; normalizedDate: string }
+  | {
+      kind: "successor";
+      taskId: string;
+      dependencyType: GanttDependencyType;
+      lagMinutes: number;
+    }
+  | { kind: "projectFinish" };
+
+/**
+ * Deterministic, typed explanation of why one task starts and finishes when it
+ * does (contract v7). Kind-tagged to mirror the Rust `TaskExplanation` serde
+ * output exactly. React renders these facts and never derives them.
+ */
+export type GanttTaskExplanation =
+  | { kind: "summary"; taskId: string }
+  | { kind: "complete"; taskId: string; actualStart: string; actualFinish: string }
+  | {
+      kind: "scheduled";
+      taskId: string;
+      primaryDriver: GanttScheduleDriver;
+      otherBindingDrivers: GanttScheduleDriver[];
+      startedActualStart: string | null;
+      calendarGap: GanttCalendarGap | null;
+      totalFloatMinutes: number;
+      critical: boolean;
+      lateFinishLimit: GanttLateFinishLimit;
+    };
+
 export interface GanttRow {
   taskId: string;
   parentTaskId: string | null;
@@ -79,6 +136,8 @@ export interface GanttRow {
   /** Typed predecessor links, sorted by predecessor id then dependency type. */
   predecessors: GanttPredecessorLink[];
   baseline: GanttBaselineComparison | null;
+  /** Deterministic, typed explanation of why this task is placed (contract v7). */
+  explanation: GanttTaskExplanation;
 }
 
 export interface GanttReadModel {

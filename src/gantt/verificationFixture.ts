@@ -3,6 +3,7 @@ import type {
   GanttProgressStatus,
   GanttReadModel,
   GanttRow,
+  GanttTaskExplanation,
 } from "../types/gantt";
 
 export const GANTT_VERIFICATION_FIXTURE_ID = "contractorproject-gantt-1000-v1";
@@ -53,6 +54,8 @@ export function createGanttVerificationReadModel(): GanttReadModel {
       progressStatus: phase === 0 ? "inProgress" : "notStarted",
       predecessors: [],
       baseline: null,
+      // Summaries derive their dates from children; they carry no drivers.
+      explanation: { kind: "summary", taskId: summaryId },
     });
 
     for (let task = 0; task < 99; task += 1) {
@@ -118,6 +121,36 @@ export function createGanttVerificationReadModel(): GanttReadModel {
                   },
                 ]
               : [typedLink()];
+      const primaryLink = predecessors[0];
+      // A plausible typed explanation for the fixture leaf: complete leaves anchor
+      // on their actuals, statused in-progress leaves report a started anchor, and
+      // the rest name their first predecessor (or the schedule-start floor).
+      const explanation: GanttTaskExplanation =
+        percentComplete === 100
+          ? {
+              kind: "complete",
+              taskId,
+              actualStart: actualStart!,
+              actualFinish: actualFinish!,
+            }
+          : {
+              kind: "scheduled",
+              taskId,
+              primaryDriver: primaryLink
+                ? {
+                    kind: "predecessor",
+                    taskId: primaryLink.taskId,
+                    dependencyType: primaryLink.dependencyType,
+                    lagMinutes: primaryLink.lagMinutes,
+                  }
+                : { kind: "scheduleStart" },
+              otherBindingDrivers: [],
+              startedActualStart: progressStatus === "inProgress" ? actualStart : null,
+              calendarGap: null,
+              totalFloatMinutes: phase === 0 ? 0 : 480,
+              critical: phase === 0,
+              lateFinishLimit: { kind: "projectFinish" },
+            };
       rows.push({
         taskId,
         parentTaskId: summaryId,
@@ -158,6 +191,7 @@ export function createGanttVerificationReadModel(): GanttReadModel {
           // Current leaves run 480 min against a 360-min baseline (milestones 0).
           durationVarianceMinutes: task === 98 ? 0 : 120,
         },
+        explanation,
       });
     }
   }
@@ -204,7 +238,7 @@ const VERIFICATION_CALENDAR: GanttReadModel["calendar"] = {
 
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 6,
+    contractVersion: 7,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",

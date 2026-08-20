@@ -55,7 +55,7 @@ describe("packaged Gantt verification fixture", () => {
   it("carries a data date and statused phase-1 rows across every progress state", () => {
     const model = createGanttVerificationReadModel();
 
-    expect(model.contractVersion).toBe(6);
+    expect(model.contractVersion).toBe(7);
     expect(model.dataDate).not.toBeNull();
     expect(model.rows.some((row) => row.progressStatus === "completed")).toBe(true);
     expect(model.rows.some((row) => row.progressStatus === "inProgress")).toBe(true);

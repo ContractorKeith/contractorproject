@@ -17,6 +17,7 @@ import type {
   GanttReadModel,
   GanttRow,
 } from "../types/gantt";
+import { formatInstant, formatSignedMinutes } from "./format";
 import { GANTT_ZOOMS, GanttTimeline, type GanttZoom } from "./GanttTimeline";
 import { selectVisibleGanttRows } from "./visibleRows";
 import "./ganttTreegrid.css";
@@ -38,6 +39,9 @@ export interface GanttTreegridProps {
   readModel: GanttReadModel;
   ariaLabel?: string;
   viewportHeight?: number;
+  /** Notified with the focused task id (null when none) so a sibling surface can
+   * follow the roving cell — e.g. the schedule-explanation panel. */
+  onActiveTaskChange?: (taskId: string | null) => void;
 }
 
 /** Authoritative, keyboard-operable work-breakdown projection for a Gantt schedule. */
@@ -45,6 +49,7 @@ export function GanttTreegrid({
   readModel,
   ariaLabel = "Work breakdown schedule",
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
+  onActiveTaskChange,
 }: GanttTreegridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowHeightProbeRef = useRef<HTMLDivElement>(null);
@@ -162,6 +167,17 @@ export function GanttTreegrid({
     },
     [focusMountedCell, rowVirtualizer],
   );
+
+  // Follow the focused task id (including collapse-driven focus recovery, which
+  // updates activeCell to the nearest visible ancestor). The grid markup is
+  // untouched; this only notifies a sibling surface such as the explanation panel.
+  // The callback is held in a ref so an inline-lambda consumer cannot re-fire the
+  // effect or loop; the notify depends only on the focused task id.
+  const onActiveTaskChangeRef = useRef(onActiveTaskChange);
+  onActiveTaskChangeRef.current = onActiveTaskChange;
+  useEffect(() => {
+    onActiveTaskChangeRef.current?.(activeCell?.taskId ?? null);
+  }, [activeCell?.taskId]);
 
   useEffect(() => {
     if (visibleRows.length === 0) {
@@ -692,9 +708,8 @@ function cellKey(cell: ActiveCell): string {
   return `${cell.taskId}:${cell.columnIndex}`;
 }
 
-function formatLocalDateTime(value: string): string {
-  return value.slice(0, 16).replace("T", " ");
-}
+// Shared with the explanation panel; the lockstep instant format is a contract.
+const formatLocalDateTime = formatInstant;
 
 // Civil date only (drops the clock time). The visible baseline fragment uses
 // this to fit the narrow cell; the full instant stays in the accessible name.
@@ -704,11 +719,6 @@ function formatLocalDate(value: string): string {
 
 function formatMinutes(value: number): string {
   return `${value.toLocaleString("en-US")} min`;
-}
-
-function formatSignedMinutes(value: number): string {
-  if (value === 0) return "0 min";
-  return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")} min`;
 }
 
 function formatCompactFloat(value: number): string {

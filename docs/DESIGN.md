@@ -215,6 +215,10 @@ Baseline and current bars stack in the same row: current above, baseline ghost b
 
 As shipped (read model v4), schedule variance is presented as **stacked signed-minute facts inside the existing cells**, not a dedicated variance column: the Start and Finish cells carry a second line `Baseline <civil-date> <signed> min` (the clock time is dropped from the visible fact to fit the narrow cell and preserve the Name reading column; the precise instant stays in the cell's accessible name and on the timeline ghost bar), and the Duration cell carries `Baseline <duration> <signed> min` (unit dropped from the first number to fit the narrow cell; suppressed on milestones, which already show start/finish baselines). Rust computes every value; the table never recalculates it. Signed values read late as positive and early as negative; late still pairs with the ghost bar so meaning is never hue-only. A dedicated signed-day variance column (with the filled-triangle late glyph in `--state-variance-late`) and cost variance in minor-unit currency remain a possible future refinement once exportable variance views land.
 
+### Explanation panel
+
+The focus-follow schedule-explanation panel below the treegrid renders the scheduler's deterministic drivers, calendar gaps, float, and finish limits as FACT rows. It deliberately uses the §6 fact treatment, **not** the model-prose treatment reserved for the AI layer — see §6 for the fact-vs-prose distinction.
+
 ---
 
 ## 6. AI assistant surfaces
@@ -222,6 +226,7 @@ As shipped (read model v4), schedule variance is presented as **stacked signed-m
 - The assistant panel is a right-side drawer with the same hairline frame as any panel. It is never modal and never blocks the schedule.
 - **Provider disclosure is always visible**, not in a settings screen: a line at the top of the panel naming the provider that will receive context, and what scope of job data goes with the request. Local models read `Local · no data leaves this machine`.
 - **Deterministic risk flags** render as table-like rows: a Lucide glyph, the fact, the affected task link. They are facts, set in Barlow 13px `--color-text`.
+- **Deterministic schedule explanations** use this same fact treatment, not the model-prose treatment. The focus-follow schedule-explanation panel (`src/gantt/ExplanationPanel.tsx`, read model v7) renders the scheduler's typed drivers, calendar gaps, float, and finish limits as plain FACT rows in Barlow 13px `--color-text` under a Condensed uppercase panel title, in a non-modal hairline-framed region on a transparent ground. These are computed truth, so they never take the indented `--color-neutral-700` accent-rule prose treatment below — that treatment stays reserved for AI assistant prose that interprets facts.
 - **Model prose** renders indented under the flag it explains, in `--color-neutral-700`, prefixed with a hairline left rule in `--color-accent-300`. The typographic difference between fact and explanation is load-bearing.
 - **Proposals** render as a diff list: each changed field on one line as `label · current → proposed`, current in `--color-neutral-700` with a strikethrough, proposed in `--state-proposed` weight 500. A proposal card carries an `unapplied` tag until accepted, and Accept / Discard as primary and ghost buttons.
 - Applying a proposal is one undoable transaction; the UI confirms with an inline `Applied · Undo` affordance, not a toast that disappears.

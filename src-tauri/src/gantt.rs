@@ -5,10 +5,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::scheduling::{
-    CalendarWeekday, DependencyType, ScheduleResult, ScheduledTask, WorkingCalendar,
+    CalendarWeekday, DependencyType, ScheduleResult, ScheduledTask, TaskExplanation,
+    WorkingCalendar,
 };
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 6;
+pub const GANTT_READ_MODEL_VERSION: u16 = 7;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -169,6 +170,10 @@ pub struct GanttRow {
     /// Typed predecessor links, sorted by predecessor id then dependency type.
     pub predecessors: Vec<GanttPredecessorLink>,
     pub baseline: Option<GanttBaselineComparison>,
+    /// Deterministic, typed explanation of why this task starts and finishes when
+    /// it does (contract v7). Reused directly from the scheduler; React renders the
+    /// facts and never derives them.
+    pub explanation: TaskExplanation,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -199,6 +204,10 @@ pub enum GanttReadModelError {
     },
     #[error("summary task {task_id} cannot carry task constraints")]
     SummaryConstraint { task_id: String },
+    #[error("task {task_id} has no schedule explanation")]
+    MissingExplanation { task_id: String },
+    #[error("task {task_id} carries more than one schedule explanation")]
+    DuplicateExplanation { task_id: String },
 }
 
 impl GanttReadModelError {
@@ -214,7 +223,18 @@ impl GanttReadModelError {
             Self::UnknownPredecessorTask { .. } => "gantt_predecessor_task_unknown",
             Self::DuplicatePredecessor { .. } => "gantt_predecessor_duplicate",
             Self::SummaryConstraint { .. } => "gantt_summary_constraint_invalid",
+            Self::MissingExplanation { .. } => "gantt_explanation_missing",
+            Self::DuplicateExplanation { .. } => "gantt_explanation_duplicate",
         }
+    }
+}
+
+/// The task id carried by every explanation variant.
+fn explanation_task_id(explanation: &TaskExplanation) -> &str {
+    match explanation {
+        TaskExplanation::Summary { task_id }
+        | TaskExplanation::Complete { task_id, .. }
+        | TaskExplanation::Scheduled { task_id, .. } => task_id.as_str(),
     }
 }
 
@@ -243,6 +263,7 @@ pub fn build_gantt_read_model(
     let predecessors_by_task = join_predecessors(source.predecessors, &task_ids)?;
     let calendar = build_calendar_facts(&source.calendar);
     let progress_statuses = derive_progress_statuses(&source.tasks, &schedule_by_id);
+    let explanations_by_task = join_explanations(&source.schedule.explanations, &task_ids)?;
 
     let rows = hierarchy
         .into_iter()
@@ -269,6 +290,13 @@ pub fn build_gantt_read_model(
                     task_id: task.id.clone(),
                 });
             }
+            let explanation = explanations_by_task
+                .get(task.id.as_str())
+                .copied()
+                .ok_or_else(|| GanttReadModelError::MissingExplanation {
+                    task_id: task.id.clone(),
+                })?
+                .clone();
             Ok(GanttRow {
                 task_id: task.id.clone(),
                 parent_task_id: task.parent_task_id.clone(),
@@ -321,6 +349,7 @@ pub fn build_gantt_read_model(
                             .saturating_sub(baseline.duration_minutes),
                     }
                 }),
+                explanation,
             })
         })
         .collect::<Result<Vec<_>, _>>()?;
@@ -622,6 +651,31 @@ fn join_baseline(
         }
     }
     Ok(baseline_by_task)
+}
+
+/// Joins each scheduler explanation by task id, rejecting a duplicate id up front.
+/// A task with no explanation is caught when its row is built
+/// (`gantt_explanation_missing`); duplicates are `gantt_explanation_duplicate`.
+fn join_explanations<'a>(
+    explanations: &'a [TaskExplanation],
+    task_ids: &HashSet<&str>,
+) -> Result<HashMap<&'a str, &'a TaskExplanation>, GanttReadModelError> {
+    let mut explanations_by_task = HashMap::with_capacity(explanations.len());
+    for explanation in explanations {
+        let task_id = explanation_task_id(explanation);
+        // An explanation for a task outside the projection cannot be matched to a
+        // row, so it can only manifest as another task's missing explanation; a
+        // repeated id is the deterministic duplicate error.
+        if !task_ids.contains(task_id) {
+            continue;
+        }
+        if explanations_by_task.insert(task_id, explanation).is_some() {
+            return Err(GanttReadModelError::DuplicateExplanation {
+                task_id: task_id.to_string(),
+            });
+        }
+    }
+    Ok(explanations_by_task)
 }
 
 fn join_predecessors(
