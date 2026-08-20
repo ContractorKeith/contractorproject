@@ -71,11 +71,11 @@
   outline-offset: -2px;
   cursor: grab;
   touch-action: pan-y;
+  user-select: none;
 }
 
 .gantt-timeline-pane--panning {
   cursor: grabbing;
-  user-select: none;
 }
 
 .gantt-timeline {
@@ -229,7 +229,7 @@
 
 .gantt-timeline__today-label {
   position: absolute;
-  top: 0;
+  top: 20px;
   left: 4px;
   padding: 0 var(--space-1);
   color: var(--color-text);

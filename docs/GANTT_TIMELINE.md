@@ -32,19 +32,26 @@ timeline pane.
   read model's representative `criticalPath`.
 
 The focusable timeline region provides keyboard access to horizontal
-scrolling. Left/Right move one civil day at the current zoom, Page Up/Down move
-one shared-viewport width, and Home/End reach the horizontal extents. Pointer
+scrolling. Left/Right move at least 24 pixels (or one civil day when wider),
+Page Up/Down move one visible-timeline width, and Home/End reach the horizontal
+extents. These Home/End/Page Up/Page Down commands are horizontal; vertical
+treegrid movement remains Ctrl/Cmd+Home/End and Page Up/Page Down, while
+Arrow Up/Down retain native vertical scrolling when the timeline region has
+focus. Pointer
 dragging on its non-interactive canvas pans the same native shared scroll plane
 after a small activation threshold; it never applies a visual transform or
 moves the vertical scroll owner. The region exposes no task semantics because
 the adjacent treegrid is the accessible schedule spine.
 
-The application shell injects the user's local civil date once per loaded
-schedule mount. When that day is inside the existing drawn domain and differs
-from the data-date civil day, the timeline draws a labelled 1px dashed neutral
-marker at civil midnight. Today never expands the domain; an omitted date draws
-nothing. The solid accent data-date marker remains the authoritative status
-instant and retains its existing domain-extension rule.
+The application shell acquires the user's local civil date once per loaded
+schedule mount; it does not refresh across midnight while the app remains open.
+When that day is inside `[domain.start, domain.finish)` and differs from the
+data-date civil day, the timeline draws a labelled 1px dashed neutral marker at
+civil midnight. The ruler's `RIGHT_PADDING` strip extends beyond that interval
+and draws no today marker. Today never expands the domain; an omitted date draws
+nothing. Its flag occupies a second label row below the data-date flag so nearby
+dates remain readable. The solid accent data-date marker remains the
+authoritative status instant and retains its existing domain-extension rule.
 
 ## Non-working-time shading
 

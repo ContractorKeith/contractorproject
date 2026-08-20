@@ -133,8 +133,6 @@ export function GanttTimeline({
 
   function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
     if (event.button !== 0 || !event.isPrimary) return;
-    const target = event.target as Element;
-    if (target.closest("button, a, input, select, textarea, [role='button']")) return;
     const viewport = scrollRef.current;
     if (!viewport) return;
     panRef.current = {
@@ -150,13 +148,15 @@ export function GanttTimeline({
     const pan = panRef.current;
     const viewport = scrollRef.current;
     if (!pan || !viewport || pan.pointerId !== event.pointerId) return;
+    if (event.buttons === 0) return finishPointerPan(event);
     const deltaX = event.clientX - pan.startClientX;
     if (!pan.active && Math.abs(deltaX) < 3) return;
     if (!pan.active) {
       pan.active = true;
       setPanning(true);
     }
-    viewport.scrollLeft = pan.startScrollLeft - deltaX;
+    const appliedDeltaX = deltaX - Math.sign(deltaX) * 3;
+    viewport.scrollLeft = pan.startScrollLeft - appliedDeltaX;
     event.preventDefault();
   }
 
@@ -173,19 +173,22 @@ export function GanttTimeline({
   function handleTimelineKeyDown(event: KeyboardEvent<HTMLDivElement>) {
     const viewport = scrollRef.current;
     if (!viewport) return;
+    const tableWidth = viewport.querySelector<HTMLElement>(".gantt-treegrid-viewport")?.offsetWidth ?? 0;
+    const visibleTimelineWidth = Math.max(0, viewport.clientWidth - tableWidth);
+    const arrowStep = Math.max(dayWidth, 24);
     let nextScrollLeft: number;
     switch (event.key) {
       case "ArrowLeft":
-        nextScrollLeft = viewport.scrollLeft - dayWidth;
+        nextScrollLeft = viewport.scrollLeft - arrowStep;
         break;
       case "ArrowRight":
-        nextScrollLeft = viewport.scrollLeft + dayWidth;
+        nextScrollLeft = viewport.scrollLeft + arrowStep;
         break;
       case "PageUp":
-        nextScrollLeft = viewport.scrollLeft - viewport.clientWidth;
+        nextScrollLeft = viewport.scrollLeft - visibleTimelineWidth;
         break;
       case "PageDown":
-        nextScrollLeft = viewport.scrollLeft + viewport.clientWidth;
+        nextScrollLeft = viewport.scrollLeft + visibleTimelineWidth;
         break;
       case "Home":
         nextScrollLeft = 0;

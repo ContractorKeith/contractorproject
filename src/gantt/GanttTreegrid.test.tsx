@@ -306,6 +306,12 @@ describe("GanttTreegrid", () => {
     expect(marker).toHaveStyle({ left: "72px" });
   });
 
+  it("draws today at the left edge when it equals the first drawn civil day", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} todayDate="2026-08-15" />);
+
+    expect(screen.getByTestId("gantt-today-marker")).toHaveStyle({ left: "32px" });
+  });
+
   it("does not draw today outside the existing timeline domain", () => {
     render(<GanttTreegrid readModel={model(fixtureRows)} todayDate="2026-08-21" />);
     expect(screen.queryByTestId("gantt-today-marker")).not.toBeInTheDocument();
@@ -331,16 +337,18 @@ describe("GanttTreegrid", () => {
       clientWidth: { configurable: true, value: 400 },
       scrollWidth: { configurable: true, value: 1_200 },
     });
+    const table = scrollport.querySelector<HTMLElement>(".gantt-treegrid-viewport")!;
+    Object.defineProperty(table, "offsetWidth", { configurable: true, value: 160 });
     scrollport.scrollLeft = 100;
 
     const timeline = screen.getByRole("region", { name: "Schedule timeline" });
     timeline.focus();
     await user.keyboard("{ArrowRight}");
-    expect(scrollport.scrollLeft).toBe(108);
+    expect(scrollport.scrollLeft).toBe(124);
     await user.keyboard("{ArrowLeft}");
     expect(scrollport.scrollLeft).toBe(100);
     await user.keyboard("{PageDown}");
-    expect(scrollport.scrollLeft).toBe(500);
+    expect(scrollport.scrollLeft).toBe(340);
     await user.keyboard("{PageUp}");
     expect(scrollport.scrollLeft).toBe(100);
     await user.keyboard("{End}");

@@ -210,6 +210,17 @@ test("announces progress facts, draws the data-date marker, and stays accessible
   });
   expect(markerStyles.dataDateLine).toBe("solid");
   expect(markerStyles.todayLine).toBe("dashed");
+  const labelsOverlap = await page.evaluate(() => {
+    const dataDate = document.querySelector<HTMLElement>(".gantt-timeline__data-date-label")!.getBoundingClientRect();
+    const today = document.querySelector<HTMLElement>(".gantt-timeline__today-label")!.getBoundingClientRect();
+    return !(
+      dataDate.right <= today.left ||
+      today.right <= dataDate.left ||
+      dataDate.bottom <= today.top ||
+      today.bottom <= dataDate.top
+    );
+  });
+  expect(labelsOverlap).toBe(false);
 
   const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
   expect(results.violations).toEqual([]);
@@ -532,13 +543,14 @@ test("drags the shared scroll plane and preserves alignment and zoom anchoring",
   await page.mouse.down();
   await page.mouse.move(startX - 2, startY + 20);
   await expect(scrollport).toHaveJSProperty("scrollLeft", beforePan.scrollLeft);
-  await page.mouse.move(startX - 120, startY + 35, { steps: 8 });
+  await page.mouse.move(startX - 3, startY + 20);
+  await page.mouse.move(startX - 123, startY + 35, { steps: 8 });
   await expect(timeline).toHaveCSS("cursor", "grabbing");
   await page.mouse.up();
   await expect(timeline).toHaveCSS("cursor", "grab");
 
   const afterScrollLeft = await scrollport.evaluate((element) => element.scrollLeft);
-  expect(afterScrollLeft).toBeGreaterThan(beforePan.scrollLeft + 100);
+  expect(Math.abs(afterScrollLeft - beforePan.scrollLeft - 120)).toBeLessThanOrEqual(1);
   await expect(scrollport).toHaveJSProperty("scrollTop", beforePan.scrollTop);
   expect(await rulerGridDrift(timeline)).toBeLessThanOrEqual(1);
   expect(await timelineBarXDrift(timeline)).toBeLessThanOrEqual(1);

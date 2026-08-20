@@ -1,6 +1,6 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { App } from "./App";
 import type { JobClient } from "./api/jobs";
@@ -8,8 +8,13 @@ import type { TaskMutation, UpdateTaskConstraintRequest, WorkingCalendar } from 
 
 describe("job workspace", () => {
   beforeEach(() => {
+    vi.setSystemTime(new Date("2026-08-20T12:00:00"));
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it("creates a first job and shows it in the workspace", async () => {
