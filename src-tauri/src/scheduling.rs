@@ -836,26 +836,28 @@ fn compute_explanations(
             ScheduleDriver::DataDate { date } => date.date(),
             ScheduleDriver::ScheduleStart {} => calendar.first_working_date,
         };
-        // FF/SF hand-offs bound the successor's finish, so the arrival is the
-        // leaf's reported early-finish civil date whether or not it is started.
-        // The remaining-start conversion applies only to a started leaf whose
-        // primary is not finish-anchored.
-        let primary_is_finish_anchored = matches!(
-            &primary_driver,
-            ScheduleDriver::Predecessor {
-                dependency_type: DependencyType::FinishFinish | DependencyType::StartFinish,
-                ..
-            }
-        );
+        // The arrival primitive is chosen by the primary reference's anchor kind,
+        // not by FF/SF. A finish-anchored FF reference measures to the leaf's
+        // reported early-finish civil date. A finish-anchored FS reference keeps
+        // the reported early-start date when not started (a milestone's event
+        // instant aligns with the predecessor finish, preserving no-gap) and the
+        // remaining-work start when in progress. Every start-anchored reference
+        // (SS, SF, startConstraint, dataDate, scheduleStart) uses the
+        // remaining-work start converted with the same start-instant primitive
+        // that backs the data-date instant, for both started and not-started
+        // leaves; that lands a milestone on its actual working-day start instead
+        // of the prior-day event instant, so undisplaced milestones report no gap.
         let leaf_instants = instants[original_index].as_ref().expect("leaf instants");
-        let arrival_date: NaiveDate = if primary_is_finish_anchored {
-            leaf_instants.early_finish.date()
-        } else if in_progress {
-            // Convert the remaining-work start with the same start-instant
-            // primitive that backs the data-date instant.
-            calendar.start_instant(rem_start)?.date()
-        } else {
-            leaf_instants.early_start.date()
+        let arrival_date: NaiveDate = match &primary_driver {
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::FinishFinish,
+                ..
+            } => leaf_instants.early_finish.date(),
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::FinishStart,
+                ..
+            } if !in_progress => leaf_instants.early_start.date(),
+            _ => calendar.start_instant(rem_start)?.date(),
         };
         let (from_date, to_date) = if reference_date <= arrival_date {
             (reference_date, arrival_date)

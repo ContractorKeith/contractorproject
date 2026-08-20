@@ -2091,6 +2091,108 @@ fn finish_finish_arrival_overrides_in_progress_and_reports_no_spurious_gap() {
 }
 
 #[test]
+fn undisplaced_milestone_reports_no_phantom_gap_under_a_data_date() {
+    // A lone milestone floored at a later-Monday data date has a remaining-work
+    // start of Monday 2026-01-12, but its event instant is the prior Friday 16:00.
+    // The start-anchored dataDate reference measures to the working-day start, so
+    // there is no phantom Friday->Monday gap.
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("M", 0)], vec![]),
+        &[],
+        &status(Some("2026-01-12"), vec![]),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "M") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &ScheduleDriver::DataDate {
+                    date: at("2026-01-12", "08:00"),
+                }
+            );
+            assert_eq!(calendar_gap, &None);
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn undisplaced_milestone_reports_no_phantom_gap_under_start_anchored_predecessors() {
+    // A pinned to Monday 2026-01-12 drives a milestone whose event instant is the
+    // prior Friday 16:00. Both SS+0 and SF+0 are start-anchored, so the arrival is
+    // the milestone's Monday working-day start and no phantom weekend gap appears.
+    for link_type in [DependencyType::StartStart, DependencyType::StartFinish] {
+        let result = calculate_schedule_with_constraints(
+            &progress_input(
+                vec![task("A", 480), task("M", 0)],
+                vec![dep("A", "M", link_type, 0)],
+            ),
+            &[constraint("A", Some("2026-01-12"), None)],
+        )
+        .expect("valid schedule");
+        match explanation(&result, "M") {
+            TaskExplanation::Scheduled {
+                primary_driver,
+                calendar_gap,
+                ..
+            } => {
+                assert_eq!(primary_driver, &predecessor("A", link_type, 0));
+                assert_eq!(calendar_gap, &None, "unexpected gap for {link_type:?}");
+            }
+            other => panic!("expected scheduled explanation for {link_type:?}, got {other:?}"),
+        }
+    }
+}
+
+#[test]
+fn lagged_finish_finish_hand_off_measures_a_started_successors_weekend_gap() {
+    // A is pinned to Friday 2026-01-09; FF+480 pushes B's finish to Monday
+    // 2026-01-12. B is 50% and started Monday 2026-01-05, so the finish-anchored FF
+    // arrival (B's Monday early finish) against A's Friday finish measures the real
+    // weekend gap rather than suppressing it.
+    let result = calculate_schedule_with_progress(
+        &progress_input(
+            vec![task("A", 480), task("B", 960)],
+            vec![ff("A", "B", 480)],
+        ),
+        &[constraint("A", Some("2026-01-09"), None)],
+        &status(
+            Some("2026-01-05"),
+            vec![progress("B", 50, Some("2026-01-05"), None)],
+        ),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            started_actual_start,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishFinish, 480)
+            );
+            assert_eq!(
+                calendar_gap,
+                &Some(CalendarGap {
+                    from_date: ymd("2026-01-09"),
+                    to_date: ymd("2026-01-12"),
+                    non_working_day_count: 2,
+                })
+            );
+            assert_eq!(started_actual_start, &Some(at("2026-01-05", "08:00")));
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+    assert_eq!(leaf(&result, "B").early_finish, at("2026-01-12", "16:00"));
+}
+
+#[test]
 fn schedule_start_gap_reference_is_the_normalized_first_working_date() {
     // Saturday schedule start: the normalized reference is Monday 2026-01-12, so a
     // lone leaf reports no weekend gap (the entered Saturday would have invented one).
