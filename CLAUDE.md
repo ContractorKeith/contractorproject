@@ -11,13 +11,14 @@ ContractorProject is a local-first, AI-native project and job management tool fo
 
 v0.1 scheduled-job tracer — persisted work breakdown, schedule inputs,
 SNET/FNLT constraints, audited data-date/progress statusing, immutable named
-baselines, all four dependency types (FS/SS/FF/SF with signed lag), and dated
-non-working calendar exceptions now flow through the pure Rust scheduler into
-the production Gantt (read-model v6 with calendar facts and non-working
-shading, typed link annotations and geometry, progress facts, a data-date
-marker, baseline ghost bars, and start/finish/duration variance) in the
-normal desktop workflow. Schedule explanations are the only open
-scheduling-core MVP item. Last touched 2026-08-20.
+baselines, all four dependency types (FS/SS/FF/SF with signed lag), dated
+non-working calendar exceptions, and deterministic schedule explanations now
+flow through the pure Rust scheduler into the production Gantt (read-model v7
+with calendar facts and non-working shading, typed link annotations and
+geometry, progress facts, a data-date marker, baseline ghost bars,
+start/finish/duration variance, and per-task explanation facts surfaced in a
+focus-following panel) in the normal desktop workflow. The scheduling-core
+MVP section is complete. Last touched 2026-08-20.
 
 ## Commands
 

@@ -1,7 +1,7 @@
 # MVP delivery plan
 
 Status: active
-Updated: 2026-08-16
+Updated: 2026-08-20
 
 The work is sequenced as tracer slices. Each slice leaves a usable path through the real desktop app and keeps scheduling, persistence, UI, and agent interfaces aligned.
 
@@ -48,7 +48,7 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 - [x] Define the versioned Rust schedule read-model query with fixture-based tests.
 - [x] Wire persisted schedule inputs through the read-model query.
 - [x] Show schedule validation failures in the normal job workflow.
-- [ ] Add schedule explanations.
+- [x] Add schedule explanations.
 
 Exit: known schedule fixtures reproduce expected dates, float, and critical tasks; invalid graphs cannot be committed.
 
