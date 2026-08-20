@@ -1813,28 +1813,22 @@ fn reports_a_co_binding_start_constraint_as_a_secondary_driver() {
         &[constraint("B", Some("2026-01-06"), None)],
     )
     .expect("valid schedule");
-    match explanation(&result, "B") {
-        TaskExplanation::Scheduled {
-            primary_driver,
-            other_binding_drivers,
-            calendar_gap,
-            ..
-        } => {
-            assert_eq!(
-                primary_driver,
-                &predecessor("A", DependencyType::FinishStart, 0)
-            );
-            assert_eq!(
-                other_binding_drivers,
-                &vec![ScheduleDriver::StartConstraint {
-                    date: ymd("2026-01-06"),
-                    normalized_date: ymd("2026-01-06"),
-                }]
-            );
-            assert_eq!(calendar_gap, &None);
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::FinishStart, 0),
+            other_binding_drivers: vec![ScheduleDriver::StartConstraint {
+                date: ymd("2026-01-06"),
+                normalized_date: ymd("2026-01-06"),
+            }],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -1845,24 +1839,38 @@ fn explains_a_data_date_push_and_its_successor() {
         &status(Some("2026-01-07"), vec![]),
     )
     .expect("valid schedule");
-    match explanation(&result, "A") {
-        TaskExplanation::Scheduled { primary_driver, .. } => assert_eq!(
-            primary_driver,
-            &ScheduleDriver::DataDate {
+    assert_eq!(
+        explanation(&result, "A"),
+        &TaskExplanation::Scheduled {
+            task_id: "A".into(),
+            primary_driver: ScheduleDriver::DataDate {
                 date: at("2026-01-07", "08:00"),
-            }
-        ),
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
-    match explanation(&result, "B") {
-        TaskExplanation::Scheduled { primary_driver, .. } => {
-            assert_eq!(
-                primary_driver,
-                &predecessor("A", DependencyType::FinishStart, 0)
-            )
+            },
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::Successor {
+                task_id: "B".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            },
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::FinishStart, 0),
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
+        }
+    );
 }
 
 #[test]
@@ -1887,22 +1895,21 @@ fn explains_a_complete_leaf_and_an_in_progress_leaf() {
             actual_finish: at("2026-01-05", "16:00"),
         }
     );
-    match explanation(&result, "B") {
-        TaskExplanation::Scheduled {
-            primary_driver,
-            started_actual_start,
-            ..
-        } => {
-            assert_eq!(
-                primary_driver,
-                &ScheduleDriver::DataDate {
-                    date: at("2026-01-07", "08:00"),
-                }
-            );
-            assert_eq!(started_actual_start, &Some(at("2026-01-06", "08:00")));
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: ScheduleDriver::DataDate {
+                date: at("2026-01-07", "08:00"),
+            },
+            other_binding_drivers: vec![],
+            started_actual_start: Some(at("2026-01-06", "08:00")),
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -1913,17 +1920,19 @@ fn omits_a_non_binding_negative_lag_link() {
         vec![ss("A", "C", -480)],
     ))
     .expect("valid schedule");
-    match explanation(&result, "C") {
-        TaskExplanation::Scheduled {
-            primary_driver,
-            other_binding_drivers,
-            ..
-        } => {
-            assert_eq!(primary_driver, &ScheduleDriver::ScheduleStart {});
-            assert!(other_binding_drivers.is_empty());
+    assert_eq!(
+        explanation(&result, "C"),
+        &TaskExplanation::Scheduled {
+            task_id: "C".into(),
+            primary_driver: ScheduleDriver::ScheduleStart {},
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -1933,20 +1942,19 @@ fn explains_a_finish_finish_primary_measuring_to_the_early_finish() {
         vec![ff("A", "B", 0)],
     ))
     .expect("valid schedule");
-    match explanation(&result, "B") {
-        TaskExplanation::Scheduled {
-            primary_driver,
-            calendar_gap,
-            ..
-        } => {
-            assert_eq!(
-                primary_driver,
-                &predecessor("A", DependencyType::FinishFinish, 0)
-            );
-            assert_eq!(calendar_gap, &None);
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::FinishFinish, 0),
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -1958,27 +1966,23 @@ fn explains_a_positive_lag_gap_over_a_closed_day() {
         dependencies: vec![fs("A", "B", 480)],
     })
     .expect("valid schedule");
-    match explanation(&result, "B") {
-        TaskExplanation::Scheduled {
-            primary_driver,
-            calendar_gap,
-            ..
-        } => {
-            assert_eq!(
-                primary_driver,
-                &predecessor("A", DependencyType::FinishStart, 480)
-            );
-            assert_eq!(
-                calendar_gap,
-                &Some(CalendarGap {
-                    from_date: ymd("2026-01-05"),
-                    to_date: ymd("2026-01-08"),
-                    non_working_day_count: 1,
-                })
-            );
+    assert_eq!(
+        explanation(&result, "B"),
+        &TaskExplanation::Scheduled {
+            task_id: "B".into(),
+            primary_driver: predecessor("A", DependencyType::FinishStart, 480),
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: Some(CalendarGap {
+                from_date: ymd("2026-01-05"),
+                to_date: ymd("2026-01-08"),
+                non_working_day_count: 1,
+            }),
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
-        other => panic!("expected scheduled explanation, got {other:?}"),
-    }
+    );
 }
 
 #[test]
@@ -2045,6 +2049,412 @@ fn explains_a_lagged_milestone_predecessor() {
             late_finish_limit: LateFinishLimit::ProjectFinish {},
         }
     );
+}
+
+#[test]
+fn finish_finish_arrival_overrides_in_progress_and_reports_no_spurious_gap() {
+    // A(2880) finishes Monday 2026-01-12; B(1920) is 50% and started Monday. FF+0
+    // ties B's finish to A's finish, so the arrival is B's early-finish civil date
+    // (Monday) even though B is in progress. Its remaining work begins Friday, so
+    // the buggy remaining-start conversion would have invented a weekend gap.
+    let result = calculate_schedule_with_progress(
+        &progress_input(
+            vec![task("A", 2880), task("B", 1920)],
+            vec![ff("A", "B", 0)],
+        ),
+        &[],
+        &status(
+            Some("2026-01-05"),
+            vec![progress("B", 50, Some("2026-01-05"), None)],
+        ),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            started_actual_start,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishFinish, 0)
+            );
+            // Reference (A finish Monday) and arrival (B finish Monday) coincide.
+            assert_eq!(calendar_gap, &None);
+            assert_eq!(started_actual_start, &Some(at("2026-01-05", "08:00")));
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+    // The reported early finish confirms the FF hand-off lands Monday 2026-01-12.
+    assert_eq!(leaf(&result, "B").early_finish, at("2026-01-12", "16:00"));
+}
+
+#[test]
+fn schedule_start_gap_reference_is_the_normalized_first_working_date() {
+    // Saturday schedule start: the normalized reference is Monday 2026-01-12, so a
+    // lone leaf reports no weekend gap (the entered Saturday would have invented one).
+    let result = calculate_schedule(&ScheduleInput {
+        schedule_start: ymd("2026-01-10"),
+        calendar: standard_calendar(),
+        tasks: vec![task("A", 480)],
+        dependencies: vec![],
+    })
+    .expect("valid schedule");
+    assert_eq!(
+        explanation(&result, "A"),
+        &TaskExplanation::Scheduled {
+            task_id: "A".into(),
+            primary_driver: ScheduleDriver::ScheduleStart {},
+            other_binding_drivers: vec![],
+            started_actual_start: None,
+            calendar_gap: None,
+            total_float_minutes: 0,
+            critical: true,
+            late_finish_limit: LateFinishLimit::ProjectFinish {},
+        }
+    );
+    assert_eq!(result.schedule_start, at("2026-01-12", "08:00"));
+}
+
+#[test]
+fn data_date_gap_reference_is_the_normalized_data_date() {
+    // Saturday entered data date normalizes to Monday 2026-01-12; the reference is
+    // the normalized civil date, so there is no weekend gap.
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480)], vec![]),
+        &[],
+        &status(Some("2026-01-10"), vec![]),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "A") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &ScheduleDriver::DataDate {
+                    date: at("2026-01-12", "08:00"),
+                }
+            );
+            assert_eq!(calendar_gap, &None);
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn milestone_landing_on_its_predecessor_finish_reports_no_gap() {
+    // A pinned to Friday drives both a milestone M and a positive-duration B by
+    // FS+0. M lands on A's Friday finish (no displacement, no gap); B is displaced
+    // to Monday and reports the weekend gap.
+    let result = calculate_schedule_with_constraints(
+        &progress_input(
+            vec![task("A", 480), task("M", 0), task("B", 480)],
+            vec![fs("A", "M", 0), fs("A", "B", 0)],
+        ),
+        &[constraint("A", Some("2026-01-09"), None)],
+    )
+    .expect("valid schedule");
+    match explanation(&result, "M") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishStart, 0)
+            );
+            assert_eq!(calendar_gap, &None);
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+    match explanation(&result, "B") {
+        TaskExplanation::Scheduled { calendar_gap, .. } => assert_eq!(
+            calendar_gap,
+            &Some(CalendarGap {
+                from_date: ymd("2026-01-09"),
+                to_date: ymd("2026-01-12"),
+                non_working_day_count: 2,
+            })
+        ),
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn complete_predecessor_data_date_lift_reports_a_contributing_data_date() {
+    // A completes Monday; the Wednesday data date lifts B's FS bound above the raw
+    // actual-finish anchor. The lift wins, so dataDate is reported alongside the
+    // binding predecessor.
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(
+            Some("2026-01-07"),
+            vec![progress("A", 100, Some("2026-01-05"), Some("2026-01-05"))],
+        ),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            other_binding_drivers,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishStart, 0)
+            );
+            assert_eq!(
+                other_binding_drivers,
+                &vec![ScheduleDriver::DataDate {
+                    date: at("2026-01-07", "08:00"),
+                }]
+            );
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn late_finish_limit_skips_a_complete_successor() {
+    // B is complete, so it can impose no late bound on A; A falls back to the
+    // project-finish anchor.
+    let result = calculate_schedule_with_progress(
+        &progress_input(vec![task("A", 480), task("B", 480)], vec![fs("A", "B", 0)]),
+        &[],
+        &status(
+            Some("2026-01-05"),
+            vec![progress("B", 100, Some("2026-01-05"), Some("2026-01-05"))],
+        ),
+    )
+    .expect("valid schedule");
+    match explanation(&result, "A") {
+        TaskExplanation::Scheduled {
+            late_finish_limit, ..
+        } => assert_eq!(late_finish_limit, &LateFinishLimit::ProjectFinish {}),
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn late_finish_limit_skips_a_start_anchored_successor_through_a_started_task() {
+    // A is in progress with a tight-deadline SS successor B. The SS edge imposes no
+    // late bound back through a started task, so A's limit is the project finish;
+    // switching the same edge to FS names B instead.
+    let tasks = || vec![task("A", 960), task("B", 480)];
+    let progress_status = || {
+        status(
+            Some("2026-01-07"),
+            vec![progress("A", 50, Some("2026-01-05"), None)],
+        )
+    };
+    let ss_result = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![ss("A", "B", 0)]),
+        &[constraint("B", None, Some("2026-01-06"))],
+        &progress_status(),
+    )
+    .expect("valid SS schedule");
+    match explanation(&ss_result, "A") {
+        TaskExplanation::Scheduled {
+            late_finish_limit, ..
+        } => assert_eq!(late_finish_limit, &LateFinishLimit::ProjectFinish {}),
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+    let fs_result = calculate_schedule_with_progress(
+        &progress_input(tasks(), vec![fs("A", "B", 0)]),
+        &[constraint("B", None, Some("2026-01-06"))],
+        &progress_status(),
+    )
+    .expect("valid FS schedule");
+    match explanation(&fs_result, "A") {
+        TaskExplanation::Scheduled {
+            late_finish_limit, ..
+        } => assert_eq!(
+            late_finish_limit,
+            &LateFinishLimit::Successor {
+                task_id: "B".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }
+        ),
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn orders_binding_predecessors_lexically_then_by_type() {
+    // Two distinct predecessors both finish Monday and bind B; the lexical id
+    // order puts A first and C second.
+    let distinct = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("C", 480), task("B", 480)],
+        vec![fs("A", "B", 0), fs("C", "B", 0)],
+    ))
+    .expect("valid distinct-predecessor schedule");
+    match explanation(&distinct, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            other_binding_drivers,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishStart, 0)
+            );
+            assert_eq!(
+                other_binding_drivers,
+                &vec![predecessor("C", DependencyType::FinishStart, 0)]
+            );
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+
+    // The same predecessor A binds B through both FS+0 and SS+480 (each reaching
+    // Tuesday 08:00); declaration order FS then SS breaks the tie.
+    let same_pair = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 480)],
+        vec![fs("A", "B", 0), ss("A", "B", 480)],
+    ))
+    .expect("valid same-pair schedule");
+    match explanation(&same_pair, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            other_binding_drivers,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishStart, 0)
+            );
+            assert_eq!(
+                other_binding_drivers,
+                &vec![predecessor("A", DependencyType::StartStart, 480)]
+            );
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn reports_only_the_binding_link_of_a_same_pair() {
+    // SS+0 lets B start Monday but does not bind its Tuesday start; only the FF+0
+    // link binds, so the SS link is not reported.
+    let result = calculate_schedule(&progress_input(
+        vec![task("A", 960), task("B", 480)],
+        vec![ss("A", "B", 0), ff("A", "B", 0)],
+    ))
+    .expect("valid schedule");
+    match explanation(&result, "B") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            other_binding_drivers,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("A", DependencyType::FinishFinish, 0)
+            );
+            assert!(other_binding_drivers.is_empty());
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+#[test]
+fn late_finish_limit_names_each_successor_link_type() {
+    // SS: B(960) driven start-to-start by A(480) bounds A's late finish.
+    let ss_result = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 960)],
+        vec![ss("A", "B", 0)],
+    ))
+    .expect("valid SS schedule");
+    assert_eq!(
+        scheduled_limit(&ss_result, "A"),
+        LateFinishLimit::Successor {
+            task_id: "B".into(),
+            dependency_type: DependencyType::StartStart,
+            lag_minutes: 0,
+        }
+    );
+
+    // FF: B(480) finish-to-finish with A(960) bounds A's late finish.
+    let ff_result = calculate_schedule(&progress_input(
+        vec![task("A", 960), task("B", 480)],
+        vec![ff("A", "B", 0)],
+    ))
+    .expect("valid FF schedule");
+    assert_eq!(
+        scheduled_limit(&ff_result, "A"),
+        LateFinishLimit::Successor {
+            task_id: "B".into(),
+            dependency_type: DependencyType::FinishFinish,
+            lag_minutes: 0,
+        }
+    );
+
+    // SF: B(480) start-to-finish with A(480) and +960 lag bounds A's late finish.
+    let sf_result = calculate_schedule(&progress_input(
+        vec![task("A", 480), task("B", 480)],
+        vec![sf("A", "B", 960)],
+    ))
+    .expect("valid SF schedule");
+    assert_eq!(
+        scheduled_limit(&sf_result, "A"),
+        LateFinishLimit::Successor {
+            task_id: "B".into(),
+            dependency_type: DependencyType::StartFinish,
+            lag_minutes: 960,
+        }
+    );
+}
+
+#[test]
+fn reversed_negative_lag_gap_reports_ascending_endpoints() {
+    // P is pinned to Monday 2026-01-12; Q's FS-960 link pulls its start back to the
+    // prior Friday, so the arrival precedes the reference and the gap ascends
+    // Friday -> Monday across the weekend.
+    let result = calculate_schedule_with_constraints(
+        &progress_input(
+            vec![task("P", 480), task("Q", 480)],
+            vec![fs("P", "Q", -960)],
+        ),
+        &[constraint("P", Some("2026-01-12"), None)],
+    )
+    .expect("valid schedule");
+    match explanation(&result, "Q") {
+        TaskExplanation::Scheduled {
+            primary_driver,
+            calendar_gap,
+            ..
+        } => {
+            assert_eq!(
+                primary_driver,
+                &predecessor("P", DependencyType::FinishStart, -960)
+            );
+            assert_eq!(
+                calendar_gap,
+                &Some(CalendarGap {
+                    from_date: ymd("2026-01-09"),
+                    to_date: ymd("2026-01-12"),
+                    non_working_day_count: 2,
+                })
+            );
+        }
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
+}
+
+fn scheduled_limit(result: &ScheduleResult, id: &str) -> LateFinishLimit {
+    match explanation(result, id) {
+        TaskExplanation::Scheduled {
+            late_finish_limit, ..
+        } => late_finish_limit.clone(),
+        other => panic!("expected scheduled explanation, got {other:?}"),
+    }
 }
 
 // A rich fixture that exercises a summary, a complete leaf, an in-progress leaf,

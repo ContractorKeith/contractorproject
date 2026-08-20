@@ -331,14 +331,17 @@ the half-open civil interval between the primary driver's reference date and
 the leaf's arrival date, the explanation carries
 `calendarGap { fromDate, toDate, nonWorkingDayCount }`. The reference date is
 the predecessor's driving-anchor civil date (finish for FS/FF, start for
-SS/SF), the entered SNET date, the entered data date, or the schedule-start
-date. The arrival date is the civil date remaining work begins — or the
-early-finish civil date when an FF/SF predecessor is primary. `fromDate` and
-`toDate` are the two dates in ascending order (negative lag can pull the
-arrival before the reference); the count covers `[fromDate, toDate)`, counting
-only non-working days, and the fact is omitted when the count is zero. The
-arrival instant inside an explanation is informational; float must still never
-be derived by differencing reported dates.
+SS/SF), the entered SNET date, the normalized data-date civil date, or the
+normalized schedule-start civil date. The arrival date is the civil date
+remaining work begins — or the early-finish civil date when an FF/SF
+predecessor is primary, whether or not the leaf is started. A milestone that
+lands on its predecessor's finish instant reports no gap because no
+displacement occurred; the arrival date is always the reported civil date.
+`fromDate` and `toDate` are the two dates in ascending order (negative lag can
+pull the arrival before the reference); the count covers `[fromDate, toDate)`,
+counting only non-working days, and the fact is omitted when the count is zero.
+The arrival instant inside an explanation is informational; float must still
+never be derived by differencing reported dates.
 
 ### Float rationale
 

@@ -342,7 +342,6 @@ pub fn calculate_schedule_with_progress(
         .iter()
         .filter_map(|c| c.finish_no_later_than.map(|d| (c.task_id.as_str(), d)))
         .collect();
-    let entered_data_date = progress.data_date;
     let constraints = ConstraintSet::new(constraints, &hierarchy, &graph, &calendar)?;
     let progress = ProgressSet::new(progress, &hierarchy, &graph, &calendar)?;
     let task_count = graph.tasks.len();
@@ -606,7 +605,6 @@ pub fn calculate_schedule_with_progress(
         schedule_finish_offset,
         &entered_snet,
         &entered_fnlt,
-        entered_data_date,
     )?;
 
     let mut tasks = Vec::with_capacity(input.tasks.len());
@@ -695,10 +693,9 @@ fn compute_explanations(
     late_finish: &[i64],
     total_float: &[i64],
     // The project-finish anchor; the residual `projectFinish` late-finish limit.
-    _schedule_finish_offset: i64,
+    schedule_finish_offset: i64,
     entered_snet: &HashMap<&str, NaiveDate>,
     entered_fnlt: &HashMap<&str, NaiveDate>,
-    entered_data_date: Option<NaiveDate>,
 ) -> Result<Vec<TaskExplanation>, ScheduleError> {
     let mut leaf_by_id: HashMap<&str, usize> = HashMap::new();
     for (index, task) in graph.tasks.iter().enumerate() {
@@ -813,7 +810,9 @@ fn compute_explanations(
         };
 
         // Calendar gap between the primary driver's reference date and the leaf's
-        // arrival date.
+        // arrival date. Every reference is a reported/normalized civil date: the
+        // predecessor's driving-anchor instant, the entered SNET date, the
+        // normalized data-date instant, or the normalized schedule-start date.
         let reference_date: NaiveDate = match &primary_driver {
             ScheduleDriver::Predecessor {
                 task_id,
@@ -834,11 +833,13 @@ fn compute_explanations(
                 }
             }
             ScheduleDriver::StartConstraint { date, .. } => *date,
-            ScheduleDriver::DataDate { .. } => {
-                entered_data_date.expect("entered data date backs a dataDate driver")
-            }
-            ScheduleDriver::ScheduleStart {} => input.schedule_start,
+            ScheduleDriver::DataDate { date } => date.date(),
+            ScheduleDriver::ScheduleStart {} => calendar.first_working_date,
         };
+        // FF/SF hand-offs bound the successor's finish, so the arrival is the
+        // leaf's reported early-finish civil date whether or not it is started.
+        // The remaining-start conversion applies only to a started leaf whose
+        // primary is not finish-anchored.
         let primary_is_finish_anchored = matches!(
             &primary_driver,
             ScheduleDriver::Predecessor {
@@ -847,12 +848,12 @@ fn compute_explanations(
             }
         );
         let leaf_instants = instants[original_index].as_ref().expect("leaf instants");
-        let arrival_date: NaiveDate = if in_progress {
+        let arrival_date: NaiveDate = if primary_is_finish_anchored {
+            leaf_instants.early_finish.date()
+        } else if in_progress {
             // Convert the remaining-work start with the same start-instant
             // primitive that backs the data-date instant.
             calendar.start_instant(rem_start)?.date()
-        } else if primary_is_finish_anchored {
-            leaf_instants.early_finish.date()
         } else {
             leaf_instants.early_start.date()
         };
@@ -861,6 +862,8 @@ fn compute_explanations(
         } else {
             (arrival_date, reference_date)
         };
+        // Bounded scan: endpoints are civil dates within the 2000-2100 calendar
+        // window, so the loop runs at most ~36.5k iterations in the worst case.
         let mut non_working_day_count = 0_i64;
         let mut cursor = from_date;
         while cursor < to_date {
@@ -928,10 +931,15 @@ fn compute_explanations(
                     break;
                 }
             }
-            // The residual limit: late finish still sits at the project-finish
-            // anchor (`schedule_finish_offset`) when neither the deadline nor a
-            // successor lowered it.
-            successor_limit.unwrap_or(LateFinishLimit::ProjectFinish {})
+            match successor_limit {
+                Some(limit) => limit,
+                None => {
+                    // Residual: no deadline and no successor lowered the late
+                    // finish, so it still sits at the project-finish anchor.
+                    debug_assert_eq!(leaf_late_finish, schedule_finish_offset);
+                    LateFinishLimit::ProjectFinish {}
+                }
+            }
         };
 
         explanations.push(TaskExplanation::Scheduled {
