@@ -22,6 +22,7 @@ fn standard_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 8 * 60,
         workday_duration_minutes: 8 * 60,
+        exceptions: Vec::new(),
     }
 }
 

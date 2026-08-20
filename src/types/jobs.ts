@@ -10,12 +10,14 @@ export interface Job {
   version: number;
   scheduleStart?: string | null;
   calendar?: WorkingCalendar;
+  /** Sorted canonical YYYY-MM-DD dated non-working calendar exceptions. */
+  calendarExceptions?: string[];
   /** Canonical YYYY-MM-DD job-local data date; null while the job is unstatused. */
   dataDate?: string | null;
 }
 
 export type CalendarWeekday = "monday" | "tuesday" | "wednesday" | "thursday" | "friday" | "saturday" | "sunday";
-export interface WorkingCalendar { workingWeekdays: CalendarWeekday[]; workdayStartMinute: number; workdayDurationMinutes: number; }
+export interface WorkingCalendar { workingWeekdays: CalendarWeekday[]; workdayStartMinute: number; workdayDurationMinutes: number; exceptions?: string[]; }
 
 export interface CreateJobRequest {
   name: string;

@@ -69,6 +69,7 @@ fn working_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 480,
         workday_duration_minutes: 480,
+        exceptions: Vec::new(),
     }
 }
 
@@ -559,6 +560,7 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
                     working_weekdays: vec![],
                     workday_start_minute: 480,
                     workday_duration_minutes: 480,
+                    exceptions: Vec::new(),
                 },
                 expected_job_version: 3,
             },
@@ -587,6 +589,7 @@ fn persisted_schedule_inputs_validate_atomically_and_survive_restart() {
                     working_weekdays: vec![CalendarWeekday::Monday],
                     workday_start_minute: 1_400,
                     workday_duration_minutes: 60,
+                    exceptions: Vec::new(),
                 },
                 expected_job_version: 3,
             },
@@ -1714,7 +1717,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 8);
+    assert_eq!(migrated_version, 9);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -1913,7 +1916,7 @@ fn populated_exact_v4_backup_restores_read_only_then_owned_target_migrates_to_v5
                 0
             ))
             .expect("current version"),
-        8
+        9
     );
     assert_eq!(restored.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name IN ('start_no_earlier_than', 'finish_no_later_than')", [], |row| row.get::<_, i64>(0)).expect("constraint fields"), 2);
 }
@@ -4116,7 +4119,7 @@ fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let typed_column: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('task_dependencies') WHERE name = 'dependency_type'",
@@ -4137,7 +4140,7 @@ fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 8);
+    assert_eq!(migrated_version, 9);
     let hierarchy = service.list_tasks("job-v7").expect("preserved links");
     assert_eq!(hierarchy.dependencies.len(), 1);
     assert_eq!(
@@ -4278,7 +4281,7 @@ fn verified_backup_and_clean_restore_accept_v8() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 8);
+    assert_eq!(restored_version, 9);
 }
 
 // Writes an exact-v7 database with one FS dependency for migration testing.

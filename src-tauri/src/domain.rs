@@ -11,6 +11,10 @@ pub struct Job {
     pub timezone: String,
     pub schedule_start: Option<String>,
     pub calendar: WorkingCalendar,
+    /// Sorted canonical YYYY-MM-DD dated non-working calendar exceptions, loaded
+    /// with the job so the UI can render and manage them without a new query.
+    #[serde(default)]
+    pub calendar_exceptions: Vec<String>,
     /// Canonical YYYY-MM-DD job-local data date; None while the job is unstatused.
     pub data_date: Option<String>,
     pub created_at: String,

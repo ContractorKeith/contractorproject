@@ -36,6 +36,7 @@ fn working_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 480,
         workday_duration_minutes: 480,
+        exceptions: Vec::new(),
     }
 }
 
@@ -52,6 +53,7 @@ fn seven_day_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 480,
         workday_duration_minutes: 480,
+        exceptions: Vec::new(),
     }
 }
 
@@ -169,7 +171,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let job_columns: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'data_date'",
@@ -198,7 +200,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 8);
+    assert_eq!(migrated_version, 9);
     let hierarchy = service.list_tasks("job-v5").expect("preserved tasks");
     assert_eq!(hierarchy.tasks.len(), 1);
     let leaf = &hierarchy.tasks[0];
@@ -783,7 +785,7 @@ fn backup_and_restore_verification_accept_v6_and_exact_v5_snapshots() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 8);
+    assert_eq!(restored_version, 9);
 }
 
 #[test]
@@ -1043,6 +1045,7 @@ fn a_still_valid_calendar_change_commits_with_progress_present() {
                     working_weekdays: working_calendar().working_weekdays,
                     workday_start_minute: 420,
                     workday_duration_minutes: 480,
+                    exceptions: Vec::new(),
                 },
                 expected_job_version: progress.job_version,
             },

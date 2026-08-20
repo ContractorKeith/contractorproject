@@ -33,8 +33,41 @@ the public `contractorproject_lib::scheduling::calculate_schedule` seam.
   schedule start (see "Dependency types and lag").
 
 The core intentionally accepts the weekly calendar explicitly. Persisted
-default-calendar selection, dated holidays/exceptions, split shifts, and
-timezone/DST resolution are separate application slices.
+default-calendar selection, split shifts, and timezone/DST resolution are
+separate application slices.
+
+## Dated calendar exceptions
+
+- The calendar carries an optional list of dated non-working `exceptions`
+  (holidays, weather closures). v1 supports non-working exception dates only;
+  working overrides on normally non-working days are deferred.
+- One rule governs them: an exception date is a non-working civil day, treated
+  identically to a weekly non-working day by every traversal — positive and
+  negative lag consumption, SNET normalization (start of the first working day
+  on or after), FNLT normalization (finish of the last working day on or
+  before), the data-date instant, actuals normalization, remaining-work
+  resumption, and task splitting. There are no special cases.
+- Exceptions are canonical `YYYY-MM-DD` civil dates resolved against the
+  persisted calendar; nothing reads "today". A single `is_working_date` predicate
+  (weekly membership AND not an exception) backs the iterative primitives, and the
+  closed-form working-offset math is corrected by the sorted signed offsets of the
+  exceptions that fall on working weekdays. Exceptions before the first working
+  date carry negative offsets so the correction is applied consistently on both
+  sides of the schedule start; the offset↔date mapping agrees exactly in the
+  positive and negative regimes, and a calendar with no working exceptions is
+  byte-identical to the weekly-only projection.
+- Validation rejects non-canonical text (at the parse boundary), duplicates,
+  dates outside years 2000–2100, and more than 4000 exceptions per job. Range and
+  count are also enforced at the command boundary, independent of whether the
+  schedule can compute, so an out-of-range or over-cap date can never be staged.
+  An exception on an already non-working weekday is a scheduling no-op that still
+  persists (it may matter if the weekly pattern changes later). An exception
+  *before* the schedule start does not shift the forward schedule, but — unlike a
+  pure no-op — it is honored by backward and negative-offset normalization: a
+  finish-no-later-than deadline that falls before the start is measured across the
+  closure rather than a day early. A calendar always retains working time because
+  the weekly pattern still requires at least one working weekday and exceptions are
+  finite, so any normalization landing in an exception run advances deterministically past it.
 
 ## Task and hierarchy rules
 
@@ -282,10 +315,21 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 | Different-type `SS+0` and `FF+0` between `A(960)` and `B(480)` | Both links apply: the binding FF pulls B's finish to A's Tuesday finish, so B runs Tuesday. |
 | Duplicate `SS` link on the same pair | Calculation returns `dependency_duplicate`. |
 | `A =SS=> B`, `B =FF=> A` | Calculation returns `dependency_cycle`. |
+| `A(1440)` with Wednesday closed | A runs Mon, Tue, [Wed skipped], Thu, finishing Thursday 16:00. |
+| `A(480) =FS+480=> B(480)`, Tuesday closed | The lag skips Tuesday onto Wednesday; B runs Thursday. |
+| `A(480) =SS-480=> B(480)`, A pinned to Wednesday, Tuesday closed | B is pulled back one working day past the closure to Monday. |
+| SNET Wednesday with Wednesday closed | Normalizes forward to Thursday 08:00. |
+| `A(1440)` FNLT Wednesday with Wednesday closed | FNLT normalizes back to Tuesday 16:00; the Thursday finish is directly violated. |
+| Data date Wednesday with Wednesday closed | Advances to Thursday 08:00; both leaves start no earlier than Thursday. |
+| 50% `A(1440)`, data date Thursday, Friday closed | Remaining work runs Thursday, skips Friday and the weekend, and finishes Monday 12:00. |
+| Complete `A(480)` with an actual finish on a closed Wednesday | The finish normalizes back to Tuesday 16:00. |
+| Complete `A(480)` with equal actuals on a closed day | Start normalizes forward, finish backward, inverting the window: `progress_normalized_order`. |
+| `A(480) =FS=> B(480)`, Friday and the following Monday closed | A finishes Thursday; B skips the four-day run and starts Tuesday. |
+| Duplicate, out-of-range (year < 2000 or > 2100), or >4000 exceptions | `calendar_duplicate_exception`, `calendar_exception_out_of_range`, `calendar_too_many_exceptions`. |
 
 ## Deferred semantics
 
-Manual scheduling, dated calendar exceptions, multiple daily intervals, resource
-calendars, and schedule explanations are outside this slice. Unsupported inputs
-must be rejected by the adapter that introduces them, never partially
-interpreted.
+Manual scheduling, multiple daily intervals, resource calendars, schedule
+explanations, and working-day overrides on normally non-working days are outside
+this slice. Unsupported inputs must be rejected by the adapter that introduces
+them, never partially interpreted.
