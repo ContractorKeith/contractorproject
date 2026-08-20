@@ -76,6 +76,7 @@ export function GanttTimeline({
     startClientX: number;
     startScrollLeft: number;
     active: boolean;
+    thresholdOffset: number;
   } | null>(null);
   const [panning, setPanning] = useState(false);
   const previousZoomRef = useRef(zoom);
@@ -140,6 +141,7 @@ export function GanttTimeline({
       startClientX: event.clientX,
       startScrollLeft: viewport.scrollLeft,
       active: false,
+      thresholdOffset: 0,
     };
     event.currentTarget.setPointerCapture(event.pointerId);
   }
@@ -153,9 +155,10 @@ export function GanttTimeline({
     if (!pan.active && Math.abs(deltaX) < 3) return;
     if (!pan.active) {
       pan.active = true;
+      pan.thresholdOffset = deltaX;
       setPanning(true);
     }
-    const appliedDeltaX = deltaX - Math.sign(deltaX) * 3;
+    const appliedDeltaX = deltaX - pan.thresholdOffset;
     viewport.scrollLeft = pan.startScrollLeft - appliedDeltaX;
     event.preventDefault();
   }

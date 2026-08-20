@@ -363,6 +363,26 @@ describe("GanttTreegrid", () => {
     expect(screen.getByRole("gridcell", { name: /1 Site work, duration/ })).toHaveFocus();
   });
 
+  it("uses the larger day width for timeline arrow-key steps", async () => {
+    const user = userEvent.setup();
+    render(<GanttTreegrid readModel={model(fixtureRows)} />);
+    const scrollport = screen.getByTestId("gantt-scrollport");
+    Object.defineProperties(scrollport, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1_200 },
+    });
+    await user.click(screen.getByRole("button", { name: "Day" }));
+    await new Promise(requestAnimationFrame);
+    scrollport.scrollLeft = 100;
+
+    const timeline = screen.getByRole("region", { name: "Schedule timeline" });
+    timeline.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(scrollport.scrollLeft).toBe(128);
+    await user.keyboard("{ArrowLeft}");
+    expect(scrollport.scrollLeft).toBe(100);
+  });
+
   it("moves one roving cell focus, collapses hierarchy, and reaches offscreen logical rows", async () => {
     const user = userEvent.setup();
     render(<GanttTreegrid readModel={model(fixtureRows)} viewportHeight={96} />);
