@@ -187,6 +187,15 @@ pub struct UpdateJobDataDateRequest {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CalendarExceptionRequest {
+    pub job_id: String,
+    /// Canonical YYYY-MM-DD dated non-working exception.
+    pub date: String,
+    pub expected_job_version: i64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UpdateTaskProgressRequest {
     pub task_id: String,
     /// When true the progress columns are nulled and percent/actuals are ignored.
@@ -280,6 +289,7 @@ impl ApplicationService {
             timezone,
             schedule_start: None,
             calendar: default_calendar(),
+            calendar_exceptions: Vec::new(),
             data_date: None,
             created_at: now.clone(),
             updated_at: now,
@@ -724,6 +734,40 @@ impl ApplicationService {
         )
     }
 
+    /// Adds a dated non-working calendar exception to a job. Validated as a
+    /// schedule-class edit; the same date twice is rejected.
+    pub fn add_calendar_exception(
+        &self,
+        context: CommandContext,
+        request: CalendarExceptionRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        parse_iso_date("date", &request.date)?;
+        self.store.add_calendar_exception(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
+    /// Removes a dated calendar exception from a job. A missing date is a
+    /// NotFound; the resulting schedule is still validated for symmetry.
+    pub fn remove_calendar_exception(
+        &self,
+        context: CommandContext,
+        request: CalendarExceptionRequest,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        required_version("expectedJobVersion", request.expected_job_version)?;
+        parse_iso_date("date", &request.date)?;
+        self.store.remove_calendar_exception(
+            &request,
+            &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            &context,
+        )
+    }
+
     pub fn update_task_progress(
         &self,
         context: CommandContext,
@@ -860,6 +904,7 @@ pub fn default_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 8 * 60,
         workday_duration_minutes: 480,
+        exceptions: Vec::new(),
     }
 }
 

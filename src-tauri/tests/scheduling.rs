@@ -27,6 +27,7 @@ fn standard_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 8 * 60,
         workday_duration_minutes: 8 * 60,
+        exceptions: Vec::new(),
     }
 }
 
@@ -623,6 +624,7 @@ fn rejects_invalid_task_dependency_and_calendar_inputs() {
                 working_weekdays: vec![],
                 workday_start_minute: 480,
                 workday_duration_minutes: 480,
+                exceptions: Vec::new(),
             },
             "calendar_no_working_days",
         ),
@@ -661,6 +663,7 @@ fn reports_an_out_of_range_schedule_instead_of_panicking() {
             working_weekdays: vec![different_workday],
             workday_start_minute: 480,
             workday_duration_minutes: 480,
+            exceptions: Vec::new(),
         },
         tasks: vec![],
         dependencies: vec![],
@@ -675,6 +678,7 @@ fn reports_an_out_of_range_schedule_instead_of_panicking() {
             working_weekdays: vec![calendar_weekday(NaiveDate::MAX.weekday())],
             workday_start_minute: 480,
             workday_duration_minutes: 480,
+            exceptions: Vec::new(),
         },
         tasks: vec![task("A", 960)],
         dependencies: vec![],

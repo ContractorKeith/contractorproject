@@ -3,7 +3,7 @@ use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chrono::{NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use chrono::{Datelike, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
 use rusqlite::backup::Backup;
 use rusqlite::{
     params, Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior,
@@ -11,11 +11,11 @@ use rusqlite::{
 use uuid::Uuid;
 
 use crate::application::{
-    AddDependencyRequest, BackupResult, CommandContext, RemoveDependencyRequest,
-    ReorderTaskRequest, RestoreVerificationResult, TaskConstraintKind, UpdateJobDataDateRequest,
-    UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
-    UpdateTaskProgressRequest, MAX_AUDIT_SUMMARY_CHARACTERS, MAX_CLIENT_NAME_CHARACTERS,
-    MAX_COMMAND_ID_CHARACTERS,
+    AddDependencyRequest, BackupResult, CalendarExceptionRequest, CommandContext,
+    RemoveDependencyRequest, ReorderTaskRequest, RestoreVerificationResult, TaskConstraintKind,
+    UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
+    UpdateTaskDurationRequest, UpdateTaskProgressRequest, MAX_AUDIT_SUMMARY_CHARACTERS,
+    MAX_CLIENT_NAME_CHARACTERS, MAX_COMMAND_ID_CHARACTERS,
 };
 use crate::domain::{Baseline, FinishStartDependency, Job, JobStatus, Task};
 use crate::error::ApplicationError;
@@ -28,7 +28,7 @@ use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent
 
 /// Highest migration this build applies. Tools that open a database file they
 /// did not create compare against it before writing anything.
-pub(crate) const LATEST_SCHEMA_VERSION: i64 = 8;
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = 9;
 
 pub(crate) struct SqliteStore {
     database_path: PathBuf,
@@ -171,17 +171,25 @@ impl SqliteStore {
                             "job {id} has unsupported status {status}"
                         ))
                     })?;
+                    let exceptions = load_calendar_exceptions(&connection, &id)?;
+                    let mut calendar: WorkingCalendar = serde_json::from_str(&calendar_json)
+                        .map_err(|_| {
+                            ApplicationError::InvalidStoredData(format!(
+                                "job {id} has invalid calendar"
+                            ))
+                        })?;
+                    calendar.exceptions = exceptions.clone();
                     Ok(Job {
                         id: id.clone(),
                         name,
                         status,
                         timezone,
                         schedule_start,
-                        calendar: serde_json::from_str(&calendar_json).map_err(|_| {
-                            ApplicationError::InvalidStoredData(format!(
-                                "job {id} has invalid calendar"
-                            ))
-                        })?,
+                        calendar,
+                        calendar_exceptions: exceptions
+                            .iter()
+                            .map(|date| date.format("%Y-%m-%d").to_string())
+                            .collect(),
                         data_date,
                         created_at,
                         updated_at,
@@ -967,6 +975,118 @@ impl SqliteStore {
         Ok(job)
     }
 
+    /// Adds a dated non-working calendar exception. Validated as a schedule-class
+    /// edit through the proposed-schedule validator so an exception that inverts
+    /// persisted actuals rejects atomically. A date already present is rejected.
+    pub(crate) fn add_calendar_exception(
+        &self,
+        request: &CalendarExceptionRequest,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job_version = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM calendar_exceptions WHERE job_id = ?1 AND exception_date = ?2)",
+            params![request.job_id, request.date],
+            |row| row.get(0),
+        )?;
+        if exists {
+            return Err(ApplicationError::ValidationFailed {
+                code: "calendar_exception_exists",
+                field: "date",
+                message: "this date is already a calendar exception".into(),
+            });
+        }
+        validate_proposed_schedule(
+            &transaction,
+            &request.job_id,
+            &ProposedEdit::CalendarException {
+                date: &request.date,
+                adding: true,
+            },
+        )?;
+        transaction.execute(
+            "INSERT INTO calendar_exceptions (job_id, exception_date) VALUES (?1, ?2)",
+            params![request.job_id, request.date],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![updated_at, job_version + 1, request.job_id],
+        )?;
+        write_audit_record(
+            &transaction,
+            context,
+            updated_at,
+            "added calendar exception",
+        )?;
+        let job = read_job(&transaction, &request.job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
+    /// Removes a dated calendar exception. Removing a non-working day can only add
+    /// working time, but the edit is still validated for symmetry so any resulting
+    /// schedule the scheduler would reject cannot be committed. A missing date is
+    /// a NotFound.
+    pub(crate) fn remove_calendar_exception(
+        &self,
+        request: &CalendarExceptionRequest,
+        updated_at: &str,
+        context: &CommandContext,
+    ) -> Result<Job, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_command_is_new(&transaction, context)?;
+        let job_version = require_draft_job(
+            &transaction,
+            &request.job_id,
+            Some(request.expected_job_version),
+        )?;
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM calendar_exceptions WHERE job_id = ?1 AND exception_date = ?2)",
+            params![request.job_id, request.date],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(ApplicationError::NotFound {
+                resource: "calendar exception",
+                id: request.date.clone(),
+            });
+        }
+        validate_proposed_schedule(
+            &transaction,
+            &request.job_id,
+            &ProposedEdit::CalendarException {
+                date: &request.date,
+                adding: false,
+            },
+        )?;
+        transaction.execute(
+            "DELETE FROM calendar_exceptions WHERE job_id = ?1 AND exception_date = ?2",
+            params![request.job_id, request.date],
+        )?;
+        transaction.execute(
+            "UPDATE jobs SET updated_at = ?1, version = ?2 WHERE id = ?3",
+            params![updated_at, job_version + 1, request.job_id],
+        )?;
+        write_audit_record(
+            &transaction,
+            context,
+            updated_at,
+            "removed calendar exception",
+        )?;
+        let job = read_job(&transaction, &request.job_id)?;
+        transaction.commit()?;
+        Ok(job)
+    }
+
     /// Sets or clears leaf task progress. Summary tasks are rejected and the
     /// complete proposed schedule is validated before commit; a clear nulls all
     /// three progress columns back to unstatused.
@@ -1619,6 +1739,27 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 9)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 9)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            // Dated non-working calendar exceptions. One row per (job, civil date);
+            // merged into the job's WorkingCalendar by every loader. Kept out of
+            // calendar_json so old rows stay valid under serde default.
+            transaction.execute_batch(
+                "CREATE TABLE calendar_exceptions (
+                    job_id TEXT NOT NULL,
+                    exception_date TEXT NOT NULL,
+                    PRIMARY KEY (job_id, exception_date),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (9, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1645,8 +1786,9 @@ impl SqliteStore {
 }
 
 // Indices 0..5 are required at every supported version; indices 5..7 (the
-// baseline tables) exist only from v7 onward.
-const REQUIRED_BACKUP_TABLES: [&str; 7] = [
+// baseline tables) exist only from v7 onward; index 7 (calendar_exceptions)
+// only from v9 onward.
+const REQUIRED_BACKUP_TABLES: [&str; 8] = [
     "schema_migrations",
     "jobs",
     "tasks",
@@ -1654,6 +1796,7 @@ const REQUIRED_BACKUP_TABLES: [&str; 7] = [
     "task_dependencies",
     "baselines",
     "baseline_tasks",
+    "calendar_exceptions",
 ];
 
 #[derive(Clone, Copy)]
@@ -1968,6 +2111,20 @@ const BASELINE_COLUMNS: [ColumnSpec; 5] = [
         data_type: "INTEGER",
         not_null: true,
         primary_key_position: 0,
+    },
+];
+const CALENDAR_EXCEPTION_COLUMNS: [ColumnSpec; 2] = [
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "exception_date",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 2,
     },
 ];
 const BASELINE_TASK_COLUMNS: [ColumnSpec; 5] = [
@@ -2297,7 +2454,7 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if !matches!(schema_version, 4..=8) {
+    if !matches!(schema_version, 4..=9) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
     // The base tables are required at every version; the baseline tables are
@@ -2332,6 +2489,19 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
+    if schema_version >= 9 {
+        let calendar_exception_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'table' AND name = ?1",
+                params![REQUIRED_BACKUP_TABLES[7]],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if calendar_exception_table_count != 1 {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
     verify_supported_schema(&connection, schema_version)?;
     if schema_version >= 5 {
         verify_v5_constraint_domain(&connection)?;
@@ -2344,6 +2514,9 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
     }
     if schema_version >= 8 {
         verify_v8_dependency_domain(&connection)?;
+    }
+    if schema_version >= 9 {
+        verify_v9_calendar_exception_domain(&connection)?;
     }
 
     // These bounded counts prove the core domain tables are readable without
@@ -2377,7 +2550,8 @@ fn verify_supported_schema(
         5 => &[1, 2, 3, 4, 5],
         6 => &[1, 2, 3, 4, 5, 6],
         7 => &[1, 2, 3, 4, 5, 6, 7],
-        _ => &[1, 2, 3, 4, 5, 6, 7, 8],
+        8 => &[1, 2, 3, 4, 5, 6, 7, 8],
+        _ => &[1, 2, 3, 4, 5, 6, 7, 8, 9],
     };
     if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
@@ -2550,6 +2724,31 @@ fn verify_supported_schema(
             }
         }
     }
+    if schema_version >= 9 {
+        verify_table_columns(
+            connection,
+            "calendar_exceptions",
+            &CALENDAR_EXCEPTION_COLUMNS,
+        )?;
+        verify_foreign_keys(
+            connection,
+            "calendar_exceptions",
+            [("jobs", "job_id", "id")],
+        )?;
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                ["calendar_exceptions"],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if !matches_supported_schema_sql(
+            &sql,
+            "createtablecalendar_exceptionsjob_idtextnotnullexception_datetextnotnullprimarykeyjob_idexception_dateforeignkeyjob_idreferencesjobsidondeleterestrict",
+        ) {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
     let task_query = match schema_version {
         4 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
         5 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
@@ -2585,6 +2784,50 @@ fn verify_supported_schema(
                 .prepare(query)
                 .and_then(|mut statement| statement.query([]).map(|_| ()))
                 .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        }
+    }
+    if schema_version >= 9 {
+        connection
+            .prepare(
+                "SELECT job_id, exception_date FROM calendar_exceptions ORDER BY job_id, exception_date LIMIT 1",
+            )
+            .and_then(|mut statement| statement.query([]).map(|_| ()))
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
+    Ok(())
+}
+
+/// Read-only v9 preflight for dated calendar exceptions. Proves every stored
+/// date is canonical YYYY-MM-DD text within years 2000-2100 and that no row
+/// orphans its job before an untrusted snapshot is copied into an owned target.
+fn verify_v9_calendar_exception_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_orphan: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM calendar_exceptions ce
+                WHERE NOT EXISTS(SELECT 1 FROM jobs j WHERE j.id = ce.job_id)
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if has_orphan {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    let mut statement = connection
+        .prepare("SELECT exception_date FROM calendar_exceptions")
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    for row in rows {
+        let value = row.map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        let date = NaiveDate::parse_from_str(&value, "%Y-%m-%d")
+            .ok()
+            .filter(|date| date.format("%Y-%m-%d").to_string() == value)
+            .ok_or(ApplicationError::BackupVerificationFailed)?;
+        if !(2000..=2100).contains(&date.year()) {
+            return Err(ApplicationError::BackupVerificationFailed);
         }
     }
     Ok(())
@@ -2967,12 +3210,39 @@ fn task_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Task> {
     })
 }
 
+/// Loads a job's dated non-working calendar exceptions as sorted canonical
+/// dates. Every scheduler-input loader merges these into the WorkingCalendar it
+/// builds, so exceptions live in the table rather than in calendar_json.
+fn load_calendar_exceptions(
+    connection: &Connection,
+    job_id: &str,
+) -> Result<Vec<NaiveDate>, ApplicationError> {
+    let mut statement = connection.prepare(
+        "SELECT exception_date FROM calendar_exceptions WHERE job_id = ?1 ORDER BY exception_date",
+    )?;
+    let rows = statement.query_map([job_id], |row| row.get::<_, String>(0))?;
+    let mut dates = Vec::new();
+    for row in rows {
+        let text = row?;
+        let date = NaiveDate::parse_from_str(&text, "%Y-%m-%d").map_err(|_| {
+            ApplicationError::InvalidStoredData("job has an invalid calendar exception".into())
+        })?;
+        dates.push(date);
+    }
+    Ok(dates)
+}
+
 fn read_job(connection: &Connection, job_id: &str) -> Result<Job, ApplicationError> {
     let (id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version) = connection.query_row(
         "SELECT id, name, status, timezone, schedule_start, calendar_json, data_date, created_at, updated_at, version FROM jobs WHERE id = ?1",
         [job_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, String>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?, row.get::<_, Option<String>>(6)?, row.get::<_, String>(7)?, row.get::<_, String>(8)?, row.get::<_, i64>(9)?)),
     ).optional()?.ok_or_else(|| ApplicationError::NotFound { resource: "job", id: job_id.into() })?;
+    let exceptions = load_calendar_exceptions(connection, &id)?;
+    let mut calendar: WorkingCalendar = serde_json::from_str(&calendar_json).map_err(|_| {
+        ApplicationError::InvalidStoredData(format!("job {id} has invalid calendar"))
+    })?;
+    calendar.exceptions = exceptions.clone();
     Ok(Job {
         id: id.clone(),
         name,
@@ -2981,9 +3251,11 @@ fn read_job(connection: &Connection, job_id: &str) -> Result<Job, ApplicationErr
         })?,
         timezone,
         schedule_start,
-        calendar: serde_json::from_str(&calendar_json).map_err(|_| {
-            ApplicationError::InvalidStoredData(format!("job {id} has invalid calendar"))
-        })?,
+        calendar,
+        calendar_exceptions: exceptions
+            .iter()
+            .map(|date| date.format("%Y-%m-%d").to_string())
+            .collect(),
         data_date,
         created_at,
         updated_at,
@@ -3119,6 +3391,14 @@ enum ProposedEdit<'a> {
     },
     /// A job data-date change; `None` clears the data date.
     DataDate(Option<&'a str>),
+    /// A dated calendar-exception add/remove. The candidate date is applied to
+    /// the stored calendar's persisted exception set for the proposed run.
+    CalendarException {
+        /// Canonical YYYY-MM-DD exception date.
+        date: &'a str,
+        /// True adds the exception; false removes it.
+        adding: bool,
+    },
     /// A leaf progress change; `None` clears the row back to unstatused.
     Progress {
         task_id: &'a str,
@@ -3145,9 +3425,32 @@ fn validate_proposed_schedule(
         |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
 
+    // The persisted exception set (sorted canonical dates) merged into every
+    // calendar. A CalendarException edit adds or removes its candidate date.
+    let current_exceptions = load_calendar_exceptions(transaction, job_id)?;
+    let proposed_exceptions = match edit {
+        ProposedEdit::CalendarException { date, adding } => {
+            let candidate = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(|_| {
+                ApplicationError::InvalidStoredData("calendar exception is not canonical".into())
+            })?;
+            let mut exceptions = current_exceptions.clone();
+            if *adding {
+                if !exceptions.contains(&candidate) {
+                    exceptions.push(candidate);
+                    exceptions.sort_unstable();
+                }
+            } else {
+                exceptions.retain(|existing| *existing != candidate);
+            }
+            exceptions
+        }
+        _ => current_exceptions.clone(),
+    };
+
     // Resolve the proposed calendar and schedule start: a Schedule edit overrides
-    // both; every other edit reads the stored values.
-    let (proposed_schedule_start, calendar): (Option<String>, WorkingCalendar) = match edit {
+    // both; every other edit reads the stored values. Persisted exceptions are
+    // merged onto whichever calendar is used for the proposed run.
+    let (proposed_schedule_start, mut calendar): (Option<String>, WorkingCalendar) = match edit {
         ProposedEdit::Schedule {
             schedule_start,
             calendar,
@@ -3159,6 +3462,7 @@ fn validate_proposed_schedule(
             (stored_schedule_start.clone(), calendar)
         }
     };
+    calendar.exceptions = proposed_exceptions;
 
     // Resolve the proposed data date: the DataDate edit overrides the stored value.
     let data_date_value = match edit {
@@ -3188,6 +3492,9 @@ fn validate_proposed_schedule(
                 }
                 Ok(())
             }
+            // Exceptions may be staged during setup: without a schedule start there
+            // is nothing to schedule and nothing an exception could invert.
+            ProposedEdit::CalendarException { .. } => Ok(()),
             _ => Err(ApplicationError::ValidationFailed {
                 code: "schedule_start_required",
                 field: "scheduleStart",
@@ -3340,12 +3647,19 @@ fn validate_proposed_schedule(
     // have durations and stand alone, so the scheduler reaches its progress
     // normalization. A progress-class failure there is caused only by the
     // calendar/schedule-start the edit chooses, so it is still rejected.
-    if let ProposedEdit::Schedule { .. } = edit {
+    if matches!(
+        edit,
+        ProposedEdit::Schedule { .. } | ProposedEdit::CalendarException { .. }
+    ) {
         let current_valid = stored_schedule_start
             .as_deref()
             .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
             .is_some_and(|current_start| {
-                let stored_calendar = serde_json::from_str::<WorkingCalendar>(&calendar_json);
+                let stored_calendar =
+                    serde_json::from_str::<WorkingCalendar>(&calendar_json).map(|mut calendar| {
+                        calendar.exceptions = current_exceptions.clone();
+                        calendar
+                    });
                 let stored_data_date = stored_data_date
                     .as_deref()
                     .map(parse_canonical_constraint_date)
@@ -3496,8 +3810,9 @@ fn compute_current_schedule(
     let schedule_start = NaiveDate::parse_from_str(&schedule_start, "%Y-%m-%d").map_err(|_| {
         ApplicationError::InvalidStoredData("job has invalid schedule start".into())
     })?;
-    let calendar: WorkingCalendar = serde_json::from_str(&calendar_json)
+    let mut calendar: WorkingCalendar = serde_json::from_str(&calendar_json)
         .map_err(|_| ApplicationError::InvalidStoredData("job has invalid calendar".into()))?;
+    calendar.exceptions = load_calendar_exceptions(transaction, job_id)?;
     let data_date = data_date
         .as_deref()
         .map(parse_stored_data_date)

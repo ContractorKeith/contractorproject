@@ -9,11 +9,12 @@ mod work_breakdown;
 
 use application::{
     AddDependencyRequest, ApplicationError, ApplicationService, ArchiveJobRequest, BackupResult,
-    Baseline, CommandActor, CommandContext, CreateBackupRequest, CreateBaselineRequest,
-    CreateJobRequest, CreateTaskRequest, Job, JobStatus, RemoveDependencyRequest,
-    ReorderTaskRequest, RestoreJobRequest, SetBaselineComparisonDefaultRequest, TaskHierarchy,
-    TaskMutation, UpdateJobDataDateRequest, UpdateScheduleRequest, UpdateTaskConstraintRequest,
-    UpdateTaskDurationRequest, UpdateTaskProgressRequest, UpdateTaskRequest,
+    Baseline, CalendarExceptionRequest, CommandActor, CommandContext, CreateBackupRequest,
+    CreateBaselineRequest, CreateJobRequest, CreateTaskRequest, Job, JobStatus,
+    RemoveDependencyRequest, ReorderTaskRequest, RestoreJobRequest,
+    SetBaselineComparisonDefaultRequest, TaskHierarchy, TaskMutation, UpdateJobDataDateRequest,
+    UpdateScheduleRequest, UpdateTaskConstraintRequest, UpdateTaskDurationRequest,
+    UpdateTaskProgressRequest, UpdateTaskRequest,
 };
 use gantt::GanttReadModel;
 use serde::Serialize;
@@ -282,6 +283,26 @@ fn update_job_data_date(
 }
 
 #[tauri::command]
+fn add_calendar_exception(
+    service: State<'_, ApplicationService>,
+    request: CalendarExceptionRequest,
+) -> Result<Job, CommandError> {
+    service
+        .add_calendar_exception(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
+fn remove_calendar_exception(
+    service: State<'_, ApplicationService>,
+    request: CalendarExceptionRequest,
+) -> Result<Job, CommandError> {
+    service
+        .remove_calendar_exception(tauri_command_context(), request)
+        .map_err(Into::into)
+}
+
+#[tauri::command]
 fn update_task_progress(
     service: State<'_, ApplicationService>,
     request: UpdateTaskProgressRequest,
@@ -372,6 +393,8 @@ pub fn run() {
             update_task_duration,
             update_task_constraint,
             update_job_data_date,
+            add_calendar_exception,
+            remove_calendar_exception,
             update_task_progress,
             create_baseline,
             set_baseline_comparison_default,

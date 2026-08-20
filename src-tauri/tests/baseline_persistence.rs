@@ -38,6 +38,7 @@ fn working_calendar() -> WorkingCalendar {
         ],
         workday_start_minute: 480,
         workday_duration_minutes: 480,
+        exceptions: Vec::new(),
     }
 }
 
@@ -149,7 +150,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 8);
+    assert_eq!(version, 9);
     let table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('baselines', 'baseline_tasks')",
@@ -178,7 +179,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 8);
+    assert_eq!(migrated_version, 9);
     assert_eq!(service.list_tasks("job-v6").expect("tasks").tasks.len(), 1);
     assert!(service
         .list_baselines("job-v6")
@@ -599,7 +600,7 @@ fn verified_backup_and_clean_restore_accept_v7_and_exact_v6() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 8);
+    assert_eq!(restored_version, 9);
 
     // An exact-v6 snapshot is still accepted by the restore preflight.
     let v6_dir = tempfile::tempdir().expect("temp");

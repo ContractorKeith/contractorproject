@@ -120,14 +120,26 @@ validates the type code app-side with a friendly error, and accepts signed lag;
 four relationship types and negative lag are calculated by the scheduler
 ([`SCHEDULING.md`](SCHEDULING.md)).
 
-### `calendars`
+### Calendar (implemented)
 
-- `id`, optional `job_id`
-- `name`, `timezone`
-- weekly working intervals
-- dated exceptions and holidays
+Each job owns exactly one working calendar. As implemented, it is split across
+two places rather than a standalone `calendars` table:
 
-Jobs have one default calendar. Resource-specific calendars are later unless the basic assignment workflow demonstrates a need.
+- `jobs.calendar_json` (migration v4) holds the weekly shape: the working
+  weekdays and the single `[start, duration)` interval. Its serialized shape is
+  unchanged from v4; the exceptions list is omitted from it.
+- `calendar_exceptions` (migration v9) holds dated non-working exceptions, one
+  row per `(job_id, exception_date)` with `exception_date` a canonical
+  `YYYY-MM-DD` civil date and `PRIMARY KEY (job_id, exception_date)`, FK to
+  `jobs(id)`. Every scheduler-input loader merges these rows into the
+  `WorkingCalendar` it builds. Audited `add_calendar_exception` /
+  `remove_calendar_exception` commands validate the change through the same
+  progress-aware proposed-schedule seam as other schedule edits. Semantics live
+  in [`SCHEDULING.md`](SCHEDULING.md).
+
+Named calendars, per-resource calendars, IANA timezone binding, and working-day
+overrides on normally non-working days stay future work behind versioned
+interfaces; they are not built in v1.
 
 ### `resources` and `task_assignments`
 
