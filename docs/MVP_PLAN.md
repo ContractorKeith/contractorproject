@@ -58,7 +58,7 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
   - [x] Ship the virtualized semantic work-breakdown treegrid.
   - [x] Add the viewport-cropped SVG timeline in the shared scroll view.
 - [x] Add zoom, hierarchy collapse, and dependency rendering.
-- [ ] Add pan and today/data-date markers. (Data-date marker shipped in the v3 read model; pan and the today marker remain deferred.)
+- [x] Add pan and today/data-date markers. (The data-date marker shipped in the v3 read model; pan and the today marker shipped in this milestone.)
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
 - [x] Create immutable named baselines.
 - [x] Display baseline bars and start/finish/duration variance.

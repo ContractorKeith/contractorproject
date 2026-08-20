@@ -15,7 +15,8 @@ baselines, all four dependency types (FS/SS/FF/SF with signed lag), dated
 non-working calendar exceptions, and deterministic schedule explanations now
 flow through the pure Rust scheduler into the production Gantt (read-model v7
 with calendar facts and non-working shading, typed link annotations and
-geometry, progress facts, a data-date marker, baseline ghost bars,
+geometry, progress facts, a data-date marker, timeline pan (drag + keyboard),
+a shell-injected deterministic today marker, baseline ghost bars,
 start/finish/duration variance, and per-task explanation facts surfaced in a
 focus-following panel) in the normal desktop workflow. The scheduling-core
 MVP section is complete. Last touched 2026-08-20.

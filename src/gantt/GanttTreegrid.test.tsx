@@ -293,6 +293,96 @@ describe("GanttTreegrid", () => {
     expect(timeline.querySelector('[data-progress-task-id="task-c"]')).toBeNull();
   });
 
+  it("draws an accessible today marker at the injected civil-day start", () => {
+    const statused = model(fixtureRows);
+    statused.dataDate = "2026-08-18T08:00:00";
+    render(<GanttTreegrid readModel={statused} todayDate="2026-08-20" />);
+
+    const marker = screen.getByTestId("gantt-today-marker");
+    expect(marker).toHaveAccessibleName("Today 2026-08-20");
+    expect(marker).toHaveTextContent("Today 2026-08-20");
+    // Week zoom is 8 px/day; the baseline-expanded domain begins 2026-08-15
+    // and the timeline keeps its 32 px left padding.
+    expect(marker).toHaveStyle({ left: "72px" });
+  });
+
+  it("draws today at the left edge when it equals the first drawn civil day", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} todayDate="2026-08-15" />);
+
+    expect(screen.getByTestId("gantt-today-marker")).toHaveStyle({ left: "32px" });
+  });
+
+  it("does not draw today outside the existing timeline domain", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} todayDate="2026-08-21" />);
+    expect(screen.queryByTestId("gantt-today-marker")).not.toBeInTheDocument();
+  });
+
+  it("does not draw today on the data date civil day", () => {
+    const statused = model(fixtureRows);
+    statused.dataDate = "2026-08-20T16:30:00";
+    render(<GanttTreegrid readModel={statused} todayDate="2026-08-20" />);
+    expect(screen.queryByTestId("gantt-today-marker")).not.toBeInTheDocument();
+  });
+
+  it("does not draw today when no date is injected", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} />);
+    expect(screen.queryByTestId("gantt-today-marker")).not.toBeInTheDocument();
+  });
+
+  it("pans only the shared viewport with timeline keyboard commands", async () => {
+    const user = userEvent.setup();
+    render(<GanttTreegrid readModel={model(fixtureRows)} />);
+    const scrollport = screen.getByTestId("gantt-scrollport");
+    Object.defineProperties(scrollport, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1_200 },
+    });
+    const table = scrollport.querySelector<HTMLElement>(".gantt-treegrid-viewport")!;
+    Object.defineProperty(table, "offsetWidth", { configurable: true, value: 160 });
+    scrollport.scrollLeft = 100;
+
+    const timeline = screen.getByRole("region", { name: "Schedule timeline" });
+    timeline.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(scrollport.scrollLeft).toBe(124);
+    await user.keyboard("{ArrowLeft}");
+    expect(scrollport.scrollLeft).toBe(100);
+    await user.keyboard("{PageDown}");
+    expect(scrollport.scrollLeft).toBe(340);
+    await user.keyboard("{PageUp}");
+    expect(scrollport.scrollLeft).toBe(100);
+    await user.keyboard("{End}");
+    expect(scrollport.scrollLeft).toBe(800);
+    await user.keyboard("{Home}");
+    expect(scrollport.scrollLeft).toBe(0);
+
+    scrollport.scrollLeft = 100;
+    const summaryTask = screen.getByRole("rowheader", { name: /1 Site work, task/ });
+    summaryTask.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(screen.getByRole("gridcell", { name: /1 Site work, duration/ })).toHaveFocus();
+  });
+
+  it("uses the larger day width for timeline arrow-key steps", async () => {
+    const user = userEvent.setup();
+    render(<GanttTreegrid readModel={model(fixtureRows)} />);
+    const scrollport = screen.getByTestId("gantt-scrollport");
+    Object.defineProperties(scrollport, {
+      clientWidth: { configurable: true, value: 400 },
+      scrollWidth: { configurable: true, value: 1_200 },
+    });
+    await user.click(screen.getByRole("button", { name: "Day" }));
+    await new Promise(requestAnimationFrame);
+    scrollport.scrollLeft = 100;
+
+    const timeline = screen.getByRole("region", { name: "Schedule timeline" });
+    timeline.focus();
+    await user.keyboard("{ArrowRight}");
+    expect(scrollport.scrollLeft).toBe(128);
+    await user.keyboard("{ArrowLeft}");
+    expect(scrollport.scrollLeft).toBe(100);
+  });
+
   it("moves one roving cell focus, collapses hierarchy, and reaches offscreen logical rows", async () => {
     const user = userEvent.setup();
     render(<GanttTreegrid readModel={model(fixtureRows)} viewportHeight={96} />);

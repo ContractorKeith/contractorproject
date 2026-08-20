@@ -39,6 +39,7 @@ export interface GanttTreegridProps {
   readModel: GanttReadModel;
   ariaLabel?: string;
   viewportHeight?: number;
+  todayDate?: string | undefined;
   /** Notified with the focused task id (null when none) so a sibling surface can
    * follow the roving cell — e.g. the schedule-explanation panel. */
   onActiveTaskChange?: (taskId: string | null) => void;
@@ -49,6 +50,7 @@ export function GanttTreegrid({
   readModel,
   ariaLabel = "Work breakdown schedule",
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
+  todayDate,
   onActiveTaskChange,
 }: GanttTreegridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -430,6 +432,7 @@ export function GanttTreegrid({
             zoomAnchor={zoomAnchor}
             scrollRef={scrollRef}
             hoveredTaskId={hoveredTaskId}
+            todayDate={todayDate}
           />
         </div>
       </div>
