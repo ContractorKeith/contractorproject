@@ -174,6 +174,97 @@ pub struct ScheduledTask {
     pub actual_finish: Option<NaiveDateTime>,
 }
 
+/// One forward-pass lower bound on a leaf's remaining-work start. Every driver
+/// serializes with an internal `kind` tag and camelCase fields.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum ScheduleDriver {
+    /// The schedule-start floor (including a negative-lag pull clamped at start).
+    ScheduleStart {},
+    /// The leaf's SNET, carrying the entered civil date and the applied normalized date.
+    StartConstraint {
+        date: NaiveDate,
+        normalized_date: NaiveDate,
+    },
+    /// The normalized data-date instant pushing incomplete work.
+    DataDate { date: NaiveDateTime },
+    /// One typed predecessor link. FS/SS bound the start; FF/SF bound the
+    /// remaining-work finish, converted through the successor's remaining duration.
+    Predecessor {
+        task_id: String,
+        dependency_type: DependencyType,
+        lag_minutes: i64,
+    },
+}
+
+/// A run of non-working civil days between a driver's reference date and the
+/// leaf's arrival date. Endpoints are ascending; the count covers `[from, to)`.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarGap {
+    pub from_date: NaiveDate,
+    pub to_date: NaiveDate,
+    pub non_working_day_count: i64,
+}
+
+/// What bounded a leaf's late finish in the backward pass (one level only).
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum LateFinishLimit {
+    /// The leaf's own FNLT, with entered and normalized dates.
+    Deadline {
+        date: NaiveDate,
+        normalized_date: NaiveDate,
+    },
+    /// The minimum binding successor bound as a typed link.
+    Successor {
+        task_id: String,
+        dependency_type: DependencyType,
+        lag_minutes: i64,
+    },
+    /// The project-finish anchor.
+    ProjectFinish {},
+}
+
+/// A deterministic, typed explanation of why one task starts and finishes when
+/// it does. It is a pure post-pass over the same forward/backward passes: it
+/// introduces no scheduling semantics and changes no dates.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
+pub enum TaskExplanation {
+    /// A summary whose dates are derived from its children by the rollup rules.
+    Summary { task_id: String },
+    /// A complete leaf, anchored at its normalized actual start and finish.
+    Complete {
+        task_id: String,
+        actual_start: NaiveDateTime,
+        actual_finish: NaiveDateTime,
+    },
+    /// Any other leaf (not started or in progress), with its driver and float rationale.
+    Scheduled {
+        task_id: String,
+        primary_driver: ScheduleDriver,
+        other_binding_drivers: Vec<ScheduleDriver>,
+        started_actual_start: Option<NaiveDateTime>,
+        calendar_gap: Option<CalendarGap>,
+        total_float_minutes: i64,
+        critical: bool,
+        late_finish_limit: LateFinishLimit,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleResult {
@@ -185,6 +276,8 @@ pub struct ScheduleResult {
     pub directly_violated_leaf_task_ids: Vec<String>,
     /// Normalized data-date instant when the job carries a data date.
     pub data_date: Option<NaiveDateTime>,
+    /// One deterministic explanation per task, ordered exactly like `tasks`.
+    pub explanations: Vec<TaskExplanation>,
 }
 
 #[derive(Clone, Debug, Eq, Error, PartialEq)]
@@ -239,6 +332,16 @@ pub fn calculate_schedule_with_progress(
     let calendar = CalendarMath::new(&input.calendar, input.schedule_start)?;
     let hierarchy = TaskHierarchy::new(&input.tasks)?;
     let graph = LeafGraph::new(&hierarchy, &input.dependencies)?;
+    // Capture the entered civil dates (used by explanations) before the typed
+    // `constraints`/`progress` sets shadow the raw inputs.
+    let entered_snet: HashMap<&str, NaiveDate> = constraints
+        .iter()
+        .filter_map(|c| c.start_no_earlier_than.map(|d| (c.task_id.as_str(), d)))
+        .collect();
+    let entered_fnlt: HashMap<&str, NaiveDate> = constraints
+        .iter()
+        .filter_map(|c| c.finish_no_later_than.map(|d| (c.task_id.as_str(), d)))
+        .collect();
     let constraints = ConstraintSet::new(constraints, &hierarchy, &graph, &calendar)?;
     let progress = ProgressSet::new(progress, &hierarchy, &graph, &calendar)?;
     let task_count = graph.tasks.len();
@@ -482,6 +585,28 @@ pub fn calculate_schedule_with_progress(
         )?;
     }
 
+    // Pure post-pass: one deterministic explanation per task, ordered like
+    // `input.tasks`, computed from the arrays the passes already produced.
+    let explanations = compute_explanations(
+        input,
+        &hierarchy,
+        &graph,
+        &constraints,
+        &progress,
+        &calendar,
+        &instants,
+        &leaf_of_original,
+        &remaining_start,
+        &early_start,
+        &early_finish,
+        &late_start,
+        &late_finish,
+        &total_float,
+        schedule_finish_offset,
+        &entered_snet,
+        &entered_fnlt,
+    )?;
+
     let mut tasks = Vec::with_capacity(input.tasks.len());
     for (index, task) in input.tasks.iter().enumerate() {
         let offset = offsets[index].as_ref().expect("validated task calculation");
@@ -543,7 +668,306 @@ pub fn calculate_schedule_with_progress(
         },
         data_date: progress.data_date_instant,
         tasks,
+        explanations,
     })
+}
+
+// Builds one deterministic explanation per task, ordered like `input.tasks`.
+// It mirrors the forward/backward binding math exactly and introduces no new
+// scheduling semantics. The wide argument list threads the already-computed
+// arrays positionally, keeping the binding logic next to the passes.
+#[allow(clippy::too_many_arguments)]
+fn compute_explanations(
+    input: &ScheduleInput,
+    hierarchy: &TaskHierarchy<'_>,
+    graph: &LeafGraph<'_>,
+    constraints: &ConstraintSet,
+    progress: &ProgressSet,
+    calendar: &CalendarMath,
+    instants: &[Option<TaskInstants>],
+    leaf_of_original: &[Option<usize>],
+    remaining_start: &[i64],
+    early_start: &[i64],
+    early_finish: &[i64],
+    late_start: &[i64],
+    late_finish: &[i64],
+    total_float: &[i64],
+    // The project-finish anchor; the residual `projectFinish` late-finish limit.
+    schedule_finish_offset: i64,
+    entered_snet: &HashMap<&str, NaiveDate>,
+    entered_fnlt: &HashMap<&str, NaiveDate>,
+) -> Result<Vec<TaskExplanation>, ScheduleError> {
+    let mut leaf_by_id: HashMap<&str, usize> = HashMap::new();
+    for (index, task) in graph.tasks.iter().enumerate() {
+        leaf_by_id.insert(task.id.as_str(), index);
+    }
+
+    let mut explanations = Vec::with_capacity(input.tasks.len());
+    for (original_index, task) in input.tasks.iter().enumerate() {
+        if hierarchy.is_summary(original_index) {
+            explanations.push(TaskExplanation::Summary {
+                task_id: task.id.clone(),
+            });
+            continue;
+        }
+        let li = leaf_of_original[original_index].expect("validated leaf index");
+        if progress.status[li] == ProgressStatus::Complete {
+            explanations.push(TaskExplanation::Complete {
+                task_id: task.id.clone(),
+                actual_start: progress.actual_start_instant[li].expect("complete actual start"),
+                actual_finish: progress.actual_finish_instant[li].expect("complete actual finish"),
+            });
+            continue;
+        }
+
+        let in_progress = progress.status[li] == ProgressStatus::InProgress;
+        let rem_start = remaining_start[li];
+
+        // Binding facts, pushed in precedence order: predecessor, startConstraint,
+        // dataDate, scheduleStart. binding[0] is therefore the primary driver.
+        let mut binding: Vec<ScheduleDriver> = Vec::new();
+        // Whether a complete-predecessor data-date lift raised a binding edge; a
+        // contributing dataDate fact is reported once when so.
+        let mut data_date_binds = false;
+
+        // Predecessors are pre-sorted lexical id then FS, SS, FF, SF.
+        for edge in &graph.predecessors[li] {
+            let p = edge.other;
+            let anchor = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::FinishFinish => early_finish[p],
+                DependencyType::StartStart | DependencyType::StartFinish => early_start[p],
+            };
+            let raw = anchor
+                .checked_add(edge.lag)
+                .ok_or(ScheduleError::ScheduleOutOfRange)?;
+            let mut contribution = raw;
+            let mut lifted = false;
+            if progress.status[p] == ProgressStatus::Complete {
+                if let Some(data_date) = progress.data_date_offset {
+                    if data_date > raw {
+                        lifted = true;
+                    }
+                    contribution = contribution.max(data_date);
+                }
+            }
+            let start_bound = match edge.dep_type {
+                DependencyType::FinishStart | DependencyType::StartStart => contribution,
+                DependencyType::FinishFinish | DependencyType::StartFinish => contribution
+                    .checked_sub(progress.remaining_duration[li])
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?,
+            };
+            if start_bound == rem_start {
+                binding.push(ScheduleDriver::Predecessor {
+                    task_id: graph.tasks[p].id.clone(),
+                    dependency_type: edge.dep_type,
+                    lag_minutes: edge.lag,
+                });
+                if lifted {
+                    data_date_binds = true;
+                }
+            }
+        }
+
+        // startConstraint: the un-floored normalized SNET offset equals the start.
+        if constraints.normalized_start_dates[li].is_some()
+            && constraints.start_no_earlier_than[li] == rem_start
+        {
+            binding.push(ScheduleDriver::StartConstraint {
+                date: entered_snet
+                    .get(task.id.as_str())
+                    .copied()
+                    .expect("entered SNET date"),
+                normalized_date: constraints.normalized_start_dates[li].expect("normalized SNET"),
+            });
+        }
+
+        // dataDate: the data-date instant pushes incomplete work, either directly
+        // or via the complete-predecessor lift captured above. Reported once.
+        if let Some(data_date) = progress.data_date_offset {
+            if data_date == rem_start {
+                data_date_binds = true;
+            }
+        }
+        if data_date_binds {
+            binding.push(ScheduleDriver::DataDate {
+                date: progress.data_date_instant.expect("data-date instant"),
+            });
+        }
+
+        // scheduleStart: the floor, always a candidate; binds at offset zero.
+        if rem_start == 0 {
+            binding.push(ScheduleDriver::ScheduleStart {});
+        }
+
+        let mut drivers = binding.into_iter();
+        let primary_driver = drivers.next().expect("every scheduled leaf binds a fact");
+        let other_binding_drivers: Vec<ScheduleDriver> = drivers.collect();
+
+        let started_actual_start = if in_progress {
+            Some(progress.actual_start_instant[li].expect("in-progress actual start"))
+        } else {
+            None
+        };
+
+        // Calendar gap between the primary driver's reference date and the leaf's
+        // arrival date. Every reference is a reported/normalized civil date: the
+        // predecessor's driving-anchor instant, the entered SNET date, the
+        // normalized data-date instant, or the normalized schedule-start date.
+        let reference_date: NaiveDate = match &primary_driver {
+            ScheduleDriver::Predecessor {
+                task_id,
+                dependency_type,
+                ..
+            } => {
+                let pred_original = graph.original_indices[leaf_by_id[task_id.as_str()]];
+                let pred_instants = instants[pred_original]
+                    .as_ref()
+                    .expect("predecessor instants");
+                match dependency_type {
+                    DependencyType::FinishStart | DependencyType::FinishFinish => {
+                        pred_instants.early_finish.date()
+                    }
+                    DependencyType::StartStart | DependencyType::StartFinish => {
+                        pred_instants.early_start.date()
+                    }
+                }
+            }
+            ScheduleDriver::StartConstraint { date, .. } => *date,
+            ScheduleDriver::DataDate { date } => date.date(),
+            ScheduleDriver::ScheduleStart {} => calendar.first_working_date,
+        };
+        // The arrival primitive is chosen by the primary reference's anchor kind,
+        // not by FF/SF. A finish-anchored FF reference measures to the leaf's
+        // reported early-finish civil date. A finish-anchored FS reference keeps
+        // the reported early-start date when not started (a milestone's event
+        // instant aligns with the predecessor finish, preserving no-gap) and the
+        // remaining-work start when in progress. A start-anchored SF reference
+        // bounds the leaf's finish, so it converts the remaining-work finish
+        // offset with the start-instant primitive — never the leaf's start,
+        // which would sweep the leaf's own duration into the gap. The remaining
+        // start-anchored references (SS, startConstraint, dataDate,
+        // scheduleStart) use the remaining-work start converted the same way,
+        // for both started and not-started leaves; that lands a milestone on
+        // its actual working-day start instead of the prior-day event instant,
+        // so undisplaced hand-offs report no gap.
+        let leaf_instants = instants[original_index].as_ref().expect("leaf instants");
+        let arrival_date: NaiveDate = match &primary_driver {
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::FinishFinish,
+                ..
+            } => leaf_instants.early_finish.date(),
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::FinishStart,
+                ..
+            } if !in_progress => leaf_instants.early_start.date(),
+            ScheduleDriver::Predecessor {
+                dependency_type: DependencyType::StartFinish,
+                ..
+            } => {
+                let finish_offset = rem_start
+                    .checked_add(progress.remaining_duration[li])
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?;
+                calendar.start_instant(finish_offset)?.date()
+            }
+            _ => calendar.start_instant(rem_start)?.date(),
+        };
+        let (from_date, to_date) = if reference_date <= arrival_date {
+            (reference_date, arrival_date)
+        } else {
+            (arrival_date, reference_date)
+        };
+        // Bounded scan: endpoints are civil dates within the 2000-2100 calendar
+        // window, so the loop runs at most ~36.5k iterations in the worst case.
+        let mut non_working_day_count = 0_i64;
+        let mut cursor = from_date;
+        while cursor < to_date {
+            if !is_working_date(cursor, &calendar.working_weekdays, &calendar.exceptions) {
+                non_working_day_count += 1;
+            }
+            cursor = cursor.succ_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
+        }
+        let calendar_gap = (non_working_day_count > 0).then_some(CalendarGap {
+            from_date,
+            to_date,
+            non_working_day_count,
+        });
+
+        // Late-finish limit: recompute the leaf's own backward-pass bounds and
+        // name the highest-precedence binding one (deadline > successor > project).
+        let leaf_late_finish = late_finish[li];
+        let late_finish_limit = if constraints.normalized_finish_dates[li].is_some()
+            && constraints.finish_no_later_than[li] == leaf_late_finish
+        {
+            LateFinishLimit::Deadline {
+                date: entered_fnlt
+                    .get(task.id.as_str())
+                    .copied()
+                    .expect("entered FNLT date"),
+                normalized_date: constraints.normalized_finish_dates[li].expect("normalized FNLT"),
+            }
+        } else {
+            let remaining = progress.remaining_duration[li];
+            let mut successor_limit: Option<LateFinishLimit> = None;
+            for edge in &graph.successors[li] {
+                if progress.status[edge.other] == ProgressStatus::Complete {
+                    continue;
+                }
+                if in_progress
+                    && matches!(
+                        edge.dep_type,
+                        DependencyType::StartStart | DependencyType::StartFinish
+                    )
+                {
+                    continue;
+                }
+                let bound = match edge.dep_type {
+                    DependencyType::FinishStart => late_start[edge.other]
+                        .checked_sub(edge.lag)
+                        .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                    DependencyType::StartStart => late_start[edge.other]
+                        .checked_sub(edge.lag)
+                        .and_then(|value| value.checked_add(remaining))
+                        .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                    DependencyType::FinishFinish => late_finish[edge.other]
+                        .checked_sub(edge.lag)
+                        .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                    DependencyType::StartFinish => late_finish[edge.other]
+                        .checked_sub(edge.lag)
+                        .and_then(|value| value.checked_add(remaining))
+                        .ok_or(ScheduleError::ScheduleOutOfRange)?,
+                };
+                if bound == leaf_late_finish {
+                    successor_limit = Some(LateFinishLimit::Successor {
+                        task_id: graph.tasks[edge.other].id.clone(),
+                        dependency_type: edge.dep_type,
+                        lag_minutes: edge.lag,
+                    });
+                    break;
+                }
+            }
+            match successor_limit {
+                Some(limit) => limit,
+                None => {
+                    // Residual: no deadline and no successor lowered the late
+                    // finish, so it still sits at the project-finish anchor.
+                    debug_assert_eq!(leaf_late_finish, schedule_finish_offset);
+                    LateFinishLimit::ProjectFinish {}
+                }
+            }
+        };
+
+        explanations.push(TaskExplanation::Scheduled {
+            task_id: task.id.clone(),
+            primary_driver,
+            other_binding_drivers,
+            started_actual_start,
+            calendar_gap,
+            total_float_minutes: total_float[li],
+            critical: total_float[li] <= 0,
+            late_finish_limit,
+        });
+    }
+    Ok(explanations)
 }
 
 #[derive(Clone)]
