@@ -32,8 +32,19 @@ timeline pane.
   read model's representative `criticalPath`.
 
 The focusable timeline region provides keyboard access to horizontal
-scrolling. It exposes no task semantics because the adjacent treegrid is the
-accessible schedule spine.
+scrolling. Left/Right move one civil day at the current zoom, Page Up/Down move
+one shared-viewport width, and Home/End reach the horizontal extents. Pointer
+dragging on its non-interactive canvas pans the same native shared scroll plane
+after a small activation threshold; it never applies a visual transform or
+moves the vertical scroll owner. The region exposes no task semantics because
+the adjacent treegrid is the accessible schedule spine.
+
+The application shell injects the user's local civil date once per loaded
+schedule mount. When that day is inside the existing drawn domain and differs
+from the data-date civil day, the timeline draws a labelled 1px dashed neutral
+marker at civil midnight. Today never expands the domain; an omitted date draws
+nothing. The solid accent data-date marker remains the authoritative status
+instant and retains its existing domain-extension rule.
 
 ## Non-working-time shading
 

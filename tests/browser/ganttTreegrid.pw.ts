@@ -195,6 +195,22 @@ test("announces progress facts, draws the data-date marker, and stays accessible
   await expect(marker).toHaveText(/Data date \d{4}-\d{2}-\d{2}/);
   await expect(marker).toHaveAccessibleName(/Data date \d{4}-\d{2}-\d{2}/);
 
+  // Today is injected by the harness, including when it is a non-working Sunday.
+  const todayMarker = page.getByTestId("gantt-today-marker");
+  await expect(todayMarker).toBeVisible();
+  await expect(todayMarker).toHaveText("Today 2026-08-23");
+  await expect(todayMarker).toHaveAccessibleName("Today 2026-08-23");
+  const markerStyles = await page.evaluate(() => {
+    const dataDate = document.querySelector<HTMLElement>('[data-testid="gantt-data-date-marker"]')!;
+    const today = document.querySelector<HTMLElement>('[data-testid="gantt-today-marker"]')!;
+    return {
+      dataDateLine: getComputedStyle(dataDate).borderLeftStyle,
+      todayLine: getComputedStyle(today).borderLeftStyle,
+    };
+  });
+  expect(markerStyles.dataDateLine).toBe("solid");
+  expect(markerStyles.todayLine).toBe("dashed");
+
   const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
   expect(results.violations).toEqual([]);
 });
@@ -274,6 +290,12 @@ test("keeps non-working shading distinguishable under forced colors", async ({ p
     (node) => getComputedStyle(node).borderInlineStyle,
   );
   expect(borderStyle).toBe("dashed");
+  const todayTreatment = await page.getByTestId("gantt-today-marker").evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { lineStyle: style.borderLeftStyle, lineColor: style.borderLeftColor };
+  });
+  expect(todayTreatment.lineStyle).toBe("dashed");
+  expect(todayTreatment.lineColor).not.toBe("transparent");
   const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
   expect(results.violations).toEqual([]);
 });
@@ -490,6 +512,84 @@ test("keeps ruler, grid, and viewport-center date synchronized while scrolling a
   await expect(page.getByTestId("gantt-scrollport")).toHaveJSProperty("scrollTop", verticalBefore);
 });
 
+test("drags the shared scroll plane and preserves alignment and zoom anchoring", async ({ page }) => {
+  const timeline = page.getByTestId("gantt-timeline-viewport");
+  const scrollport = page.getByTestId("gantt-scrollport");
+  const box = await timeline.boundingBox();
+  if (!box) throw new Error("Timeline pane is missing");
+  const visibleTimelineWidth = await scrollport.evaluate((element) => {
+    const tableWidth = element.querySelector<HTMLElement>(".gantt-treegrid-viewport")?.offsetWidth ?? 0;
+    return element.clientWidth - tableWidth;
+  });
+  const startX = box.x + Math.min(visibleTimelineWidth - 20, 220);
+  const startY = box.y + 80;
+  const beforePan = await scrollport.evaluate((element) => ({
+    scrollLeft: element.scrollLeft,
+    scrollTop: element.scrollTop,
+  }));
+
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX - 2, startY + 20);
+  await expect(scrollport).toHaveJSProperty("scrollLeft", beforePan.scrollLeft);
+  await page.mouse.move(startX - 120, startY + 35, { steps: 8 });
+  await expect(timeline).toHaveCSS("cursor", "grabbing");
+  await page.mouse.up();
+  await expect(timeline).toHaveCSS("cursor", "grab");
+
+  const afterScrollLeft = await scrollport.evaluate((element) => element.scrollLeft);
+  expect(afterScrollLeft).toBeGreaterThan(beforePan.scrollLeft + 100);
+  await expect(scrollport).toHaveJSProperty("scrollTop", beforePan.scrollTop);
+  expect(await rulerGridDrift(timeline)).toBeLessThanOrEqual(1);
+  expect(await timelineBarXDrift(timeline)).toBeLessThanOrEqual(1);
+  expect(await maximumMountedRowDrift(scrollport)).toBeLessThanOrEqual(1);
+
+  const centerBeforeZoom = await timeline.evaluate(centerMinute);
+  await page.getByRole("button", { name: "Day" }).click();
+  await expect
+    .poll(async () => {
+      const centerAfterZoom = await timeline.evaluate(centerMinute);
+      const dayWidth = Number(await timeline.getAttribute("data-day-width"));
+      return Math.abs(centerAfterZoom - centerBeforeZoom) <= 1_440 / dayWidth;
+    })
+    .toBe(true);
+});
+
+async function rulerGridDrift(timeline: import("@playwright/test").Locator): Promise<number> {
+  return timeline.evaluate((viewport) => {
+    const tick = viewport.querySelector<HTMLElement>("[data-ruler-minute]");
+    if (!tick) throw new Error("Ruler tick is missing");
+    const line = viewport.querySelector<SVGLineElement>(`[data-grid-minute="${tick.dataset.rulerMinute}"]`);
+    if (!line) throw new Error("Matching grid line is missing");
+    return Math.abs(tick.getBoundingClientRect().left - line.getBoundingClientRect().left);
+  });
+}
+
+async function maximumMountedRowDrift(scrollport: import("@playwright/test").Locator): Promise<number> {
+  return scrollport.evaluate((element) => {
+    const rows = Array.from(element.querySelectorAll<HTMLElement>("tr[data-task-id]"));
+    return Math.max(
+      0,
+      ...rows.map((row) => {
+        const rule = element.querySelector<SVGLineElement>(
+          `.gantt-timeline__row-rule[data-timeline-row-id="${row.dataset.taskId}"]`,
+        );
+        if (!rule) return Number.POSITIVE_INFINITY;
+        return Math.abs(row.getBoundingClientRect().bottom - rule.getBoundingClientRect().top);
+      }),
+    );
+  });
+}
+
+async function timelineBarXDrift(timeline: import("@playwright/test").Locator): Promise<number> {
+  return timeline.evaluate((viewport) => {
+    const bar = viewport.querySelector<SVGGraphicsElement>('[data-timeline-task-id="phase-1-task-1"]');
+    if (!bar) throw new Error("Mounted timeline bar is missing");
+    const localX = Number(bar.getAttribute("x"));
+    return Math.abs(bar.getBoundingClientRect().left - (viewport.getBoundingClientRect().left + localX));
+  });
+}
+
 function centerMinute(element: HTMLElement): number {
   const scrollport = element.closest<HTMLElement>(".gantt-treegrid-scrollport");
   if (!scrollport) throw new Error("Shared scrollport is missing");
@@ -613,6 +713,11 @@ test("uses the documented schedule palette in dark mode", async ({ page }) => {
   await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
   const tokens = await page.getByTestId("gantt-scrollport").evaluate((element) => {
     const style = getComputedStyle(element);
+    const todayProbe = document.createElement("span");
+    todayProbe.style.color = "var(--color-neutral-500)";
+    element.append(todayProbe);
+    const expectedToday = getComputedStyle(todayProbe).color;
+    todayProbe.remove();
     return {
       critical: style.getPropertyValue("--sched-critical").trim(),
       expectedCritical: style.getPropertyValue("--color-accent-300").trim(),
@@ -620,11 +725,15 @@ test("uses the documented schedule palette in dark mode", async ({ page }) => {
       expectedNormal: style.getPropertyValue("--color-accent-600").trim(),
       baseline: style.getPropertyValue("--sched-baseline").trim(),
       expectedBaseline: style.getPropertyValue("--color-neutral-600").trim(),
+      today: getComputedStyle(document.querySelector<HTMLElement>('[data-testid="gantt-today-marker"]')!)
+        .borderLeftColor,
+      expectedToday,
     };
   });
   expect(tokens.critical).toBe(tokens.expectedCritical);
   expect(tokens.normal).toBe(tokens.expectedNormal);
   expect(tokens.baseline).toBe(tokens.expectedBaseline);
+  expect(tokens.today).toBe(tokens.expectedToday);
 });
 
 test("renders typed predecessor annotations with accessible names and stays accessible", async ({ page }) => {

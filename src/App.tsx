@@ -577,6 +577,13 @@ function ScheduleProjection({ schedule, jobName }: { schedule: ScheduleLoadState
 // roving cell. React renders the Rust-provided explanation facts and derives none.
 function LoadedSchedule({ readModel, jobName }: { readModel: GanttReadModel; jobName: string }) {
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const [todayDate] = useState(() => {
+    const now = new Date();
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, "0");
+    const day = String(now.getDate()).padStart(2, "0");
+    return `${year}-${month}-${day}`;
+  });
   const focusedRow = useMemo(
     () => readModel.rows.find((row) => row.taskId === focusedTaskId) ?? null,
     [focusedTaskId, readModel.rows],
@@ -586,6 +593,7 @@ function LoadedSchedule({ readModel, jobName }: { readModel: GanttReadModel; job
       <GanttTreegrid
         readModel={readModel}
         ariaLabel={`Schedule for ${jobName}`}
+        todayDate={todayDate}
         onActiveTaskChange={setFocusedTaskId}
       />
       <ExplanationPanel row={focusedRow} />

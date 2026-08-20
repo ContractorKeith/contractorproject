@@ -69,6 +69,13 @@
   position: relative;
   min-width: 0;
   outline-offset: -2px;
+  cursor: grab;
+  touch-action: pan-y;
+}
+
+.gantt-timeline-pane--panning {
+  cursor: grabbing;
+  user-select: none;
 }
 
 .gantt-timeline {
@@ -205,6 +212,29 @@
   color: var(--color-text);
   background: var(--color-surface);
   border: 1px solid var(--color-accent);
+  border-radius: var(--radius-sm, 3px);
+  font-size: var(--font-size-meta);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* Today is a civil-day context marker, distinct from the solid data-date line. */
+.gantt-timeline__today {
+  position: absolute;
+  width: 0;
+  border-left: 1px dashed var(--color-neutral-500);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.gantt-timeline__today-label {
+  position: absolute;
+  top: 0;
+  left: 4px;
+  padding: 0 var(--space-1);
+  color: var(--color-text);
+  background: var(--color-surface);
+  border: 1px solid var(--color-neutral-500);
   border-radius: var(--radius-sm, 3px);
   font-size: var(--font-size-meta);
   font-weight: 600;
@@ -658,6 +688,11 @@
     border-left-color: CanvasText;
   }
 
+  .gantt-timeline__today {
+    border-left-color: CanvasText;
+    border-left-style: dashed;
+  }
+
   /* A 50% gray fill is stripped in forced-colors, so mark non-working runs with
      system-colored edges instead: weekly runs get gray hairlines, exception
      runs a dashed CanvasText outline (mirroring the baseline dashed treatment)
@@ -673,7 +708,8 @@
     border-color: CanvasText;
   }
 
-  .gantt-timeline__data-date-label {
+  .gantt-timeline__data-date-label,
+  .gantt-timeline__today-label {
     color: CanvasText;
     background: Canvas;
     border-color: CanvasText;

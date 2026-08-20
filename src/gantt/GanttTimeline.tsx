@@ -1,4 +1,14 @@
-import { useId, useLayoutEffect, useMemo, useRef, type CSSProperties, type RefObject } from "react";
+import {
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+  type PointerEvent,
+  type RefObject,
+} from "react";
 import type { VirtualItem } from "@tanstack/react-virtual";
 
 import type { GanttCalendar, GanttReadModel, GanttRow } from "../types/gantt";
@@ -44,6 +54,7 @@ interface GanttTimelineProps {
   zoomAnchor: { minute: number; screenX: number } | null;
   scrollRef: RefObject<HTMLDivElement | null>;
   hoveredTaskId: string | null;
+  todayDate?: string | undefined;
 }
 
 /** Supplemental rendering adapter. Every fact drawn here is also present in the treegrid. */
@@ -57,8 +68,16 @@ export function GanttTimeline({
   zoomAnchor,
   scrollRef,
   hoveredTaskId,
+  todayDate,
 }: GanttTimelineProps) {
   const paneRef = useRef<HTMLDivElement>(null);
+  const panRef = useRef<{
+    pointerId: number;
+    startClientX: number;
+    startScrollLeft: number;
+    active: boolean;
+  } | null>(null);
+  const [panning, setPanning] = useState(false);
   const previousZoomRef = useRef(zoom);
   const markerPrefix = useId().replaceAll(":", "");
   const domain = useMemo(() => timelineDomain(readModel), [readModel]);
@@ -104,10 +123,87 @@ export function GanttTimeline({
   const normalMarkerId = `${markerPrefix}-gantt-arrow`;
   const criticalMarkerId = `${markerPrefix}-gantt-arrow-critical`;
   const activeMarkerId = `${markerPrefix}-gantt-arrow-active`;
+  const todayMinute = todayDate ? parseLocalMinute(`${todayDate}T00:00:00`) : null;
+  const showTodayMarker =
+    todayMinute !== null &&
+    Number.isFinite(todayMinute) &&
+    todayMinute >= domain.start &&
+    todayMinute < domain.finish &&
+    todayDate !== readModel.dataDate?.slice(0, 10);
+
+  function handlePointerDown(event: PointerEvent<HTMLDivElement>) {
+    if (event.button !== 0 || !event.isPrimary) return;
+    const target = event.target as Element;
+    if (target.closest("button, a, input, select, textarea, [role='button']")) return;
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    panRef.current = {
+      pointerId: event.pointerId,
+      startClientX: event.clientX,
+      startScrollLeft: viewport.scrollLeft,
+      active: false,
+    };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function handlePointerMove(event: PointerEvent<HTMLDivElement>) {
+    const pan = panRef.current;
+    const viewport = scrollRef.current;
+    if (!pan || !viewport || pan.pointerId !== event.pointerId) return;
+    const deltaX = event.clientX - pan.startClientX;
+    if (!pan.active && Math.abs(deltaX) < 3) return;
+    if (!pan.active) {
+      pan.active = true;
+      setPanning(true);
+    }
+    viewport.scrollLeft = pan.startScrollLeft - deltaX;
+    event.preventDefault();
+  }
+
+  function finishPointerPan(event: PointerEvent<HTMLDivElement>) {
+    const pan = panRef.current;
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    panRef.current = null;
+    setPanning(false);
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleTimelineKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const viewport = scrollRef.current;
+    if (!viewport) return;
+    let nextScrollLeft: number;
+    switch (event.key) {
+      case "ArrowLeft":
+        nextScrollLeft = viewport.scrollLeft - dayWidth;
+        break;
+      case "ArrowRight":
+        nextScrollLeft = viewport.scrollLeft + dayWidth;
+        break;
+      case "PageUp":
+        nextScrollLeft = viewport.scrollLeft - viewport.clientWidth;
+        break;
+      case "PageDown":
+        nextScrollLeft = viewport.scrollLeft + viewport.clientWidth;
+        break;
+      case "Home":
+        nextScrollLeft = 0;
+        break;
+      case "End":
+        nextScrollLeft = viewport.scrollWidth - viewport.clientWidth;
+        break;
+      default:
+        return;
+    }
+    const maximumScrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+    viewport.scrollLeft = Math.max(0, Math.min(nextScrollLeft, maximumScrollLeft));
+    event.preventDefault();
+  }
 
   return (
     <div
-      className="gantt-timeline-pane"
+      className={`gantt-timeline-pane${panning ? " gantt-timeline-pane--panning" : ""}`}
       data-testid="gantt-timeline-viewport"
       role="region"
       aria-label="Schedule timeline"
@@ -116,6 +212,15 @@ export function GanttTimeline({
       data-domain-start-minute={domain.start}
       data-day-width={dayWidth}
       data-origin-x={LEFT_PADDING}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={finishPointerPan}
+      onPointerCancel={finishPointerPan}
+      onLostPointerCapture={() => {
+        panRef.current = null;
+        setPanning(false);
+      }}
+      onKeyDown={handleTimelineKeyDown}
     >
       <div
         className="gantt-timeline"
@@ -225,6 +330,23 @@ export function GanttTimeline({
           >
             <span className="gantt-timeline__data-date-label" aria-hidden="true">
               Data date {formatMarkerDate(readModel.dataDate)}
+            </span>
+          </div>
+        ) : null}
+        {showTodayMarker ? (
+          <div
+            className="gantt-timeline__today"
+            data-testid="gantt-today-marker"
+            role="img"
+            aria-label={`Today ${todayDate}`}
+            style={{
+              left: minuteToX(todayMinute, domain.start, dayWidth),
+              top: HEADER_HEIGHT,
+              height: totalSize,
+            }}
+          >
+            <span className="gantt-timeline__today-label" aria-hidden="true">
+              Today {todayDate}
             </span>
           </div>
         ) : null}

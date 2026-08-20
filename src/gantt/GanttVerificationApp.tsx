@@ -120,6 +120,7 @@ export function GanttVerificationApp() {
           readModel={readModel}
           ariaLabel="Packaged Gantt verification schedule"
           viewportHeight={520}
+          todayDate="2026-08-23"
         />
       </section>
 

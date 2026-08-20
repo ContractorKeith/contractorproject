@@ -21,7 +21,7 @@ function BrowserContract() {
     return () => window.removeEventListener("gantt-test-reorder", reorder);
   }, []);
 
-  return <GanttTreegrid readModel={readModel} viewportHeight={480} />;
+  return <GanttTreegrid readModel={readModel} viewportHeight={480} todayDate="2026-08-23" />;
 }
 
 const root = document.getElementById("root");
