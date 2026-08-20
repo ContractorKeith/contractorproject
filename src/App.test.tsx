@@ -1029,6 +1029,190 @@ describe("job workspace", () => {
     expect((client.listTasks as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2);
   });
 
+  it("surfaces an out-of-range typed calendar-exception rejection", async () => {
+    const user = userEvent.setup();
+    const job = {
+      ...fixtureJob(),
+      version: 3,
+      calendar: defaultCalendar(),
+      calendarExceptions: [] as string[],
+    };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValue({ jobId: job.id, jobVersion: 3, tasks: [], dependencies: [] }),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      addCalendarException: vi.fn().mockRejectedValue({
+        message: "calendar_exception_out_of_range",
+        kind: "validation",
+      }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+    );
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${job.name}`),
+      "1975-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+
+    expect(await screen.findByText("calendar_exception_out_of_range")).toBeVisible();
+  });
+
+  it("rebases a dirty schedule-start draft when a calendar exception is added, without a conflict", async () => {
+    const user = userEvent.setup();
+    let exceptions: string[] = [];
+    let version = 3;
+    const base = { ...fixtureJob(), calendar: defaultCalendar() };
+    const jobState = () => ({
+      ...base,
+      version,
+      scheduleStart: null as string | null,
+      calendarExceptions: [...exceptions].sort(),
+    });
+    const hierState = () => ({
+      jobId: base.id,
+      jobVersion: version,
+      tasks: [],
+      dependencies: [],
+    });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([jobState()])),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockImplementation(() => Promise.resolve(hierState())),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn().mockImplementation(async () => {
+        version += 1;
+        return jobState();
+      }),
+      addCalendarException: vi.fn().mockImplementation(async (request) => {
+        exceptions = [...exceptions, request.date];
+        version += 1;
+        return jobState();
+      }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+    );
+    const startInput = screen.getByLabelText(`Schedule start for ${base.name}`);
+    await user.type(startInput, "2026-08-17");
+    // Add a closure while the schedule-start draft is dirty.
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${base.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+    await waitFor(() =>
+      expect(client.addCalendarException).toHaveBeenCalledWith({
+        jobId: base.id,
+        date: "2026-11-26",
+        expectedJobVersion: 3,
+      }),
+    );
+    // No conflict banner is raised and the dirty draft is preserved.
+    expect(
+      screen.queryByText(/Your pending values are still here/i),
+    ).not.toBeInTheDocument();
+    expect(startInput).toHaveValue("2026-08-17");
+    // Saving now uses the advanced job version, not the stale v3.
+    await user.click(
+      screen.getByRole("button", { name: "Save schedule settings" }),
+    );
+    await waitFor(() =>
+      expect(client.updateSchedule).toHaveBeenCalledWith(
+        expect.objectContaining({
+          scheduleStart: "2026-08-17",
+          expectedJobVersion: 4,
+        }),
+      ),
+    );
+  });
+
+  it("rebases a dirty data-date draft when a calendar exception is added, without a conflict", async () => {
+    const user = userEvent.setup();
+    let exceptions: string[] = [];
+    let version = 3;
+    const base = { ...fixtureJob(), calendar: defaultCalendar() };
+    const jobState = () => ({
+      ...base,
+      version,
+      dataDate: null as string | null,
+      calendarExceptions: [...exceptions].sort(),
+    });
+    const hierState = () => ({
+      jobId: base.id,
+      jobVersion: version,
+      tasks: [],
+      dependencies: [],
+    });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([jobState()])),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockImplementation(() => Promise.resolve(hierState())),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      updateJobDataDate: vi.fn().mockImplementation(async () => {
+        version += 1;
+        return jobState();
+      }),
+      addCalendarException: vi.fn().mockImplementation(async (request) => {
+        exceptions = [...exceptions, request.date];
+        version += 1;
+        return jobState();
+      }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+    );
+    const dataDateInput = screen.getByLabelText(`Data date for ${base.name}`);
+    await user.type(dataDateInput, "2026-08-18");
+    // Add a closure while the data-date draft is dirty.
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${base.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+    await waitFor(() =>
+      expect(client.addCalendarException).toHaveBeenCalledWith({
+        jobId: base.id,
+        date: "2026-11-26",
+        expectedJobVersion: 3,
+      }),
+    );
+    expect(
+      screen.queryByText(/Your pending values are still here/i),
+    ).not.toBeInTheDocument();
+    expect(dataDateInput).toHaveValue("2026-08-18");
+    // Saving the data date now uses the advanced job version, not the stale v3.
+    await user.click(screen.getByRole("button", { name: "Save data date" }));
+    await waitFor(() =>
+      expect(client.updateJobDataDate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          dataDate: "2026-08-18",
+          expectedJobVersion: 4,
+        }),
+      ),
+    );
+  });
+
   it("archives the active job with its displayed version and clears its selected task state", async () => {
     const user = userEvent.setup();
     const job = { ...fixtureJob(), version: 7 };

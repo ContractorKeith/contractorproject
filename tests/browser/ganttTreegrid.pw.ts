@@ -229,8 +229,38 @@ test("shades non-working time and distinguishes calendar exceptions", async ({ p
   });
   expect(geometry.exceptionWidth).toBeGreaterThan(geometry.weeklyWidth);
 
+  // The fill actually paints: a neutral background at 50% opacity in light mode.
+  const lightPaint = await weekly.first().evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { background: style.backgroundColor, opacity: style.opacity };
+  });
+  expect(lightPaint.opacity).toBe("0.5");
+  expect(lightPaint.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(lightPaint.background).not.toBe("transparent");
+
+  // The same fill paints in dark mode, using the dark theme's neutral token.
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  const darkPaint = await weekly.first().evaluate((node) => {
+    const style = getComputedStyle(node);
+    return { background: style.backgroundColor, opacity: style.opacity };
+  });
+  expect(darkPaint.opacity).toBe("0.5");
+  expect(darkPaint.background).not.toBe("rgba(0, 0, 0, 0)");
+  expect(darkPaint.background).not.toBe("transparent");
+  expect(darkPaint.background).not.toBe(lightPaint.background);
+  await page.evaluate(() => document.documentElement.removeAttribute("data-theme"));
+
   const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
   expect(results.violations).toEqual([]);
+});
+
+test("renders no non-working shading at the widest zoom", async ({ page }) => {
+  // Quarter zoom is too coarse to read a shaded day, so no rects are rendered.
+  await page.getByRole("button", { name: "Quarter" }).click();
+  await expect(page.locator("[data-nonworking]")).toHaveCount(0);
+  // Returning to a finer zoom restores the shading.
+  await page.getByRole("button", { name: "Day" }).click();
+  await expect(page.locator('[data-nonworking="exception"]').first()).toBeVisible();
 });
 
 test("keeps non-working shading distinguishable under forced colors", async ({ page }) => {

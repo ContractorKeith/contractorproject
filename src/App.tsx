@@ -1351,9 +1351,13 @@ function ScheduleSettings({
         void client.updateSchedule!({
           jobId: job.id,
           scheduleStart: start || null,
+          // Send only the weekly-calendar fields. Dated exceptions are owned by
+          // the dedicated add/remove commands, so we omit them here rather than
+          // relying on the server to strip them from this payload.
           calendar: {
-            ...calendar,
             workingWeekdays: [...calendar.workingWeekdays],
+            workdayStartMinute: calendar.workdayStartMinute,
+            workdayDurationMinutes: calendar.workdayDurationMinutes,
           },
           expectedJobVersion: baseVersion ?? hierarchy.jobVersion,
         })

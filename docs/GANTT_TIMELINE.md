@@ -43,10 +43,19 @@ in the drawn domain gets a flat 50% `--color-neutral-200` fill with no hatch. A
 day is non-working when its weekday is not in `workingWeekdays` or its date is in
 `exceptionDates`. This is rendering from civil dates, not schedule math.
 
+- **Civil-day anchor.** The drawn domain is floored to the civil midnight at its
+  start and ceiled to the next civil midnight at its finish, so ruler ticks, grid
+  rules, and shading rects share the same civil-day columns. Bars keep their exact
+  instant x positions and only shift uniformly with the anchor.
 - **Rect merging.** Adjacent non-working days merge into a single rect, so a
-  Thursday-Friday-Monday closure that brackets a weekend draws as one rect and a
-  year-long domain stays near ~100–115 non-working rects rather than one per day.
-  A merged rect that covers any exception day keeps the exception treatment.
+  Thursday-Friday-Monday closure that brackets a weekend draws as one rect
+  instead of five. For a Monday-to-Friday week a full year is roughly 52–53
+  weekend rects plus one rect per additional exception run, not one per
+  non-working day; the fixture's six-month domain draws 27 rects. A merged rect
+  that covers any exception day keeps the exception treatment.
+- **Domain-edge clipping.** A run is clipped to the drawn domain, so a
+  non-working stretch that reaches the first or last civil day renders only the
+  portion inside it — a weekend at the very edge may show as a single day.
 - **Weekly vs exception.** Each rect carries `data-nonworking="weekly"` or
   `data-nonworking="exception"`. Weekly runs are decorative (`aria-hidden`);
   exception-bearing runs are `role="img"` with an accessible name listing their

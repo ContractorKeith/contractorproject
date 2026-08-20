@@ -127,7 +127,9 @@ export function GanttTimeline({
         }
       >
         <NonWorkingShading
-          calendar={readModel.calendar}
+          // Default-guard so a stale payload without calendar facts degrades to
+          // no shading instead of a render crash.
+          calendar={readModel.calendar ?? { workingWeekdays: [], exceptionDates: [] }}
           domainStart={domain.start}
           domainFinish={domain.finish}
           dayWidth={dayWidth}
@@ -262,11 +264,13 @@ function NonWorkingShading({
   height: number;
 }) {
   const runs = useMemo(
-    () => nonWorkingRuns(calendar, domainStart, domainFinish),
-    [calendar, domainStart, domainFinish],
+    // Too-coarse zooms cannot render a legible shaded day; skip the
+    // O(domain-days) civil-day scan entirely there.
+    () =>
+      dayWidth < MIN_SHADE_DAY_WIDTH ? [] : nonWorkingRuns(calendar, domainStart, domainFinish),
+    [calendar, domainStart, domainFinish, dayWidth],
   );
-  // Too-coarse zooms cannot render a legible shaded day; skip entirely there.
-  if (dayWidth < MIN_SHADE_DAY_WIDTH || runs.length === 0) return null;
+  if (runs.length === 0) return null;
   return (
     <div className="gantt-timeline__nonworking-layer">
       {runs.map((run) => {
@@ -605,8 +609,15 @@ function timelineDomain(readModel: GanttReadModel): {
       finishes.push(parseLocalMinute(row.baseline.finish));
     }
   }
-  const start = Math.min(...starts) - DAY_MINUTES;
-  const finish = Math.max(...finishes) + DAY_MINUTES;
+  // Anchor the domain to civil-day boundaries: floor the start to midnight and
+  // ceil the finish to the next midnight. This keeps ruler ticks, grid rules,
+  // and non-working shading rects on the same civil-day columns. Bars keep their
+  // exact instant x (minuteToX is unchanged); they only shift uniformly with the
+  // new anchor.
+  const rawStart = Math.min(...starts) - DAY_MINUTES;
+  const rawFinish = Math.max(...finishes) + DAY_MINUTES;
+  const start = Math.floor(rawStart / DAY_MINUTES) * DAY_MINUTES;
+  const finish = Math.ceil(rawFinish / DAY_MINUTES) * DAY_MINUTES;
   return { start, finish: Math.max(start + DAY_MINUTES, finish) };
 }
 
