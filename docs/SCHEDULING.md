@@ -1,8 +1,8 @@
 # Deterministic scheduling contract
 
-Status: implemented FS/SS/FF/SF slice with signed lag, leaf constraints, and
-data-date/progress
-Updated: 2026-08-19
+Status: implemented FS/SS/FF/SF slice with signed lag, leaf constraints,
+data-date/progress, and schedule explanations
+Updated: 2026-08-20
 
 The scheduling core is a pure Rust projection. It accepts canonical task,
 dependency, and weekly-calendar inputs and returns calculated dates, total
@@ -273,6 +273,120 @@ are all complete reports zero float and is not critical, mirroring the
 complete-leaf rule. Summaries do not fabricate actual dates; they expose only the
 derived percent. Existing date and violation rollups are unchanged.
 
+## Schedule explanations
+
+Every calculated schedule carries one deterministic explanation per task in
+`explanations`, ordered exactly like `tasks`. An explanation is typed, computed
+data — never prose — answering "why does this task start and finish when it
+does". It is a pure post-pass over the same forward/backward passes that placed
+the task: explanations introduce no new scheduling semantics, change no dates,
+and are byte-stable across runs. The section-5 AI assistant layer is a separate
+future feature; nothing here calls a model or generates text.
+
+Each explanation is tagged with a `kind`:
+
+- `summary`: the row's dates are derived from its children by the rollup rules
+  above. It carries no drivers or float rationale of its own.
+- `complete`: a complete leaf, anchored at its normalized actual start and
+  finish (reported in the fact). It has zero float and is never critical.
+- `scheduled`: every other leaf — not started or in progress. It carries
+  exactly one `primaryDriver`, zero or more `otherBindingDrivers`, an optional
+  `startedActualStart` anchor, an optional `calendarGap`, and its float
+  rationale.
+
+### Drivers
+
+A driver fact names one forward-pass lower bound on the leaf's remaining work:
+
+- `scheduleStart`: the schedule-start floor, including a negative-lag pull
+  clamped at schedule start.
+- `startConstraint`: the leaf's SNET, with the entered civil date and the
+  normalized working date actually applied.
+- `dataDate`: the normalized data-date instant pushing incomplete work.
+- `predecessor`: one typed link `{ taskId, dependencyType, lagMinutes }`. FS/SS
+  bound the successor start; FF/SF bound its remaining-work finish, converted
+  through the successor's remaining duration exactly as the forward pass does.
+  For a complete predecessor the anchor is its type-appropriate normalized
+  actual; when the documented data-date lift raises that contribution above the
+  raw anchor plus lag, the explanation also reports the `dataDate` fact as
+  contributing.
+
+A fact **binds** when its start-converted bound equals the leaf's
+remaining-work start. Every scheduled leaf has at least one binding fact (the
+schedule-start floor is always a candidate), so the primary driver is total.
+The primary is the highest-precedence binding fact in the fixed order:
+predecessor, then startConstraint, then dataDate, then scheduleStart. Binding
+predecessors order by lexical predecessor id, then declaration order FS, SS,
+FF, SF. Every other binding fact is reported once in `otherBindingDrivers` in
+the same precedence order; non-binding facts are not reported.
+
+An in-progress leaf's reported early start is its immovable actual start; its
+drivers explain the remaining work behind its finish. The anchored start is
+reported as `startedActualStart`.
+
+### Calendar gap
+
+When at least one non-working civil day (weekly or dated exception) lies in
+the half-open civil interval between the primary driver's reference date and
+the leaf's arrival date, the explanation carries
+`calendarGap { fromDate, toDate, nonWorkingDayCount }`. The reference date is
+the predecessor's driving-anchor civil date (finish for FS/FF, start for
+SS/SF), the entered SNET date, the entered data date, or the schedule-start
+date. The arrival date is the civil date remaining work begins — or the
+early-finish civil date when an FF/SF predecessor is primary. `fromDate` and
+`toDate` are the two dates in ascending order (negative lag can pull the
+arrival before the reference); the count covers `[fromDate, toDate)`, counting
+only non-working days, and the fact is omitted when the count is zero. The
+arrival instant inside an explanation is informational; float must still never
+be derived by differencing reported dates.
+
+### Float rationale
+
+Every `scheduled` explanation carries `totalFloatMinutes`, `critical`
+(float `<= 0`, matching the task flag), and one `lateFinishLimit` naming what
+bounded this leaf's late finish in the backward pass:
+
+- `deadline`: the leaf's own FNLT, with entered and normalized dates;
+- `successor`: the minimum binding successor bound as a typed link
+  `{ taskId, dependencyType, lagMinutes }`;
+- `projectFinish`: the project-finish anchor.
+
+Ties resolve deadline, then successor, then projectFinish; tied successors
+order by lexical successor id, then FS, SS, FF, SF. A successor edge that
+imposes no bound (a complete successor, or SS/SF through a started
+predecessor) is never named. This is one level of attribution only: the full
+transitive backward driver chain remains deferred. `complete` and `summary`
+explanations carry no float rationale beyond their kind's fixed semantics.
+
+### Serialization
+
+Explanations serialize in camelCase with `kind` tags on the explanation and on
+every driver, calendar-gap, and limit fact, for example
+`{ "kind": "predecessor", "taskId": "A", "dependencyType": "FS",
+"lagMinutes": 0 }`. A schedule calculated from semantically identical inputs
+serializes byte-identical explanations.
+
+### Explanation examples
+
+All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
+
+| Fixture | Expected explanation |
+| --- | --- |
+| `A(480)` alone | Primary `scheduleStart`, no gap, float 0, limit `projectFinish`, critical. |
+| `A(960) -> B(480)` | B: primary `predecessor A FS+0`, limit `projectFinish`. A: limit `successor B FS+0`. |
+| `A -> B/C -> D`, shorter B branch | B: float 240, not critical, limit `successor D FS+0`. |
+| A pinned to Friday via SNET, `A =FS=> B` | B: primary `predecessor A FS+0`, `calendarGap` Friday→Monday counting 2 weekend days. |
+| SNET Wednesday with Wednesday closed | Primary `startConstraint` entered Wednesday, normalized Thursday; `calendarGap` counts the closed Wednesday. |
+| Pred finishing Monday 16:00 plus SNET Tuesday on B | Both bind Tuesday 08:00: primary `predecessor`, `otherBindingDrivers` = [`startConstraint`]. |
+| Data date Wednesday, no entries, `A(480) -> B(480)` | A: primary `dataDate`. B: primary `predecessor A FS+0`. |
+| Complete `A(480)` then 50% `B(960)`, data date Wednesday | A: kind `complete` with its normalized actuals. B: kind `scheduled`, primary `dataDate`, `startedActualStart` at its Tuesday actual. |
+| `A =SS-480=> C` clamping C at Monday | C: primary `scheduleStart`; the non-binding SS link is not reported. |
+| `A(960) =FF+0=> B(480)` | B: primary `predecessor A FF+0`; any gap measures to B's early-finish date. |
+| `A(480) =FS+480=> B(480)`, Tuesday closed | B: primary `predecessor A FS+480`; `calendarGap` from Monday counts the closed Tuesday. |
+| `A(960)` with FNLT Monday | Float -480, critical, limit `deadline` entered Monday normalized Monday. |
+| Summary S1 over A/B | Kind `summary`; no drivers. |
+| Milestone `M` after `A ->(960 lag) M` | M: primary `predecessor A FS+960`, float 0, critical. |
+
 ## Executable examples
 
 All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
@@ -329,7 +443,7 @@ All examples use Monday-Friday, 08:00-16:00, starting Monday 2026-01-05.
 
 ## Deferred semantics
 
-Manual scheduling, multiple daily intervals, resource calendars, schedule
-explanations, and working-day overrides on normally non-working days are outside
-this slice. Unsupported inputs must be rejected by the adapter that introduces
-them, never partially interpreted.
+Manual scheduling, multiple daily intervals, resource calendars, transitive
+backward-pass explanation chains, and working-day overrides on normally
+non-working days are outside this slice. Unsupported inputs must be rejected by
+the adapter that introduces them, never partially interpreted.
