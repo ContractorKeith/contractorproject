@@ -142,6 +142,12 @@ contract is additive within a major version. The job is created through
 audited like any other write. On success it prints one JSON line,
 `{"jobId","jobName","createdAt"}`; errors go to stderr with a nonzero exit.
 
+`--database` is created when the path does not exist yet. An **existing** file
+must already be a ContractorProject database at a schema version this build
+knows: opening a file migrates it, so a foreign SQLite file (a CRM database, a
+browser profile) is refused after a read-only probe and left byte-for-byte
+untouched rather than having a ContractorProject schema stamped into it.
+
 The envelope file is the whole interface: ContractorProject does not link
 against CRM code, does not read a CRM database, and does not deduplicate
 imports (the same envelope imported twice creates two jobs).

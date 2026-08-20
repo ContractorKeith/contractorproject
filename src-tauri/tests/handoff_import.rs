@@ -107,6 +107,79 @@ fn a_missing_envelope_file_is_reported_by_path() {
     assert!(error.contains("envelope file not found"), "{error}");
 }
 
+/// Opening a database file migrates it, so pointing --database at somebody
+/// else's SQLite file would stamp a ContractorProject schema into it. An
+/// existing file has to already be ours; a path that does not exist yet is
+/// still created (the tool's documented behavior).
+#[test]
+fn a_foreign_database_is_refused_and_left_untouched() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
+
+    // Somebody else's SQLite file — real database, not our schema.
+    let foreign = temp.path().join("someone-elses.sqlite3");
+    {
+        let connection = rusqlite::Connection::open(&foreign).expect("create foreign database");
+        connection
+            .execute_batch("CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT);")
+            .expect("seed foreign database");
+    }
+    let before = std::fs::read(&foreign).expect("read foreign database");
+
+    let error =
+        import(&options(envelope.clone(), foreign.clone())).expect_err("foreign database refused");
+    assert!(error.contains("no ContractorProject schema"), "{error}");
+    assert_eq!(
+        std::fs::read(&foreign).expect("reread foreign database"),
+        before,
+        "a refused import must leave the file byte-identical"
+    );
+
+    // Not even a plain non-database file gets opened and migrated.
+    let text_file = temp.path().join("notes.txt");
+    std::fs::write(&text_file, b"just some text").expect("write text file");
+    let error = import(&options(envelope.clone(), text_file.clone())).expect_err("text refused");
+    assert!(
+        error.contains("could not be read") || error.contains("no ContractorProject schema"),
+        "{error}"
+    );
+    assert_eq!(
+        std::fs::read(&text_file).expect("reread text file"),
+        b"just some text"
+    );
+
+    // A path that does not exist yet is still created fresh.
+    let fresh = temp.path().join("new").join("contractorproject.sqlite3");
+    let imported = import(&options(envelope, fresh.clone())).expect("fresh database is created");
+    assert_eq!(imported.job_name, "Backyard privacy fence");
+    let service = ApplicationService::open(&fresh).expect("reopen fresh database");
+    assert_eq!(service.list_jobs().expect("list jobs").len(), 1);
+}
+
+/// A database written by a newer build is refused rather than migrated
+/// backwards or half-read.
+#[test]
+fn a_database_from_a_newer_build_is_refused() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
+    let database = temp.path().join("contractorproject.sqlite3");
+    import(&options(envelope.clone(), database.clone())).expect("seed a real database");
+
+    {
+        let connection = rusqlite::Connection::open(&database).expect("open database");
+        connection
+            .execute_batch(
+                "INSERT INTO schema_migrations (version, applied_at) \
+                 VALUES (9999, '2099-01-01T00:00:00.000Z');",
+            )
+            .expect("pretend a newer build wrote it");
+    }
+
+    let error = import(&options(envelope, database)).expect_err("newer schema refused");
+    assert!(error.contains("schema v9999"), "{error}");
+    assert!(error.contains("update ContractorProject"), "{error}");
+}
+
 #[test]
 fn unknown_fields_and_a_missing_kind_are_treated_per_the_contract() {
     let temp = tempfile::tempdir().expect("tempdir");

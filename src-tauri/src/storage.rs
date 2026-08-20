@@ -26,6 +26,10 @@ use crate::scheduling::{
 };
 use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent_job};
 
+/// Highest migration this build applies. Tools that open a database file they
+/// did not create compare against it before writing anything.
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = 8;
+
 pub(crate) struct SqliteStore {
     database_path: PathBuf,
 }

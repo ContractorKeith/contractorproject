@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::application::{ApplicationService, CommandActor, CommandContext, CreateJobRequest};
+use crate::storage::LATEST_SCHEMA_VERSION;
 
 /// The only envelope major version this build understands.
 pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -29,7 +30,9 @@ Usage:
 
 Options:
   --envelope <path>  A ContractorCRM hand-off envelope JSON file.
-  --database <path>  The ContractorProject SQLite file (created if missing).
+  --database <path>  The ContractorProject SQLite file. Created if the path does
+                     not exist; an existing file must already be a
+                     ContractorProject database.
   --timezone <tz>    Time zone for the new job. Default: $TZ, else UTC.
   -h, --help         Show this message.
 ";
@@ -126,6 +129,7 @@ pub fn import(options: &Options) -> Result<ImportedJob, String> {
     let name = read_opportunity_name(&options.envelope)?;
     let timezone = resolve_timezone(options.timezone.as_deref());
 
+    guard_database(&options.database)?;
     let service = ApplicationService::open(&options.database)
         .map_err(|error| format!("could not open the database: {error}"))?;
     let job = service
@@ -143,6 +147,58 @@ pub fn import(options: &Options) -> Result<ImportedJob, String> {
         job_name: job.name,
         created_at: job.created_at,
     })
+}
+
+/// Refuse to write into a database file this tool did not create.
+///
+/// `--database` is documented as "created if missing", so a path that does not
+/// exist is still made fresh. But an *existing* file is opened and migrated,
+/// and that would stamp a ContractorProject schema into somebody else's SQLite
+/// file (a CRM database, a browser profile, anything). So an existing file has
+/// to already carry our schema, at a version this build understands.
+fn guard_database(database_path: &Path) -> Result<(), String> {
+    if !database_path.exists() {
+        return Ok(());
+    }
+    if !database_path.is_file() {
+        return Err(format!(
+            "{} is not a file; point --database at a ContractorProject database",
+            database_path.display()
+        ));
+    }
+
+    // Read-only so a refusal never touches the file.
+    let connection = rusqlite::Connection::open_with_flags(
+        database_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .map_err(|error| format!("{} could not be read: {error}", database_path.display()))?;
+    let stored: Option<i64> = connection
+        .query_row("SELECT MAX(version) FROM schema_migrations", [], |row| {
+            row.get(0)
+        })
+        .map_err(|_| {
+            format!(
+                "{} has no ContractorProject schema (no readable schema_migrations table); \
+                 point --database at a ContractorProject database, or at a path that does \
+                 not exist yet to create one",
+                database_path.display()
+            )
+        })?;
+    let Some(stored) = stored else {
+        return Err(format!(
+            "{} has an empty schema_migrations table; not a ContractorProject database",
+            database_path.display()
+        ));
+    };
+    if stored > LATEST_SCHEMA_VERSION {
+        return Err(format!(
+            "{} was written by a newer ContractorProject (schema v{stored}, this build knows \
+             v{LATEST_SCHEMA_VERSION}); update ContractorProject before importing",
+            database_path.display()
+        ));
+    }
+    Ok(())
 }
 
 /// Envelope validation: version gate, kind gate, required opportunity name.
