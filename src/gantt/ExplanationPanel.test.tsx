@@ -123,6 +123,49 @@ describe("ExplanationPanel", () => {
     expect(screen.getByText("Finish limited by deadline 2026-01-05")).toBeInTheDocument();
   });
 
+  it("reads finish-anchored predecessor drivers as `Finish after`", () => {
+    render(
+      <ExplanationPanel
+        row={row("Backfill", "b", {
+          kind: "scheduled",
+          taskId: "b",
+          primaryDriver: { kind: "predecessor", taskId: "A", dependencyType: "FF", lagMinutes: 0 },
+          otherBindingDrivers: [
+            { kind: "predecessor", taskId: "C", dependencyType: "SF", lagMinutes: 120 },
+          ],
+          startedActualStart: null,
+          calendarGap: null,
+          totalFloatMinutes: 0,
+          critical: true,
+          lateFinishLimit: { kind: "projectFinish" },
+        })}
+      />,
+    );
+    expect(screen.getByText("Driver Finish after A FF")).toBeInTheDocument();
+    expect(screen.getByText("Also Finish after C SF +120 min")).toBeInTheDocument();
+  });
+
+  it("shows the normalized applied date on a moved deadline limit", () => {
+    render(
+      <ExplanationPanel
+        row={row("Pour", "d", {
+          kind: "scheduled",
+          taskId: "d",
+          primaryDriver: { kind: "scheduleStart" },
+          otherBindingDrivers: [],
+          startedActualStart: null,
+          calendarGap: null,
+          totalFloatMinutes: -480,
+          critical: true,
+          lateFinishLimit: { kind: "deadline", date: "2026-01-10", normalizedDate: "2026-01-09" },
+        })}
+      />,
+    );
+    expect(
+      screen.getByText("Finish limited by deadline 2026-01-10 · applied 2026-01-09"),
+    ).toBeInTheDocument();
+  });
+
   it("shows the normalized applied date only when a start constraint moved", () => {
     render(
       <ExplanationPanel

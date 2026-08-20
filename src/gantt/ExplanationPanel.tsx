@@ -5,6 +5,7 @@ import type {
   GanttScheduleDriver,
   GanttTaskExplanation,
 } from "../types/gantt";
+import { formatInstant, formatSignedMinutes } from "./format";
 import "./explanationPanel.css";
 
 export interface ExplanationPanelProps {
@@ -83,15 +84,20 @@ function driverText(driver: GanttScheduleDriver): string {
   switch (driver.kind) {
     case "scheduleStart":
       return "Starts at schedule start";
-    case "startConstraint": {
-      const applied =
-        driver.normalizedDate !== driver.date ? ` · applied ${driver.normalizedDate}` : "";
-      return `Start no earlier than ${driver.date}${applied}`;
-    }
+    case "startConstraint":
+      return `Start no earlier than ${driver.date}${appliedFragment(
+        driver.date,
+        driver.normalizedDate,
+      )}`;
     case "dataDate":
       return `Pushed to data date ${formatInstant(driver.date)}`;
     case "predecessor":
-      return `After ${linkText(driver.taskId, driver.dependencyType, driver.lagMinutes)}`;
+      // FS/SS bind the successor start; FF/SF bind its remaining-work finish.
+      return `${finishAnchored(driver.dependencyType) ? "Finish after" : "After"} ${linkText(
+        driver.taskId,
+        driver.dependencyType,
+        driver.lagMinutes,
+      )}`;
   }
 }
 
@@ -105,7 +111,10 @@ function floatText(totalFloatMinutes: number, critical: boolean): string {
 function limitText(limit: GanttLateFinishLimit): string {
   switch (limit.kind) {
     case "deadline":
-      return `Finish limited by deadline ${limit.date}`;
+      return `Finish limited by deadline ${limit.date}${appliedFragment(
+        limit.date,
+        limit.normalizedDate,
+      )}`;
     case "successor":
       return `Finish limited by successor ${linkText(
         limit.taskId,
@@ -117,18 +126,19 @@ function limitText(limit: GanttLateFinishLimit): string {
   }
 }
 
+// The ` · applied <date>` fragment, shown only when normalization moved the date.
+function appliedFragment(date: string, normalizedDate: string): string {
+  return normalizedDate !== date ? ` · applied ${normalizedDate}` : "";
+}
+
+// FF/SF links anchor on a finish; FS/SS anchor on a start.
+function finishAnchored(type: GanttDependencyType): boolean {
+  return type === "FF" || type === "SF";
+}
+
 // Typed-link fragment mirroring the Predecessors-cell format, e.g. `B FS +480 min`.
 // The lag fragment is dropped at zero (`B FS`).
 function linkText(taskId: string, type: GanttDependencyType, lagMinutes: number): string {
   if (lagMinutes === 0) return `${taskId} ${type}`;
   return `${taskId} ${type} ${formatSignedMinutes(lagMinutes)}`;
-}
-
-function formatInstant(value: string): string {
-  return value.slice(0, 16).replace("T", " ");
-}
-
-function formatSignedMinutes(value: number): string {
-  if (value === 0) return "0 min";
-  return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")} min`;
 }

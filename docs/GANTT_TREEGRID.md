@@ -85,13 +85,19 @@ states.
 ## Focus-follow explanation panel
 
 The treegrid takes an optional `onActiveTaskChange(taskId | null)` callback. It
-fires whenever the focused task id changes — on cell movement, on a projection
-reorder, and on collapse-driven focus recovery (when a collapsed summary hides
-the focused child, the callback follows focus to the nearest visible ancestor),
-and with `null` when no row is focused. The callback is the panel's only new
-coupling: the grid's markup, its eight-column contract (`aria-colcount="8"`),
-row height, and roving single-tab-stop model are all unchanged, and the
-supplemental timeline is untouched.
+fires whenever the focused task **id** changes — on cell movement and on
+collapse-driven focus recovery (when a collapsed summary hides the focused
+child, the callback follows focus to the nearest visible ancestor). A projection
+reorder that keeps the focused task alive does not re-fire the callback (the id
+is unchanged); the panel refreshes instead through the app's row lookup against
+the new read model. At the component-contract level the callback passes `null`
+only when the visible-row set is empty; the app never mounts the grid with zero
+rows, so in practice it always names a task. The callback is held in a ref and
+the notify effect depends only on the focused task id, so an inline-lambda
+consumer cannot re-fire or loop. The callback is the panel's only new coupling:
+the grid's markup, its eight-column contract (`aria-colcount="8"`), row height,
+and roving single-tab-stop model are all unchanged, and the supplemental
+timeline is untouched.
 
 `src/gantt/ExplanationPanel.tsx` renders below the treegrid in the schedule
 view (`App.tsx`). It is a non-modal, hairline-framed region following the

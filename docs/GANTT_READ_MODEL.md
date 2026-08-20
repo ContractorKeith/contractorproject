@@ -147,7 +147,11 @@ The builder also joins each row's explanation from `schedule.explanations` by
 task id (contract v7). A repeated explanation id is rejected up front with
 `gantt_explanation_duplicate`, and a task whose row finds no explanation is
 rejected with `gantt_explanation_missing`, so a projection can never carry a
-row with a fabricated or absent explanation.
+row with a fabricated or absent explanation. An explanation whose id is not a
+projection task is deliberately skipped rather than errored — it can only
+surface as some real task's `gantt_explanation_missing`, and duplicates among
+such orphans are ignored — so the two codes stay a bijection check over the
+projected tasks.
 
 The application adapter loads canonical SQLite job schedule inputs, tasks,
 durations, FS dependencies, weekly calendar, leaf constraints, the job data
@@ -198,8 +202,10 @@ math beyond proportioning:
   Monday-to-Sunday order and `exceptionDates` sort and de-duplicate
 - the v7 row explanation, asserting the exact camel-case kind-tagged
   serialization of a scheduled leaf (`scheduleStart` driver, `projectFinish`
-  limit) and the two join error paths (`gantt_explanation_missing`,
-  `gantt_explanation_duplicate`)
+  limit), a `dataDate` driver paired with a `successor` late-finish limit, a
+  non-null `calendarGap` with ascending `fromDate`/`toDate` and its count, a
+  `deadline` limit whose entered and normalized dates differ, and the two join
+  error paths (`gantt_explanation_missing`, `gantt_explanation_duplicate`)
 - rejected metadata/schedule joins and constrained summaries
 
 `src-tauri/tests/baseline_persistence.rs` additionally proves the application

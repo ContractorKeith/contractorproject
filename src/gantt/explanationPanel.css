@@ -29,7 +29,7 @@
 
 .explanation-panel__title-task {
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: var(--font-size-table);
   font-weight: 500;
   color: var(--color-neutral-700);
 }
@@ -44,7 +44,7 @@
 .explanation-panel__fact {
   margin: 0;
   font-family: var(--font-body);
-  font-size: 13px;
+  font-size: var(--font-size-table);
   font-weight: 400;
   line-height: 1.25;
   color: var(--color-text);

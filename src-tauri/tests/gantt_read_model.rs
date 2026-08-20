@@ -1203,3 +1203,216 @@ fn rejects_a_task_with_a_duplicate_schedule_explanation() {
         }
     );
 }
+
+fn explanation_source(id: &str, sort_key: i64) -> GanttTaskSource {
+    GanttTaskSource {
+        id: id.into(),
+        parent_task_id: None,
+        sort_key,
+        name: id.into(),
+        start_no_earlier_than: None,
+        finish_no_later_than: None,
+    }
+}
+
+#[test]
+fn data_date_driver_and_successor_limit_serialize_the_exact_wire_shape() {
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+    // Data date Wednesday on `A(480) -> B(480)`: A's remaining work is pushed to
+    // the data date and its late finish is bounded by successor B (FS+0).
+    let schedule = calculate_schedule_with_progress(
+        &ScheduleInput {
+            schedule_start: date(2026, 1, 5),
+            calendar: standard_calendar(),
+            tasks: vec![
+                ScheduleTask {
+                    id: "A".into(),
+                    parent_task_id: None,
+                    duration_minutes: Some(480),
+                },
+                ScheduleTask {
+                    id: "B".into(),
+                    parent_task_id: None,
+                    duration_minutes: Some(480),
+                },
+            ],
+            dependencies: vec![FinishStartDependency {
+                predecessor_task_id: "A".into(),
+                successor_task_id: "B".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
+        },
+        &[],
+        &ScheduleProgress {
+            data_date: Some(date(2026, 1, 7)),
+            entries: vec![],
+        },
+    )
+    .expect("calculate data-date schedule");
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![explanation_source("A", 0), explanation_source("B", 1)],
+        schedule,
+        calendar: standard_calendar(),
+        baseline: None,
+        predecessors: vec![GanttPredecessorSource {
+            task_id: "B".into(),
+            predecessors: vec![GanttPredecessorLink {
+                task_id: "A".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
+        }],
+    })
+    .expect("build read model");
+
+    let value = serde_json::to_value(&read_model).expect("serialize read model");
+    assert_eq!(
+        value["rows"][0]["explanation"],
+        json!({
+            "kind": "scheduled",
+            "taskId": "A",
+            "primaryDriver": { "kind": "dataDate", "date": "2026-01-07T08:00:00" },
+            "otherBindingDrivers": [],
+            "startedActualStart": null,
+            "calendarGap": null,
+            "totalFloatMinutes": 0,
+            "critical": true,
+            "lateFinishLimit": {
+                "kind": "successor",
+                "taskId": "B",
+                "dependencyType": "FS",
+                "lagMinutes": 0
+            }
+        })
+    );
+}
+
+#[test]
+fn calendar_gap_serializes_its_ascending_endpoints_and_count() {
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+    // A pinned to Friday via SNET drives B across the weekend: B's explanation
+    // carries a non-null calendar gap counting the two weekend days.
+    let schedule = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: date(2026, 1, 5),
+            calendar: standard_calendar(),
+            tasks: vec![
+                ScheduleTask {
+                    id: "A".into(),
+                    parent_task_id: None,
+                    duration_minutes: Some(480),
+                },
+                ScheduleTask {
+                    id: "B".into(),
+                    parent_task_id: None,
+                    duration_minutes: Some(480),
+                },
+            ],
+            dependencies: vec![FinishStartDependency {
+                predecessor_task_id: "A".into(),
+                successor_task_id: "B".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
+        },
+        &[TaskConstraint {
+            task_id: "A".into(),
+            start_no_earlier_than: Some(date(2026, 1, 9)),
+            finish_no_later_than: None,
+        }],
+    )
+    .expect("calculate weekend-gap schedule");
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![
+            GanttTaskSource {
+                start_no_earlier_than: Some(date(2026, 1, 9)),
+                ..explanation_source("A", 0)
+            },
+            explanation_source("B", 1),
+        ],
+        schedule,
+        calendar: standard_calendar(),
+        baseline: None,
+        predecessors: vec![GanttPredecessorSource {
+            task_id: "B".into(),
+            predecessors: vec![GanttPredecessorLink {
+                task_id: "A".into(),
+                dependency_type: DependencyType::FinishStart,
+                lag_minutes: 0,
+            }],
+        }],
+    })
+    .expect("build read model");
+
+    let value = serde_json::to_value(&read_model).expect("serialize read model");
+    let explanation = &value["rows"][1]["explanation"];
+    assert_eq!(explanation["primaryDriver"]["kind"], json!("predecessor"));
+    assert_eq!(
+        explanation["calendarGap"],
+        json!({
+            "fromDate": "2026-01-09",
+            "toDate": "2026-01-12",
+            "nonWorkingDayCount": 2
+        })
+    );
+}
+
+#[test]
+fn deadline_limit_serializes_entered_and_normalized_dates_when_they_differ() {
+    let date = |year, month, day| NaiveDate::from_ymd_opt(year, month, day).expect("valid date");
+    // `A(1440)` with a Wednesday FNLT and Wednesday closed: the deadline normalizes
+    // back to Tuesday, so the entered and applied dates differ on the wire.
+    let calendar = WorkingCalendar {
+        exceptions: vec![date(2026, 1, 7)],
+        ..standard_calendar()
+    };
+    let schedule = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: date(2026, 1, 5),
+            calendar: calendar.clone(),
+            tasks: vec![ScheduleTask {
+                id: "A".into(),
+                parent_task_id: None,
+                duration_minutes: Some(1_440),
+            }],
+            dependencies: vec![],
+        },
+        &[TaskConstraint {
+            task_id: "A".into(),
+            start_no_earlier_than: None,
+            finish_no_later_than: Some(date(2026, 1, 7)),
+        }],
+    )
+    .expect("calculate deadline schedule");
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![GanttTaskSource {
+            finish_no_later_than: Some(date(2026, 1, 7)),
+            ..explanation_source("A", 0)
+        }],
+        schedule,
+        calendar,
+        baseline: None,
+        predecessors: vec![],
+    })
+    .expect("build read model");
+
+    let value = serde_json::to_value(&read_model).expect("serialize read model");
+    assert_eq!(
+        value["rows"][0]["explanation"]["lateFinishLimit"],
+        json!({
+            "kind": "deadline",
+            "date": "2026-01-07",
+            "normalizedDate": "2026-01-06"
+        })
+    );
+}

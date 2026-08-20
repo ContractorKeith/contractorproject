@@ -215,6 +215,10 @@ Baseline and current bars stack in the same row: current above, baseline ghost b
 
 As shipped (read model v4), schedule variance is presented as **stacked signed-minute facts inside the existing cells**, not a dedicated variance column: the Start and Finish cells carry a second line `Baseline <civil-date> <signed> min` (the clock time is dropped from the visible fact to fit the narrow cell and preserve the Name reading column; the precise instant stays in the cell's accessible name and on the timeline ghost bar), and the Duration cell carries `Baseline <duration> <signed> min` (unit dropped from the first number to fit the narrow cell; suppressed on milestones, which already show start/finish baselines). Rust computes every value; the table never recalculates it. Signed values read late as positive and early as negative; late still pairs with the ghost bar so meaning is never hue-only. A dedicated signed-day variance column (with the filled-triangle late glyph in `--state-variance-late`) and cost variance in minor-unit currency remain a possible future refinement once exportable variance views land.
 
+### Explanation panel
+
+The focus-follow schedule-explanation panel below the treegrid renders the scheduler's deterministic drivers, calendar gaps, float, and finish limits as FACT rows. It deliberately uses the §6 fact treatment, **not** the model-prose treatment reserved for the AI layer — see §6 for the fact-vs-prose distinction.
+
 ---
 
 ## 6. AI assistant surfaces
