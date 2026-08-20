@@ -172,7 +172,7 @@ describe("job workspace", () => {
     expect(panel).toHaveTextContent("Finish limited by deadline 2026-08-20");
   });
 
-  it("falls back to the panel empty state when the focused task leaves the projection", async () => {
+  it("recovers the panel to the surviving task when the focused task leaves the projection", async () => {
     const user = userEvent.setup();
     // A tiny in-memory store: the first projection has two tasks; a version bump
     // (a calendar-exception add) reloads a projection missing the focused task.
@@ -215,12 +215,14 @@ describe("job workspace", () => {
     await waitFor(() =>
       expect(screen.queryByText("Finish limited by deadline 2026-08-20")).not.toBeInTheDocument(),
     );
-    // The reloaded projection remounts the panel with no focused task, so it
-    // settles on the empty state (find(...) ?? null) until a cell is focused.
+    // The treegrid's focus recovery re-points the roving cell at the first
+    // visible row of the reloaded projection, so the panel settles on the
+    // surviving task's facts rather than a stale or empty state.
+    await new Promise((resolve) => setTimeout(resolve, 30));
     await waitFor(() => {
       expect(
-        screen.getByRole("region", { name: "Schedule explanation" }),
-      ).toHaveTextContent("Focus a task to see what drives it.");
+        screen.getByRole("region", { name: "Schedule explanation for Excavate" }),
+      ).toBeInTheDocument();
     });
   });
 

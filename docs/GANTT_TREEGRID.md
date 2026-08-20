@@ -91,8 +91,11 @@ child, the callback follows focus to the nearest visible ancestor). A projection
 reorder that keeps the focused task alive does not re-fire the callback (the id
 is unchanged); the panel refreshes instead through the app's row lookup against
 the new read model. At the component-contract level the callback passes `null`
-only when the visible-row set is empty; the app never mounts the grid with zero
-rows, so in practice it always names a task. The callback is held in a ref and
+once on mount (the notify effect runs before the initial roving cell is set)
+and whenever the visible-row set is empty; the app never mounts the grid with
+zero rows, so after that first notify it always names a task. A reload that
+drops the focused task recovers the roving cell to the first visible row, so
+the panel settles on a surviving task rather than a stale or empty state. The callback is held in a ref and
 the notify effect depends only on the focused task id, so an inline-lambda
 consumer cannot re-fire or loop. The callback is the panel's only new coupling:
 the grid's markup, its eight-column contract (`aria-colcount="8"`), row height,
@@ -110,8 +113,12 @@ schedule math): a `summary` shows `Derived from children`; a `complete` leaf
 shows `Complete · actual <start> – <finish>`; a `scheduled` leaf shows a
 `Driver` line, any `Also` co-binding drivers, an optional `Started <instant>`, an
 optional singular/plural non-working-day gap, a `Float <signed> min` line
-(`· critical` appended when critical), and the `lateFinishLimit` fact. Typed
-links reuse the Predecessors-cell format (`B FS +480 min`, lag dropped at zero).
+(`· critical` appended when critical), and the `lateFinishLimit` fact. A
+predecessor driver reads `After <link>` for the start-anchored FS/SS types and
+`Finish after <link>` for the finish-anchored FF/SF types; constraint and
+deadline facts append ` · applied <date>` when normalization moved the entered
+date. Typed links reuse the Predecessors-cell format (`B FS +480 min`, lag
+dropped at zero).
 With no focused task the panel reads `Focus a task to see what drives it.`
 
 **Accessibility contract:** the region carries `role="region"` and an aria-label
