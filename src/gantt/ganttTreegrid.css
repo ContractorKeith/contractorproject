@@ -123,6 +123,22 @@
   pointer-events: none;
 }
 
+/* Non-working-time shading sits behind the ruler, grid, and bars. DESIGN.md §184:
+   a flat 50% neutral fill over every non-working civil day, no hatch. Weekly and
+   exception days share the fill; exception rects carry an accessible label. */
+.gantt-timeline__nonworking-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.gantt-timeline__nonworking {
+  position: absolute;
+  background: var(--color-neutral-200);
+  opacity: 0.5;
+}
+
 .gantt-timeline__grid line,
 .gantt-timeline__row-rule {
   stroke: var(--color-neutral-200);
@@ -640,6 +656,21 @@
 
   .gantt-timeline__data-date {
     border-left-color: CanvasText;
+  }
+
+  /* A 50% gray fill is stripped in forced-colors, so mark non-working runs with
+     system-colored edges instead: weekly runs get gray hairlines, exception
+     runs a dashed CanvasText outline (mirroring the baseline dashed treatment)
+     so they stay perceivable and distinct. */
+  .gantt-timeline__nonworking {
+    background: transparent;
+    opacity: 1;
+    border-inline: 1px solid GrayText;
+  }
+
+  .gantt-timeline__nonworking--exception {
+    border-inline-style: dashed;
+    border-color: CanvasText;
   }
 
   .gantt-timeline__data-date-label {

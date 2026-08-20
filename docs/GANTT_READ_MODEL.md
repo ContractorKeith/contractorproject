@@ -1,7 +1,7 @@
 # Versioned Gantt read model
 
-Status: implemented contract v5
-Updated: 2026-08-19
+Status: implemented contract v6
+Updated: 2026-08-20
 
 The Gantt read model is the only schedule shape consumed by the production
 work-breakdown table and supplemental timeline. Rust joins canonical task
@@ -11,7 +11,7 @@ virtualize them, but it does not calculate dates, hierarchy positions,
 variance, float, or critical state.
 
 The Rust contract lives in `src-tauri/src/gantt.rs`. Its TypeScript mirror is
-`src/types/gantt.ts`. Both currently use `contractVersion: 5`; a breaking
+`src/types/gantt.ts`. Both currently use `contractVersion: 6`; a breaking
 field or semantic change requires a new version.
 
 ## Top-level projection
@@ -27,7 +27,29 @@ field or semantic change requires a new version.
 - `rowCount`: total logical rows before React collapse/virtualization
 - `criticalTaskIds`: every critical leaf and derived summary ID
 - `criticalPath`: the scheduler's deterministic representative leaf path
+- `calendar`: rendering-only working-calendar facts (added in contract v6). See
+  below.
 - `rows`: deterministic hierarchy pre-order
+
+## Calendar facts (contract v6)
+
+`calendar` is a rendering-only block Rust derives from the job's working
+calendar so the timeline can shade non-working civil days. It carries no
+computed schedule truth; the scheduler already consumed the same calendar to
+place bars.
+
+- `workingWeekdays`: the weekly working-day set as snake-case codes (`monday`
+  … `sunday`), canonicalized to Monday-to-Sunday order and de-duplicated.
+- `exceptionDates`: the job's dated non-working civil days as `YYYY-MM-DD`
+  strings, sorted ascending and de-duplicated. These are the merged persisted
+  calendar exceptions the loader folds into the job's calendar; each is a full
+  non-working day exactly like a weekly non-working day.
+
+React paints non-working shading by classifying each civil day in the drawn
+domain against these two facts (a day is non-working when it is not a working
+weekday or it is an exception date). It derives no schedule math from them; the
+shading is painting from civil dates only. The exception treatment is specified
+in [`GANTT_TIMELINE.md`](GANTT_TIMELINE.md).
 
 Every timestamp serializes as `YYYY-MM-DDTHH:mm:ss` without a UTC offset. The
 job timezone remains separate and must be paired with these values by the
@@ -154,6 +176,8 @@ math beyond proportioning:
   `gantt_baseline_task_duplicate`)
 - a statused job with a data date and complete, in-progress, and not-started
   rows, asserting the exact v4 progress facts and camel-case serialization
+- the v6 calendar facts, asserting `workingWeekdays` canonicalize to
+  Monday-to-Sunday order and `exceptionDates` sort and de-duplicate
 - rejected metadata/schedule joins and constrained summaries
 
 `src-tauri/tests/baseline_persistence.rs` additionally proves the application

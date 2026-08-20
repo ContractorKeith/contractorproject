@@ -82,6 +82,27 @@ because the active task cell owns keyboard collapse and expansion. The surface
 does not claim selection semantics; focus and future selection remain separate
 states.
 
+## Schedule-settings drafts and calendar exceptions
+
+The schedule-settings panel keeps a dirty draft (schedule start, weekly
+calendar, or data date) against the persisted values it was based on. When a
+sibling command bumps the job version without changing those persisted inputs,
+the draft silently rebases onto the new version instead of raising a conflict;
+only a genuine change to a persisted input the draft depends on raises one.
+
+Adding or removing a **dated calendar exception** is treated the same way. The
+issue text framed exception edits as changes that "must raise real conflicts",
+but the implemented and correct behavior is a silent rebase: an exception add or
+remove bumps the job version and changes the exception list, yet it does not
+touch the persisted schedule start, weekly calendar, or data date that a draft
+is based on. Because `calendarsEqual` compares only the weekly calendar (not the
+exception list), a dirty schedule-start or data-date draft rebases cleanly and a
+subsequent save uses the fresh `expectedJobVersion`. The exception list itself
+lives outside those drafts and is managed by its own audited add/remove
+commands. A regression test asserts a dirty schedule-start draft plus an
+exception add raises no conflict banner, preserves the draft, and saves against
+the advanced version.
+
 ## Verification
 
 Component tests cover semantics, complete schedule text, the % Done column and

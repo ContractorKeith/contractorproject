@@ -90,6 +90,8 @@ export interface TaskMutation {
   jobVersion: number;
 }
 export interface UpdateScheduleRequest { jobId: string; scheduleStart: string | null; calendar: WorkingCalendar; expectedJobVersion: number; }
+/** Add or remove a dated non-working calendar exception (canonical YYYY-MM-DD). */
+export interface CalendarExceptionRequest { jobId: string; date: string; expectedJobVersion: number; }
 export interface UpdateTaskDurationRequest { taskId: string; durationMinutes: number | null; expectedVersion: number; expectedJobVersion: number; }
 export type TaskConstraintKind = "start_no_earlier_than" | "finish_no_later_than";
 export interface UpdateTaskConstraintRequest {

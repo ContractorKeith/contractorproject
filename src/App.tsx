@@ -520,6 +520,13 @@ function TaskPanel({
         onHierarchyChange={onHierarchyChange}
         onJobChange={onJobChange}
       />
+      <CalendarExceptions
+        job={job}
+        hierarchy={state.hierarchy}
+        client={client}
+        onHierarchyChange={onHierarchyChange}
+        onJobChange={onJobChange}
+      />
       <BaselineSettings
         job={job}
         hierarchy={state.hierarchy}
@@ -1344,9 +1351,13 @@ function ScheduleSettings({
         void client.updateSchedule!({
           jobId: job.id,
           scheduleStart: start || null,
+          // Send only the weekly-calendar fields. Dated exceptions are owned by
+          // the dedicated add/remove commands, so we omit them here rather than
+          // relying on the server to strip them from this payload.
           calendar: {
-            ...calendar,
             workingWeekdays: [...calendar.workingWeekdays],
+            workdayStartMinute: calendar.workdayStartMinute,
+            workdayDurationMinutes: calendar.workdayDurationMinutes,
           },
           expectedJobVersion: baseVersion ?? hierarchy.jobVersion,
         })
@@ -1484,6 +1495,119 @@ function ScheduleSettings({
         <span role="status">{message}</span>
       ) : null}
     </form>
+  );
+}
+
+// Dated calendar-exception management: list the job's non-working closures, add
+// one, or remove one, using the audited #53 commands. Each add/remove is a real
+// schedule-input change, so a success reloads the job snapshot; the version bump
+// re-drives the Gantt getSchedule effect (reshading the timeline) and lets the
+// sibling ScheduleSettings drafts rebase, since the persisted schedule start,
+// weekly calendar, and data date are untouched. Typed rejections (out-of-range,
+// duplicate) surface like other validation errors; a version conflict refreshes.
+function CalendarExceptions({
+  job,
+  hierarchy,
+  client,
+  onHierarchyChange,
+  onJobChange,
+}: {
+  job: Job;
+  hierarchy: TaskHierarchy;
+  client: JobClient;
+  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
+  onJobChange: (job: Job) => void;
+}) {
+  const add = client.addCalendarException;
+  const remove = client.removeCalendarException;
+  const [date, setDate] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState<string | null>(null);
+  if (!add || !remove) return null;
+  const exceptions = [...(job.calendarExceptions ?? [])].sort();
+
+  async function mutate(kind: "add" | "remove", value: string) {
+    if (saving || !value) return;
+    setSaving(true);
+    setMessage(null);
+    try {
+      const command = kind === "add" ? add! : remove!;
+      await command({
+        jobId: job.id,
+        date: value,
+        expectedJobVersion: hierarchy.jobVersion,
+      });
+      const snapshot = await loadJobSnapshot(client, job.id);
+      onJobChange(snapshot.job);
+      onHierarchyChange(snapshot.hierarchy);
+      if (kind === "add") setDate("");
+      setMessage(kind === "add" ? `Added closure ${value}.` : `Removed closure ${value}.`);
+    } catch (reason: unknown) {
+      if (isVersionConflict(reason)) {
+        // Recover the stale version so an immediate retry can succeed.
+        try {
+          const snapshot = await loadJobSnapshot(client, job.id);
+          onJobChange(snapshot.job);
+          onHierarchyChange(snapshot.hierarchy);
+        } catch {
+          // Ignore a secondary refresh failure; the message still explains it.
+        }
+        setMessage("The job changed elsewhere. Refreshed the list — try again.");
+      } else {
+        setMessage(errorMessage(reason));
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section
+      className="schedule-settings__exceptions"
+      aria-label={`Calendar exceptions for ${job.name}`}
+    >
+      <h4>Office closures and holidays</h4>
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          void mutate("add", date);
+        }}
+      >
+        <label>
+          Closure date{" "}
+          <input
+            aria-label={`Calendar exception date for ${job.name}`}
+            type="date"
+            value={date}
+            disabled={saving}
+            onChange={(event) => setDate(event.target.value)}
+          />
+        </label>
+        <button type="submit" disabled={saving || !date}>
+          Add closure
+        </button>
+      </form>
+      {exceptions.length ? (
+        <ul className="schedule-settings__exception-list">
+          {exceptions.map((value) => (
+            <li key={value}>
+              <span>{value}</span>
+              <button
+                type="button"
+                disabled={saving}
+                aria-label={`Remove calendar exception ${value}`}
+                onClick={() => void mutate("remove", value)}
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>No closures yet.</p>
+      )}
+      {message ? <span role="status">{message}</span> : null}
+    </section>
   );
 }
 

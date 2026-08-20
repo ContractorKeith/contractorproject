@@ -1,15 +1,31 @@
 import { useId, useLayoutEffect, useMemo, useRef, type CSSProperties, type RefObject } from "react";
 import type { VirtualItem } from "@tanstack/react-virtual";
 
-import type { GanttReadModel, GanttRow } from "../types/gantt";
+import type { GanttCalendar, GanttReadModel, GanttRow } from "../types/gantt";
 
 export const GANTT_ZOOMS = ["day", "week", "month", "quarter"] as const;
 export type GanttZoom = (typeof GANTT_ZOOMS)[number];
 
 const DAY_MINUTES = 1_440;
+const DAY_MS = 86_400_000;
 const HEADER_HEIGHT = 34;
 const LEFT_PADDING = 32;
 const RIGHT_PADDING = 160;
+// Non-working shading is drawn only when a single civil day is at least this many
+// pixels wide. Day (28), week (8), and month (2.4) qualify; quarter (0.8) is too
+// coarse to read a shaded day, so it renders no shading (documented in
+// GANTT_TIMELINE.md). Adjacent non-working days always merge into one rect.
+const MIN_SHADE_DAY_WIDTH = 2;
+// getUTCDay() index -> Rust CalendarWeekday code, for civil-day classification.
+const WEEKDAY_CODES = [
+  "sunday",
+  "monday",
+  "tuesday",
+  "wednesday",
+  "thursday",
+  "friday",
+  "saturday",
+] as const;
 
 const dayWidths: Record<GanttZoom, number> = {
   day: 28,
@@ -110,6 +126,15 @@ export function GanttTimeline({
           } as CSSProperties
         }
       >
+        <NonWorkingShading
+          // Default-guard so a stale payload without calendar facts degrades to
+          // no shading instead of a render crash.
+          calendar={readModel.calendar ?? { workingWeekdays: [], exceptionDates: [] }}
+          domainStart={domain.start}
+          domainFinish={domain.finish}
+          dayWidth={dayWidth}
+          height={totalSize}
+        />
         <TimelineRuler domainStart={domain.start} width={timelineWidth} dayWidth={dayWidth} zoom={zoom} />
         {cropHeight > 0 ? (
           <svg
@@ -206,6 +231,112 @@ export function GanttTimeline({
       </div>
     </div>
   );
+}
+
+/** One merged run of adjacent non-working civil days. */
+interface NonWorkingRun {
+  startMs: number;
+  endMs: number;
+  /** Sorted exception dates covered by this run (empty for weekly-only runs). */
+  exceptionDates: string[];
+}
+
+/**
+ * Paints DESIGN.md §184 non-working shading behind the timeline: a 50%
+ * neutral fill over every non-working civil day (weekly non-working days plus
+ * dated exceptions), drawn from the read model's calendar facts. This is
+ * rendering from civil dates, not schedule math. Adjacent non-working days merge
+ * into a single rect so a year-long domain stays cheap, and any rect covering an
+ * exception keeps the distinct `data-nonworking="exception"` attribute plus an
+ * accessible label so it is distinguishable from weekly non-working time.
+ */
+function NonWorkingShading({
+  calendar,
+  domainStart,
+  domainFinish,
+  dayWidth,
+  height,
+}: {
+  calendar: GanttCalendar;
+  domainStart: number;
+  domainFinish: number;
+  dayWidth: number;
+  height: number;
+}) {
+  const runs = useMemo(
+    // Too-coarse zooms cannot render a legible shaded day; skip the
+    // O(domain-days) civil-day scan entirely there.
+    () =>
+      dayWidth < MIN_SHADE_DAY_WIDTH ? [] : nonWorkingRuns(calendar, domainStart, domainFinish),
+    [calendar, domainStart, domainFinish, dayWidth],
+  );
+  if (runs.length === 0) return null;
+  return (
+    <div className="gantt-timeline__nonworking-layer">
+      {runs.map((run) => {
+        const left = minuteToX(run.startMs / 60_000, domainStart, dayWidth);
+        const width = ((run.endMs - run.startMs) / DAY_MS) * dayWidth;
+        const isException = run.exceptionDates.length > 0;
+        return (
+          <div
+            key={run.startMs}
+            className={
+              isException
+                ? "gantt-timeline__nonworking gantt-timeline__nonworking--exception"
+                : "gantt-timeline__nonworking"
+            }
+            data-testid="gantt-nonworking"
+            data-nonworking={isException ? "exception" : "weekly"}
+            style={{ left, width, top: HEADER_HEIGHT, height }}
+            {...(isException
+              ? { role: "img", "aria-label": exceptionLabel(run.exceptionDates) }
+              : { "aria-hidden": true })}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+/** Builds the merged non-working civil-day runs across the drawn domain. */
+function nonWorkingRuns(
+  calendar: GanttCalendar,
+  domainStart: number,
+  domainFinish: number,
+): NonWorkingRun[] {
+  const workingDays = new Set(calendar.workingWeekdays);
+  const exceptions = new Set(calendar.exceptionDates);
+  const start = new Date(domainStart * 60_000);
+  // Align to the civil (UTC-neutral) midnight of the first drawn day.
+  let dayMs = Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate());
+  const endMs = domainFinish * 60_000;
+  const runs: NonWorkingRun[] = [];
+  let current: NonWorkingRun | null = null;
+  while (dayMs <= endMs) {
+    const iso = new Date(dayMs).toISOString().slice(0, 10);
+    // getUTCDay() is always 0-6, so the lookup is total.
+    const weekday = WEEKDAY_CODES[new Date(dayMs).getUTCDay()]!;
+    const isException = exceptions.has(iso);
+    const nonWorking = isException || !workingDays.has(weekday);
+    if (nonWorking) {
+      if (!current) current = { startMs: dayMs, endMs: dayMs + DAY_MS, exceptionDates: [] };
+      else current.endMs = dayMs + DAY_MS;
+      if (isException) current.exceptionDates.push(iso);
+    } else if (current) {
+      runs.push(current);
+      current = null;
+    }
+    dayMs += DAY_MS;
+  }
+  if (current) runs.push(current);
+  return runs;
+}
+
+/** Accessible name for an exception-bearing shading rect. */
+function exceptionLabel(dates: string[]): string {
+  return dates.length === 1
+    ? `Calendar exception ${dates[0]}`
+    : `Calendar exceptions ${dates.join(", ")}`;
 }
 
 function TimelineRuler({
@@ -478,8 +609,15 @@ function timelineDomain(readModel: GanttReadModel): {
       finishes.push(parseLocalMinute(row.baseline.finish));
     }
   }
-  const start = Math.min(...starts) - DAY_MINUTES;
-  const finish = Math.max(...finishes) + DAY_MINUTES;
+  // Anchor the domain to civil-day boundaries: floor the start to midnight and
+  // ceil the finish to the next midnight. This keeps ruler ticks, grid rules,
+  // and non-working shading rects on the same civil-day columns. Bars keep their
+  // exact instant x (minuteToX is unchanged); they only shift uniformly with the
+  // new anchor.
+  const rawStart = Math.min(...starts) - DAY_MINUTES;
+  const rawFinish = Math.max(...finishes) + DAY_MINUTES;
+  const start = Math.floor(rawStart / DAY_MINUTES) * DAY_MINUTES;
+  const finish = Math.ceil(rawFinish / DAY_MINUTES) * DAY_MINUTES;
   return { start, finish: Math.max(start + DAY_MINUTES, finish) };
 }
 

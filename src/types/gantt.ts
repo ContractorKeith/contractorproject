@@ -1,6 +1,28 @@
-export const GANTT_READ_MODEL_VERSION = 5 as const;
+export const GANTT_READ_MODEL_VERSION = 6 as const;
 
 export type GanttTaskKind = "summary" | "task" | "milestone";
+
+/** Weekly working day, snake-case to mirror the Rust `CalendarWeekday` codes. */
+export type GanttCalendarWeekday =
+  | "monday"
+  | "tuesday"
+  | "wednesday"
+  | "thursday"
+  | "friday"
+  | "saturday"
+  | "sunday";
+
+/**
+ * Rendering-only working-calendar facts (contract v6). `workingWeekdays` is the
+ * weekly working-day set in canonical Monday-to-Sunday order; `exceptionDates`
+ * are the job's dated non-working civil days (`YYYY-MM-DD`), sorted and unique.
+ * The timeline paints non-working shading from these facts and derives no
+ * schedule math from them.
+ */
+export interface GanttCalendar {
+  workingWeekdays: GanttCalendarWeekday[];
+  exceptionDates: string[];
+}
 
 /** The four dependency relationship types, as their canonical two-letter codes. */
 export type GanttDependencyType = "FS" | "SS" | "FF" | "SF";
@@ -71,5 +93,7 @@ export interface GanttReadModel {
   rowCount: number;
   criticalTaskIds: string[];
   criticalPath: string[];
+  /** Rendering-only working-calendar facts for non-working-time shading. */
+  calendar: GanttCalendar;
   rows: GanttRow[];
 }
