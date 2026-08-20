@@ -61,12 +61,13 @@ test("keeps the 1,000-row shared timeline within the ADR regression floor", asyn
         framesAbove25Percent: (samples.filter((sample) => sample > 25).length / samples.length) * 100,
         maximumDrift,
         // Node budget scope: this counts mounted ROWS and per-row TIMELINE marks
-        // (row groups, task/baseline/progress bars, dependency paths) — not the
+        // (row groups, task/baseline/progress bars, dependency paths) plus the
+        // non-working shading rects (one per merged run over the domain) — not the
         // per-cell text spans inside the treegrid. Stacked baseline facts add
         // text spans, not counted nodes, so the budget stays honest about DOM
         // rows/marks that drive scroll/paint cost.
         taskNodeCount: scrollport.querySelectorAll(
-          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-progress-task-id], [data-dependency]",
+          "tr[data-task-id], [data-timeline-row-id], [data-timeline-task-id], [data-baseline-task-id], [data-progress-task-id], [data-dependency], [data-nonworking]",
         ).length,
         longTasks: longTasks.length,
       };

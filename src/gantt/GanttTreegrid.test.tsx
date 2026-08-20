@@ -36,7 +36,7 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 5,
+    contractVersion: 6,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -46,6 +46,10 @@ function model(rows: GanttRow[]): GanttReadModel {
     rowCount: rows.length,
     criticalTaskIds: rows.filter((item) => item.critical).map((item) => item.taskId),
     criticalPath: ["task-a", "task-c"],
+    calendar: {
+      workingWeekdays: ["monday", "tuesday", "wednesday", "thursday", "friday"],
+      exceptionDates: [],
+    },
     rows,
   };
 }

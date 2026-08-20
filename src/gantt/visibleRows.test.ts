@@ -60,6 +60,10 @@ function nestedReadModel(): GanttReadModel {
     rowCount: rows.length,
     criticalTaskIds: rows.map((item) => item.taskId),
     criticalPath: ["task-1"],
+    calendar: {
+      workingWeekdays: ["monday", "tuesday", "wednesday", "thursday", "friday"],
+      exceptionDates: [],
+    },
     rows,
   };
 }

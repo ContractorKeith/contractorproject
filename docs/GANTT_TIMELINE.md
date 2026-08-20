@@ -1,7 +1,7 @@
 # Production Gantt timeline
 
 Status: implemented
-Updated: 2026-08-14
+Updated: 2026-08-20
 
 `src/gantt/GanttTimeline.tsx` is the supplemental visual adapter for Gantt
 read-model contract v1. `GanttTreegrid` owns one shared scroll plane and one
@@ -34,6 +34,37 @@ timeline pane.
 The focusable timeline region provides keyboard access to horizontal
 scrolling. It exposes no task semantics because the adjacent treegrid is the
 accessible schedule spine.
+
+## Non-working-time shading
+
+The timeline paints DESIGN.md §184 non-working shading behind the ruler, grid,
+and bars from the read model's v6 `calendar` facts. Every non-working civil day
+in the drawn domain gets a flat 50% `--color-neutral-200` fill with no hatch. A
+day is non-working when its weekday is not in `workingWeekdays` or its date is in
+`exceptionDates`. This is rendering from civil dates, not schedule math.
+
+- **Rect merging.** Adjacent non-working days merge into a single rect, so a
+  Thursday-Friday-Monday closure that brackets a weekend draws as one rect and a
+  year-long domain stays near ~100–115 non-working rects rather than one per day.
+  A merged rect that covers any exception day keeps the exception treatment.
+- **Weekly vs exception.** Each rect carries `data-nonworking="weekly"` or
+  `data-nonworking="exception"`. Weekly runs are decorative (`aria-hidden`);
+  exception-bearing runs are `role="img"` with an accessible name listing their
+  dates (for example `Calendar exception 2026-11-26`, or a comma-separated list
+  when a merged run spans several). The treegrid remains the schedule spine, so
+  the shading adds ambient context without a color-only signal.
+- **Zoom threshold.** Shading renders only when one civil day is at least 2px
+  wide: day (28px), week (8px), and month (2.4px) qualify; quarter (0.8px) is too
+  coarse to read a shaded day and renders none. Adjacent days always merge before
+  this check, so a merged run is still drawn at the qualifying zooms.
+- **Node budget.** The shading rects are timeline nodes and are counted by the
+  performance node-budget selector (`[data-nonworking]`). Merging keeps the count
+  low; the 1,000-row fixture measures ~131 total task-related nodes against the
+  <500 ADR floor. ADR 0002 thresholds are unchanged.
+- **Theme and forced colors.** The neutral fill follows the theme tokens. Under
+  forced colors the fill is stripped, so runs fall back to system-colored edges:
+  weekly runs get gray hairlines and exception runs a dashed `CanvasText` border
+  (mirroring the baseline dashed treatment) to stay perceptible and distinct.
 
 ## Verification
 

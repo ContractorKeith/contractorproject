@@ -45,6 +45,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
         job_version: 7,
         tasks: vec![],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -54,7 +55,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 5,
+            "contractVersion": 6,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -64,6 +65,10 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
             "rowCount": 0,
             "criticalTaskIds": [],
             "criticalPath": [],
+            "calendar": {
+                "workingWeekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "exceptionDates": []
+            },
             "rows": []
         })
     );
@@ -101,6 +106,7 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
             finish_no_later_than: Some(NaiveDate::from_ymd_opt(2026, 1, 5).expect("date")),
         }],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -109,7 +115,7 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 5,
+            "contractVersion": 6,
             "jobId": "job-1",
             "jobVersion": 1,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -119,6 +125,10 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
             "rowCount": 1,
             "criticalTaskIds": ["leaf"],
             "criticalPath": ["leaf"],
+            "calendar": {
+                "workingWeekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+                "exceptionDates": []
+            },
             "rows": [{
                 "taskId": "leaf",
                 "parentTaskId": null,
@@ -247,6 +257,7 @@ fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
             },
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![GanttPredecessorSource {
             task_id: "waiting".into(),
@@ -259,7 +270,7 @@ fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
     })
     .expect("build statused read model");
 
-    assert_eq!(read_model.contract_version, 5);
+    assert_eq!(read_model.contract_version, 6);
     assert_eq!(read_model.data_date, Some(date_time("2026-01-07T08:00:00")));
 
     let summary = &read_model.rows[0];
@@ -365,6 +376,7 @@ fn summary_status_reflects_started_descendants_when_percent_floors_to_zero() {
             source_task("todo", Some("phase"), 1),
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -444,6 +456,7 @@ fn nested_schedule_exposes_stable_hierarchy_schedule_baseline_and_predecessors()
             },
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: Some(GanttBaselineSource {
             id: "baseline-1".into(),
             tasks: vec![GanttBaselineTaskSource {
@@ -576,6 +589,7 @@ fn baseline_omitting_a_later_added_task_reports_a_null_comparison() {
             },
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: Some(GanttBaselineSource {
             id: "baseline-1".into(),
             tasks: vec![GanttBaselineTaskSource {
@@ -619,6 +633,7 @@ fn rejects_a_baseline_row_for_an_unknown_task() {
             finish_no_later_than: None,
         }],
         schedule,
+        calendar: standard_calendar(),
         baseline: Some(GanttBaselineSource {
             id: "baseline-1".into(),
             tasks: vec![GanttBaselineTaskSource {
@@ -671,6 +686,7 @@ fn rejects_a_duplicate_baseline_row() {
             finish_no_later_than: None,
         }],
         schedule,
+        calendar: standard_calendar(),
         baseline: Some(GanttBaselineSource {
             id: "baseline-1".into(),
             tasks: vec![baseline_row(480), baseline_row(300)],
@@ -713,6 +729,7 @@ fn rejects_metadata_that_cannot_join_the_authoritative_schedule() {
             finish_no_later_than: None,
         }],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -769,6 +786,7 @@ fn rejects_constraints_on_a_scheduled_summary_with_a_stable_code() {
             },
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -842,6 +860,7 @@ fn one_thousand_rows_keep_stable_logical_and_sibling_metadata() {
         job_version: 1_001,
         tasks,
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![],
     })
@@ -923,6 +942,7 @@ fn typed_predecessor_links_serialize_sorted_by_id_then_type() {
             source_task("target"),
         ],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         // Supplied out of order and with a duplicate pair carrying two types.
         predecessors: vec![GanttPredecessorSource {
@@ -1000,6 +1020,7 @@ fn duplicate_typed_predecessor_link_is_rejected() {
         job_version: 1,
         tasks: vec![task("a", 0), task("b", 1)],
         schedule,
+        calendar: standard_calendar(),
         baseline: None,
         predecessors: vec![GanttPredecessorSource {
             task_id: "b".into(),
@@ -1021,4 +1042,59 @@ fn duplicate_typed_predecessor_link_is_rejected() {
     assert_eq!(error.code(), "gantt_predecessor_duplicate");
     // A different type on the same pair remains legal.
     matches!(error, GanttReadModelError::DuplicatePredecessor { .. });
+}
+
+#[test]
+fn calendar_facts_serialize_sorted_and_deduplicated() {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 11, 23).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![],
+        dependencies: vec![],
+    })
+    .expect("calculate empty schedule");
+
+    // Working weekdays supplied out of canonical order and with a duplicate; the
+    // read model canonicalizes them Monday-to-Sunday. Exceptions span a
+    // Thursday-Friday-Monday closure around the intervening weekend and arrive
+    // unsorted with a duplicate to prove the facts sort and de-duplicate.
+    let calendar = WorkingCalendar {
+        working_weekdays: vec![
+            CalendarWeekday::Friday,
+            CalendarWeekday::Monday,
+            CalendarWeekday::Monday,
+            CalendarWeekday::Wednesday,
+            CalendarWeekday::Tuesday,
+            CalendarWeekday::Thursday,
+        ],
+        workday_start_minute: 8 * 60,
+        workday_duration_minutes: 8 * 60,
+        exceptions: vec![
+            NaiveDate::from_ymd_opt(2026, 11, 30).expect("valid date"),
+            NaiveDate::from_ymd_opt(2026, 11, 26).expect("valid date"),
+            NaiveDate::from_ymd_opt(2026, 11, 27).expect("valid date"),
+            NaiveDate::from_ymd_opt(2026, 11, 26).expect("valid date"),
+        ],
+    };
+
+    let read_model = build_gantt_read_model(GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![],
+        schedule,
+        calendar,
+        baseline: None,
+        predecessors: vec![],
+    })
+    .expect("build read model");
+
+    assert_eq!(read_model.contract_version, 6);
+    let value = serde_json::to_value(&read_model).expect("serialize read model");
+    assert_eq!(
+        value["calendar"],
+        json!({
+            "workingWeekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
+            "exceptionDates": ["2026-11-26", "2026-11-27", "2026-11-30"]
+        })
+    );
 }

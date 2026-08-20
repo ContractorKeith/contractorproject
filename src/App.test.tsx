@@ -872,6 +872,163 @@ describe("job workspace", () => {
     expect(start).toHaveValue("2026-08-17");
   });
 
+  it("adds and removes a dated calendar exception against the current job version", async () => {
+    const user = userEvent.setup();
+    // A tiny in-memory job store so add/remove reloads see matching versions.
+    let exceptions = ["2026-11-27"];
+    let version = 3;
+    const base = { ...fixtureJob(), calendar: defaultCalendar() };
+    const jobState = () => ({
+      ...base,
+      version,
+      calendarExceptions: [...exceptions].sort(),
+    });
+    const hierState = () => ({
+      jobId: base.id,
+      jobVersion: version,
+      tasks: [],
+      dependencies: [],
+    });
+    const client: JobClient = {
+      listJobs: vi.fn().mockImplementation(() => Promise.resolve([jobState()])),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockImplementation(() => Promise.resolve(hierState())),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      addCalendarException: vi.fn().mockImplementation(async (request) => {
+        exceptions = [...exceptions, request.date];
+        version += 1;
+        return jobState();
+      }),
+      removeCalendarException: vi.fn().mockImplementation(async (request) => {
+        exceptions = exceptions.filter((date) => date !== request.date);
+        version += 1;
+        return jobState();
+      }),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+    );
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${base.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+    await waitFor(() =>
+      expect(client.addCalendarException).toHaveBeenCalledWith({
+        jobId: base.id,
+        date: "2026-11-26",
+        expectedJobVersion: 3,
+      }),
+    );
+    // The new closure appears in the sorted list with its own remove control.
+    const removeAdded = await screen.findByRole("button", {
+      name: "Remove calendar exception 2026-11-26",
+    });
+    expect(removeAdded).toBeVisible();
+
+    await user.click(removeAdded);
+    await waitFor(() =>
+      expect(client.removeCalendarException).toHaveBeenCalledWith({
+        jobId: base.id,
+        date: "2026-11-26",
+        expectedJobVersion: 4,
+      }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByRole("button", {
+          name: "Remove calendar exception 2026-11-26",
+        }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("surfaces a typed duplicate calendar-exception rejection", async () => {
+    const user = userEvent.setup();
+    const job = {
+      ...fixtureJob(),
+      version: 3,
+      calendar: defaultCalendar(),
+      calendarExceptions: ["2026-11-26"],
+    };
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValue({ jobId: job.id, jobVersion: 3, tasks: [], dependencies: [] }),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      addCalendarException: vi
+        .fn()
+        .mockRejectedValue({ message: "calendar_exception_exists", kind: "validation" }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+    );
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${job.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+
+    expect(await screen.findByText("calendar_exception_exists")).toBeVisible();
+  });
+
+  it("recovers from a version conflict when managing calendar exceptions", async () => {
+    const user = userEvent.setup();
+    const job = {
+      ...fixtureJob(),
+      version: 3,
+      calendar: defaultCalendar(),
+      calendarExceptions: [] as string[],
+    };
+    const refreshedJob = { ...job, version: 4 };
+    const client: JobClient = {
+      listJobs: vi
+        .fn()
+        .mockResolvedValueOnce([job])
+        .mockResolvedValue([refreshedJob]),
+      createJob: vi.fn(),
+      listTasks: vi
+        .fn()
+        .mockResolvedValueOnce({ jobId: job.id, jobVersion: 3, tasks: [], dependencies: [] })
+        .mockResolvedValue({ jobId: job.id, jobVersion: 4, tasks: [], dependencies: [] }),
+      createTask: vi.fn(),
+      updateTask: vi.fn(),
+      reorderTask: vi.fn(),
+      updateSchedule: vi.fn(),
+      addCalendarException: vi
+        .fn()
+        .mockRejectedValue({ kind: "version_conflict", message: "stale" }),
+      removeCalendarException: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(
+      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+    );
+    await user.type(
+      screen.getByLabelText(`Calendar exception date for ${job.name}`),
+      "2026-11-26",
+    );
+    await user.click(screen.getByRole("button", { name: "Add closure" }));
+
+    expect(await screen.findByText(/changed elsewhere/i)).toBeVisible();
+    // The recovery reloaded the job snapshot (a second listTasks) onto v4.
+    expect((client.listTasks as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
   it("archives the active job with its displayed version and clears its selected task state", async () => {
     const user = userEvent.setup();
     const job = { ...fixtureJob(), version: 7 };
@@ -1448,9 +1605,10 @@ function fixtureTask(
 
 function ganttReadModel(jobId: string) {
   return {
-    contractVersion: 4 as const, jobId, jobVersion: 1,
+    contractVersion: 6 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
     dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
+    calendar: { workingWeekdays: ["monday", "tuesday", "wednesday", "thursday", "friday"], exceptionDates: [] },
     rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null }],
   };
 }

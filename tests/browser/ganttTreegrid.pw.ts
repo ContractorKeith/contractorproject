@@ -199,6 +199,55 @@ test("announces progress facts, draws the data-date marker, and stays accessible
   expect(results.violations).toEqual([]);
 });
 
+test("shades non-working time and distinguishes calendar exceptions", async ({ page }) => {
+  // Weekly non-working days (weekends) and dated exceptions are both shaded, and
+  // are distinguishable by their data attribute and accessible labeling.
+  const weekly = page.locator('[data-nonworking="weekly"]');
+  const exception = page.locator('[data-nonworking="exception"]');
+  await expect(weekly.first()).toBeVisible();
+  await expect(exception.first()).toBeVisible();
+
+  // The fixture's Thu-Fri-Mon closure bridges the first weekend into one merged
+  // exception rect carrying an accessible name listing the closure dates.
+  const bridge = page.getByRole("img", { name: /Calendar exceptions? 2026-08-20/ });
+  await expect(bridge).toHaveCount(1);
+  await expect(bridge).toHaveAccessibleName(/2026-08-20/);
+  await expect(bridge).toHaveAccessibleName(/2026-08-24/);
+
+  // Weekly non-working rects are decorative (no accessible role/name).
+  await expect(weekly.first()).toHaveAttribute("aria-hidden", "true");
+
+  // A merged exception rect is wider than a lone weekend, proving adjacency merge.
+  const geometry = await page.evaluate(() => {
+    const exceptionRect = document
+      .querySelector<HTMLElement>('[data-nonworking="exception"]')!
+      .getBoundingClientRect();
+    const weeklyRect = document
+      .querySelector<HTMLElement>('[data-nonworking="weekly"]')!
+      .getBoundingClientRect();
+    return { exceptionWidth: exceptionRect.width, weeklyWidth: weeklyRect.width };
+  });
+  expect(geometry.exceptionWidth).toBeGreaterThan(geometry.weeklyWidth);
+
+  const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
+  expect(results.violations).toEqual([]);
+});
+
+test("keeps non-working shading distinguishable under forced colors", async ({ page }) => {
+  await page.emulateMedia({ forcedColors: "active" });
+  await page.reload();
+  const exception = page.locator('[data-nonworking="exception"]').first();
+  await expect(exception).toBeVisible();
+  // Forced colors strips the gray fill, so exception rects fall back to a dashed
+  // system-colored border to stay perceptible and distinct from weekly runs.
+  const borderStyle = await exception.evaluate(
+    (node) => getComputedStyle(node).borderInlineStyle,
+  );
+  expect(borderStyle).toBe("dashed");
+  const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
+  expect(results.violations).toEqual([]);
+});
+
 test("keeps compact density synchronized with the virtual scroll model", async ({ page }) => {
   await page.evaluate(() => {
     document.querySelector<HTMLElement>(".gantt-schedule")?.style.setProperty("--row-h", "var(--row-h-compact)");

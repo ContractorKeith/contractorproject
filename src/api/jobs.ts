@@ -12,6 +12,7 @@ import type {
   TaskMutation,
   UpdateTaskRequest,
   AddDependencyRequest,
+  CalendarExceptionRequest,
   UpdateScheduleRequest,
   UpdateTaskDurationRequest,
   UpdateTaskConstraintRequest,
@@ -36,6 +37,8 @@ export interface JobClient {
   updateTask(request: UpdateTaskRequest): Promise<TaskHierarchy>;
   reorderTask(request: ReorderTaskRequest): Promise<TaskHierarchy>;
   updateSchedule?(request: UpdateScheduleRequest): Promise<Job>;
+  addCalendarException?(request: CalendarExceptionRequest): Promise<Job>;
+  removeCalendarException?(request: CalendarExceptionRequest): Promise<Job>;
   updateTaskDuration?(request: UpdateTaskDurationRequest): Promise<TaskHierarchy>;
   updateTaskConstraint?(request: UpdateTaskConstraintRequest): Promise<TaskMutation>;
   updateJobDataDate?(request: UpdateJobDataDateRequest): Promise<Job>;
@@ -68,6 +71,8 @@ export const tauriJobClient: JobClient = {
   },
   reorderTask: (request) => invoke<TaskHierarchy>("reorder_task", { request }),
   updateSchedule: (request) => invoke<Job>("update_schedule", { request }),
+  addCalendarException: (request) => invoke<Job>("add_calendar_exception", { request }),
+  removeCalendarException: (request) => invoke<Job>("remove_calendar_exception", { request }),
   async updateTaskDuration(request) {
     const mutation = await invoke<TaskMutation>("update_task_duration", { request });
     return invoke<TaskHierarchy>("list_tasks", { jobId: mutation.task.jobId });

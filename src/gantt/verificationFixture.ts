@@ -188,9 +188,23 @@ export function reorderFirstVerificationActivity(
   return readModelFrom(readModel, rows);
 }
 
+// Mon-Fri working week with a Thursday-Friday-Monday closure bridging the first
+// weekend (2026-08-20/21 and 2026-08-24), so the timeline suite exercises a
+// merged exception+weekend shading run and the distinct exception attribute.
+const VERIFICATION_CALENDAR: GanttReadModel["calendar"] = {
+  workingWeekdays: [
+    "monday",
+    "tuesday",
+    "wednesday",
+    "thursday",
+    "friday",
+  ],
+  exceptionDates: ["2026-08-20", "2026-08-21", "2026-08-24"],
+};
+
 function readModel(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 5,
+    contractVersion: 6,
     jobId: GANTT_VERIFICATION_FIXTURE_ID,
     jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00",
@@ -205,6 +219,7 @@ function readModel(rows: GanttRow[]): GanttReadModel {
     criticalPath: rows
       .filter((row) => row.critical && !row.summary)
       .map((row) => row.taskId),
+    calendar: VERIFICATION_CALENDAR,
     rows,
   };
 }

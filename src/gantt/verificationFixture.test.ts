@@ -36,12 +36,26 @@ describe("packaged Gantt verification fixture", () => {
     });
     expect(model.rows[0]?.constraintViolated).toBe(true);
     expect(model.criticalPath).not.toHaveLength(0);
+    // v6 calendar facts: a Mon-Fri week with a Thu-Fri-Mon closure bridging the
+    // first weekend, so the timeline can shade a merged non-working run.
+    expect(model.calendar.workingWeekdays).toEqual([
+      "monday",
+      "tuesday",
+      "wednesday",
+      "thursday",
+      "friday",
+    ]);
+    expect(model.calendar.exceptionDates).toEqual([
+      "2026-08-20",
+      "2026-08-21",
+      "2026-08-24",
+    ]);
   });
 
   it("carries a data date and statused phase-1 rows across every progress state", () => {
     const model = createGanttVerificationReadModel();
 
-    expect(model.contractVersion).toBe(5);
+    expect(model.contractVersion).toBe(6);
     expect(model.dataDate).not.toBeNull();
     expect(model.rows.some((row) => row.progressStatus === "completed")).toBe(true);
     expect(model.rows.some((row) => row.progressStatus === "inProgress")).toBe(true);

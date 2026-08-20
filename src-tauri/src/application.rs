@@ -566,6 +566,9 @@ impl ApplicationService {
                     .collect(),
             });
         build_gantt_read_model(GanttReadModelSource {
+            // Calendar facts drive non-working-time shading only; the loader has
+            // already merged the job's dated exceptions into this calendar.
+            calendar: job.calendar.clone(),
             job_id: job.id,
             job_version: job.version,
             tasks: tasks

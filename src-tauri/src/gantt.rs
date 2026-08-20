@@ -4,9 +4,11 @@ use chrono::{NaiveDate, NaiveDateTime};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::scheduling::{DependencyType, ScheduleResult, ScheduledTask};
+use crate::scheduling::{
+    CalendarWeekday, DependencyType, ScheduleResult, ScheduledTask, WorkingCalendar,
+};
 
-pub const GANTT_READ_MODEL_VERSION: u16 = 5;
+pub const GANTT_READ_MODEL_VERSION: u16 = 6;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,6 +20,10 @@ pub struct GanttReadModelSource {
     pub schedule: ScheduleResult,
     pub baseline: Option<GanttBaselineSource>,
     pub predecessors: Vec<GanttPredecessorSource>,
+    /// Working calendar (weekly working days plus merged dated exceptions). The
+    /// timeline paints non-working civil days from these facts; it is not
+    /// schedule math.
+    pub calendar: WorkingCalendar,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -98,6 +104,17 @@ pub struct GanttBaselineComparison {
     pub duration_variance_minutes: i64,
 }
 
+/// Rendering-only calendar facts (contract v6). `working_weekdays` is the weekly
+/// working-day set in canonical Monday-to-Sunday order; `exception_dates` are the
+/// job's dated non-working civil days, sorted and de-duplicated. React paints the
+/// non-working shading from these facts and derives no schedule math from them.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GanttCalendar {
+    pub working_weekdays: Vec<CalendarWeekday>,
+    pub exception_dates: Vec<NaiveDate>,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GanttReadModel {
@@ -112,6 +129,8 @@ pub struct GanttReadModel {
     pub row_count: usize,
     pub critical_task_ids: Vec<String>,
     pub critical_path: Vec<String>,
+    /// Rendering-only working-calendar facts for non-working-time shading.
+    pub calendar: GanttCalendar,
     pub rows: Vec<GanttRow>,
 }
 
@@ -222,6 +241,7 @@ pub fn build_gantt_read_model(
     let baseline_id = source.baseline.as_ref().map(|baseline| baseline.id.clone());
     let baseline_by_task = join_baseline(source.baseline, &task_ids)?;
     let predecessors_by_task = join_predecessors(source.predecessors, &task_ids)?;
+    let calendar = build_calendar_facts(&source.calendar);
     let progress_statuses = derive_progress_statuses(&source.tasks, &schedule_by_id);
 
     let rows = hierarchy
@@ -316,8 +336,41 @@ pub fn build_gantt_read_model(
         row_count: rows.len(),
         critical_task_ids: source.schedule.critical_task_ids,
         critical_path: source.schedule.critical_path,
+        calendar,
         rows,
     })
+}
+
+/// Canonical Monday-to-Sunday order index used to sort the working-weekday set
+/// deterministically for the read model.
+fn weekday_order(weekday: CalendarWeekday) -> u8 {
+    match weekday {
+        CalendarWeekday::Monday => 0,
+        CalendarWeekday::Tuesday => 1,
+        CalendarWeekday::Wednesday => 2,
+        CalendarWeekday::Thursday => 3,
+        CalendarWeekday::Friday => 4,
+        CalendarWeekday::Saturday => 5,
+        CalendarWeekday::Sunday => 6,
+    }
+}
+
+/// Projects the job's working calendar into rendering-only facts: the weekly
+/// working-day set in canonical order and the sorted, de-duplicated exception
+/// dates. No schedule math happens here; the timeline paints civil days from it.
+fn build_calendar_facts(calendar: &WorkingCalendar) -> GanttCalendar {
+    let mut working_weekdays = calendar.working_weekdays.clone();
+    working_weekdays.sort_by_key(|&day| weekday_order(day));
+    working_weekdays.dedup();
+
+    let mut exception_dates = calendar.exceptions.clone();
+    exception_dates.sort_unstable();
+    exception_dates.dedup();
+
+    GanttCalendar {
+        working_weekdays,
+        exception_dates,
+    }
 }
 
 /// Derives completed/in-progress/not-started for every task. Leaves use their own

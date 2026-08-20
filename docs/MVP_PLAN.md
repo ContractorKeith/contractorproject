@@ -44,7 +44,7 @@ Exit: a packaged development app can create a job and nested tasks, restart with
 - [x] Implement cycle-safe FS dependencies, forward/backward pass, total float, and critical path.
 - [x] Add SS, FF, and SF dependency types plus negative lag.
 - [x] Persist the default weekly working calendar.
-- [ ] Add dated calendar exceptions.
+- [x] Add dated calendar exceptions.
 - [x] Define the versioned Rust schedule read-model query with fixture-based tests.
 - [x] Wire persisted schedule inputs through the read-model query.
 - [x] Show schedule validation failures in the normal job workflow.
