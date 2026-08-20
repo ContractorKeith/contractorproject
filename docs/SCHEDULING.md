@@ -50,15 +50,23 @@ separate application slices.
 - Exceptions are canonical `YYYY-MM-DD` civil dates resolved against the
   persisted calendar; nothing reads "today". A single `is_working_date` predicate
   (weekly membership AND not an exception) backs the iterative primitives, and the
-  closed-form working-offset math is corrected by the sorted set of exceptions
-  that fall on working weekdays. Both directions agree exactly, and a calendar
-  with no exceptions is byte-identical to the weekly-only projection.
+  closed-form working-offset math is corrected by the sorted signed offsets of the
+  exceptions that fall on working weekdays. Exceptions before the first working
+  date carry negative offsets so the correction is applied consistently on both
+  sides of the schedule start; the offset↔date mapping agrees exactly in the
+  positive and negative regimes, and a calendar with no working exceptions is
+  byte-identical to the weekly-only projection.
 - Validation rejects non-canonical text (at the parse boundary), duplicates,
-  dates outside years 2000–2100, and more than 4000 exceptions per job. An
-  exception on an already non-working weekday (or before the schedule start) is a
-  legal no-op that still persists — it may become meaningful if the weekly
-  pattern changes later. A calendar always retains working time because the
-  weekly pattern still requires at least one working weekday and exceptions are
+  dates outside years 2000–2100, and more than 4000 exceptions per job. Range and
+  count are also enforced at the command boundary, independent of whether the
+  schedule can compute, so an out-of-range or over-cap date can never be staged.
+  An exception on an already non-working weekday is a scheduling no-op that still
+  persists (it may matter if the weekly pattern changes later). An exception
+  *before* the schedule start does not shift the forward schedule, but — unlike a
+  pure no-op — it is honored by backward and negative-offset normalization: a
+  finish-no-later-than deadline that falls before the start is measured across the
+  closure rather than a day early. A calendar always retains working time because
+  the weekly pattern still requires at least one working weekday and exceptions are
   finite, so any normalization landing in an exception run advances deterministically past it.
 
 ## Task and hierarchy rules

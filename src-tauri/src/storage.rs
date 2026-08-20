@@ -30,6 +30,11 @@ use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent
 /// did not create compare against it before writing anything.
 pub(crate) const LATEST_SCHEMA_VERSION: i64 = 9;
 
+/// Per-job cap on dated calendar exceptions, mirroring the scheduler's
+/// `MAX_CALENDAR_EXCEPTIONS`. Enforced at the command boundary so it holds even
+/// when the schedule cannot compute.
+const MAX_CALENDAR_EXCEPTIONS_PER_JOB: i64 = 4000;
+
 pub(crate) struct SqliteStore {
     database_path: PathBuf,
 }
@@ -746,15 +751,20 @@ impl SqliteStore {
             &request.job_id,
             Some(request.expected_job_version),
         )?;
+        // The v9 table is the single source of truth for exceptions; strip any the
+        // client attached so calendar_json never becomes a second, unvalidated
+        // source. validate_proposed_schedule re-merges the persisted exceptions.
+        let mut calendar_input = request.calendar.clone();
+        calendar_input.exceptions.clear();
         validate_proposed_schedule(
             &transaction,
             &request.job_id,
             &ProposedEdit::Schedule {
                 schedule_start: request.schedule_start.as_deref(),
-                calendar: &request.calendar,
+                calendar: &calendar_input,
             },
         )?;
-        let calendar = serde_json::to_string(&request.calendar)
+        let calendar = serde_json::to_string(&calendar_input)
             .map_err(|error| ApplicationError::InvalidStoredData(error.to_string()))?;
         transaction.execute("UPDATE jobs SET schedule_start = ?1, calendar_json = ?2, updated_at = ?3, version = ?4 WHERE id = ?5", params![request.schedule_start, calendar, updated_at, current + 1, request.job_id])?;
         write_audit_record(
@@ -1002,6 +1012,21 @@ impl SqliteStore {
                 code: "calendar_exception_exists",
                 field: "date",
                 message: "this date is already a calendar exception".into(),
+            });
+        }
+        // Enforce the per-job cap here, inside the transaction, so it holds even
+        // when the schedule cannot compute (e.g. a start-less job) and the
+        // CalendarMath cap is never reached.
+        let stored_count: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM calendar_exceptions WHERE job_id = ?1",
+            [&request.job_id],
+            |row| row.get(0),
+        )?;
+        if stored_count >= MAX_CALENDAR_EXCEPTIONS_PER_JOB {
+            return Err(ApplicationError::ValidationFailed {
+                code: "calendar_too_many_exceptions",
+                field: "date",
+                message: "a job may define at most 4000 calendar exceptions".into(),
             });
         }
         validate_proposed_schedule(
@@ -3224,9 +3249,15 @@ fn load_calendar_exceptions(
     let mut dates = Vec::new();
     for row in rows {
         let text = row?;
-        let date = NaiveDate::parse_from_str(&text, "%Y-%m-%d").map_err(|_| {
-            ApplicationError::InvalidStoredData("job has an invalid calendar exception".into())
-        })?;
+        // Require the canonical round-trip (like the backup preflight) so
+        // hand-edited near-duplicates ("2026-8-1") surface as corrupt stored data
+        // rather than a confusing duplicate-exception error at schedule time.
+        let date = NaiveDate::parse_from_str(&text, "%Y-%m-%d")
+            .ok()
+            .filter(|date| date.format("%Y-%m-%d").to_string() == text)
+            .ok_or_else(|| {
+                ApplicationError::InvalidStoredData("job has an invalid calendar exception".into())
+            })?;
         dates.push(date);
     }
     Ok(dates)

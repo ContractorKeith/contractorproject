@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use chrono::{NaiveDate, SecondsFormat, Utc};
+use chrono::{Datelike, NaiveDate, SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -744,6 +744,10 @@ impl ApplicationService {
         let context = context.validate()?;
         required_version("expectedJobVersion", request.expected_job_version)?;
         parse_iso_date("date", &request.date)?;
+        // Enforce the in-range year at the boundary, independent of whether the
+        // schedule can compute yet: an out-of-range date must never be staged
+        // (it would later fail backup verification for the whole database).
+        validate_calendar_exception_year(&request.date)?;
         self.store.add_calendar_exception(
             &request,
             &Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
@@ -948,6 +952,26 @@ fn parse_constraint_date(value: &str) -> Result<NaiveDate, ApplicationError> {
         });
     }
     Ok(date)
+}
+
+/// Rejects a calendar exception whose year falls outside 2000-2100. The date is
+/// already known to be canonical; this bounds the day scans and keeps the v9
+/// backup preflight satisfiable. Uses the same typed code the scheduler emits.
+fn validate_calendar_exception_year(value: &str) -> Result<(), ApplicationError> {
+    let date = NaiveDate::parse_from_str(value, "%Y-%m-%d").map_err(|_| {
+        ApplicationError::InvalidInput {
+            field: "date",
+            message: "must be an ISO date-only value".into(),
+        }
+    })?;
+    if !(2000..=2100).contains(&date.year()) {
+        return Err(ApplicationError::ValidationFailed {
+            code: "calendar_exception_out_of_range",
+            field: "date",
+            message: "calendar exceptions must fall within years 2000-2100".into(),
+        });
+    }
+    Ok(())
 }
 
 fn parse_iso_date(field: &'static str, value: &str) -> Result<(), ApplicationError> {

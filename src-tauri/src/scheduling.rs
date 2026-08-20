@@ -1605,26 +1605,19 @@ impl CalendarMath {
             exceptions,
             working_exception_offsets: Vec::new(),
         };
-        // Precompute the sorted weekly offsets of exceptions that actually remove
-        // a working slot (on a working weekday, at or after the first working
-        // date). The closed-form offset math corrects against this list.
+        // Precompute the sorted weekly offsets of every exception that lands on a
+        // working weekday, keyed relative to the first working date (offset 0).
+        // Pre-start exceptions get negative offsets so backward normalization and
+        // negative-offset traversal stay consistent with the forward direction.
         let mut offsets = Vec::new();
         for &exception in &math.exceptions {
-            if math.working_weekdays.contains(&exception.weekday())
-                && exception >= math.first_working_date
-            {
+            if math.working_weekdays.contains(&exception.weekday()) {
                 offsets.push(math.weekly_offset_for_date(exception)?);
             }
         }
         offsets.sort_unstable();
         math.working_exception_offsets = offsets;
         Ok(math)
-    }
-
-    /// Weekly membership AND not a dated exception. The single predicate every
-    /// iterative traversal consults.
-    fn is_working_date(&self, date: NaiveDate) -> bool {
-        is_working_date(date, &self.working_weekdays, &self.exceptions)
     }
 
     fn start_instant(&self, offset_minutes: i64) -> Result<NaiveDateTime, ScheduleError> {
@@ -1686,51 +1679,64 @@ impl CalendarMath {
     /// bound then corrects over the bounded exception list (both are exact for a
     /// calendar with no working exceptions, so output is byte-identical there).
     fn working_date_after(&self, working_days: i64) -> Result<NaiveDate, ScheduleError> {
-        // Negative offsets (a finish reported at the working day before schedule
-        // start) are rare and small; walk them iteratively so exceptions before
-        // the first working date are honored too.
-        if working_days < 0 {
-            let mut date = self.first_working_date;
-            let mut remaining = -working_days;
-            while remaining > 0 {
-                date = date.pred_opt().ok_or(ScheduleError::ScheduleOutOfRange)?;
-                if self.is_working_date(date) {
-                    remaining -= 1;
-                }
-            }
-            return Ok(date);
-        }
         if self.working_exception_offsets.is_empty() {
             return self.weekly_working_date_after(working_days);
         }
-        // Find how many working exceptions precede the answer. Each exception in
-        // the range shifts the answer one weekly slot later; the fixpoint is
-        // bounded by the exception count (monotone, terminating).
-        let mut preceding = 0_i64;
-        loop {
-            let weekly_offset = working_days
-                .checked_add(preceding)
-                .ok_or(ScheduleError::ScheduleOutOfRange)?;
-            let count = i64::try_from(
-                self.working_exception_offsets
-                    .partition_point(|&offset| offset < weekly_offset),
-            )
-            .map_err(|_| ScheduleError::ScheduleOutOfRange)?;
-            if count == preceding {
-                // The weekly slot itself may be an exception; if so the true
-                // answer is one working day further on.
-                if self
-                    .working_exception_offsets
-                    .binary_search(&weekly_offset)
-                    .is_ok()
-                {
-                    preceding += 1;
-                    continue;
+        // The correction list may hold negative offsets (pre-start exceptions), so
+        // the number of exceptions in [0, weekly)/[weekly, 0) is measured against
+        // the zero boundary.
+        let below_zero = self.exception_count_below(0);
+        if working_days >= 0 {
+            // Each working exception in [0, answer) shifts the answer one weekly
+            // slot later; the fixpoint is monotone and bounded by the count.
+            let mut preceding = 0_i64;
+            loop {
+                let weekly_offset = working_days
+                    .checked_add(preceding)
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?;
+                let count = self.exception_count_below(weekly_offset) - below_zero;
+                if count == preceding {
+                    if self
+                        .working_exception_offsets
+                        .binary_search(&weekly_offset)
+                        .is_ok()
+                    {
+                        preceding += 1;
+                        continue;
+                    }
+                    return self.weekly_working_date_after(weekly_offset);
                 }
-                return self.weekly_working_date_after(weekly_offset);
+                preceding = count;
             }
-            preceding = count;
+        } else {
+            // Mirror image for dates before the first working date: each pre-start
+            // exception in [weekly, 0) pushes the weekly slot one further back.
+            let mut trailing = 0_i64;
+            loop {
+                let weekly_offset = working_days
+                    .checked_sub(trailing)
+                    .ok_or(ScheduleError::ScheduleOutOfRange)?;
+                let count = below_zero - self.exception_count_below(weekly_offset);
+                if count == trailing {
+                    if self
+                        .working_exception_offsets
+                        .binary_search(&weekly_offset)
+                        .is_ok()
+                    {
+                        trailing += 1;
+                        continue;
+                    }
+                    return self.weekly_working_date_after(weekly_offset);
+                }
+                trailing = count;
+            }
         }
+    }
+
+    /// Count of working-exception offsets strictly less than `bound`.
+    fn exception_count_below(&self, bound: i64) -> i64 {
+        self.working_exception_offsets
+            .partition_point(|&offset| offset < bound) as i64
     }
 
     fn weekly_working_date_after(&self, working_days: i64) -> Result<NaiveDate, ScheduleError> {
@@ -1796,19 +1802,25 @@ impl CalendarMath {
             .ok_or(ScheduleError::ScheduleOutOfRange)
     }
 
-    /// Working-day offset of a working date, honoring exceptions: the weekly
-    /// closed form minus the count of working exceptions strictly before it.
-    /// `date` is always a working date here, so no exception equals its offset.
+    /// Working-day offset of a working date, honoring exceptions. `date` is always
+    /// a working date, so no exception equals its offset. For dates at or after
+    /// the first working date, subtract the working exceptions in `[0, weekly)`;
+    /// for earlier dates, add back the pre-start exceptions in `[weekly, 0)` so
+    /// the negative regime agrees with `working_date_after`.
     fn working_offset_for_date(&self, date: NaiveDate) -> Result<i64, ScheduleError> {
         let weekly = self.weekly_offset_for_date(date)?;
-        let skipped = i64::try_from(
-            self.working_exception_offsets
-                .partition_point(|&offset| offset < weekly),
-        )
-        .map_err(|_| ScheduleError::ScheduleOutOfRange)?;
-        weekly
-            .checked_sub(skipped)
-            .ok_or(ScheduleError::ScheduleOutOfRange)
+        let below_zero = self.exception_count_below(0);
+        if weekly >= 0 {
+            let skipped = self.exception_count_below(weekly) - below_zero;
+            weekly
+                .checked_sub(skipped)
+                .ok_or(ScheduleError::ScheduleOutOfRange)
+        } else {
+            let regained = below_zero - self.exception_count_below(weekly);
+            weekly
+                .checked_add(regained)
+                .ok_or(ScheduleError::ScheduleOutOfRange)
+        }
     }
 
     fn weekly_offset_for_date(&self, date: NaiveDate) -> Result<i64, ScheduleError> {
@@ -1915,5 +1927,110 @@ fn invalid_progress(code: &'static str, message: impl Into<String>) -> ScheduleE
     ScheduleError::InvalidProgress {
         code,
         message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod calendar_math_tests {
+    use super::*;
+
+    fn weekdays_mon_fri() -> Vec<CalendarWeekday> {
+        vec![
+            CalendarWeekday::Monday,
+            CalendarWeekday::Tuesday,
+            CalendarWeekday::Wednesday,
+            CalendarWeekday::Thursday,
+            CalendarWeekday::Friday,
+        ]
+    }
+
+    fn ymd(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    /// Reference Nth working date by a plain day scan, independent of the
+    /// closed-form offset math. Supports negative indices (walk backward).
+    fn reference_date(math: &CalendarMath, index: i64) -> NaiveDate {
+        let working = |date: NaiveDate| {
+            math.working_weekdays.contains(&date.weekday()) && !math.exceptions.contains(&date)
+        };
+        let mut date = math.first_working_date;
+        if index >= 0 {
+            let mut seen = 0;
+            while seen < index {
+                date = date.succ_opt().unwrap();
+                if working(date) {
+                    seen += 1;
+                }
+            }
+        } else {
+            let mut seen = 0;
+            while seen > index {
+                date = date.pred_opt().unwrap();
+                if working(date) {
+                    seen -= 1;
+                }
+            }
+        }
+        date
+    }
+
+    fn calendar(exceptions: &[NaiveDate]) -> WorkingCalendar {
+        WorkingCalendar {
+            working_weekdays: weekdays_mon_fri(),
+            workday_start_minute: 8 * 60,
+            workday_duration_minutes: 8 * 60,
+            exceptions: exceptions.to_vec(),
+        }
+    }
+
+    #[test]
+    fn offset_math_round_trips_across_positive_and_negative_regimes() {
+        // Start Wednesday with exceptions both before and after the first working
+        // date, including the two days immediately before the start.
+        let start = ymd(2026, 1, 14); // Wednesday
+        let exceptions = [
+            ymd(2026, 1, 5),  // Monday, pre-start
+            ymd(2026, 1, 6),  // Tuesday, pre-start
+            ymd(2026, 1, 13), // Tuesday, immediately before start
+            ymd(2026, 1, 16), // Friday, post-start
+            ymd(2026, 1, 20), // Tuesday, post-start
+            ymd(2026, 1, 21), // Wednesday, adjacent run
+            ymd(2026, 3, 7),  // Saturday, non-working weekday (no-op)
+        ];
+        let math = CalendarMath::new(&calendar(&exceptions), start).expect("calendar");
+
+        for index in -20_i64..=60 {
+            let date = math.working_date_after(index).expect("date");
+            // The mapped date is a genuine working date.
+            assert!(
+                math.working_weekdays.contains(&date.weekday()) && !math.exceptions.contains(&date),
+                "offset {index} landed on a non-working date {date}"
+            );
+            // It matches an independent day scan.
+            assert_eq!(
+                date,
+                reference_date(&math, index),
+                "offset {index} date mismatch"
+            );
+            // The inverse agrees exactly in both directions.
+            assert_eq!(
+                math.working_offset_for_date(date).expect("offset"),
+                index,
+                "offset {index} did not round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn no_exception_calendar_matches_the_weekly_closed_form() {
+        let start = ymd(2026, 1, 5);
+        let math = CalendarMath::new(&calendar(&[]), start).expect("calendar");
+        for index in -10_i64..=40 {
+            assert_eq!(
+                math.working_date_after(index).expect("date"),
+                math.weekly_working_date_after(index).expect("weekly"),
+            );
+        }
     }
 }

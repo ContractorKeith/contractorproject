@@ -2,6 +2,7 @@
 // add/remove, atomic validation, durability, and regression against baselines
 // and typed dependencies.
 
+use chrono::{Duration, NaiveDate};
 use contractorproject_lib::application::{
     AddDependencyRequest, ApplicationError, ApplicationService, CalendarExceptionRequest,
     CommandActor, CommandContext, CreateBackupRequest, CreateBaselineRequest, CreateJobRequest,
@@ -699,4 +700,309 @@ fn a_v9_database_with_an_exception_backs_up_and_restores() {
         .expect("version");
     assert_eq!(restored_version, 9);
     assert_eq!(calendar_exception_count(&restored), 1);
+}
+
+// --- Boundary validation independent of schedule computability (item 2) -----
+
+fn bare_job(service: &ApplicationService) -> String {
+    service
+        .create_job(
+            command_context(),
+            CreateJobRequest {
+                name: "Bare".into(),
+                timezone: "UTC".into(),
+            },
+        )
+        .expect("job")
+        .id
+}
+
+fn calendar_json(path: &Path, job_id: &str) -> String {
+    Connection::open(path)
+        .expect("open db")
+        .query_row(
+            "SELECT calendar_json FROM jobs WHERE id = ?1",
+            [job_id],
+            |row| row.get::<_, String>(0),
+        )
+        .expect("calendar json")
+}
+
+/// Inserts `count` distinct in-range canonical exception dates for a job directly,
+/// bypassing the command layer, to set up the per-job cap boundary cheaply.
+fn seed_exceptions(path: &Path, job_id: &str, count: usize) {
+    let connection = Connection::open(path).expect("open db");
+    let mut day = NaiveDate::from_ymd_opt(2000, 1, 1).expect("date");
+    for _ in 0..count {
+        connection
+            .execute(
+                "INSERT INTO calendar_exceptions (job_id, exception_date) VALUES (?1, ?2)",
+                rusqlite::params![job_id, day.format("%Y-%m-%d").to_string()],
+            )
+            .expect("seed exception");
+        day += Duration::days(1);
+    }
+}
+
+#[test]
+fn an_out_of_range_year_is_rejected_on_a_start_less_job() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job_id = bare_job(&service); // no schedule start
+    let version = job_state(&service, &job_id).version;
+    let error = service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: "1999-12-25".into(),
+                expected_job_version: version,
+            },
+        )
+        .expect_err("out of range");
+    assert!(matches!(
+        error,
+        ApplicationError::ValidationFailed {
+            code: "calendar_exception_out_of_range",
+            ..
+        }
+    ));
+    // Nothing was staged, so backup verification stays healthy.
+    assert_eq!(calendar_exception_count(&path), 0);
+    assert!(
+        service
+            .create_verified_backup(CreateBackupRequest {
+                destination: temp
+                    .path()
+                    .join("ok.backup.sqlite3")
+                    .to_string_lossy()
+                    .into_owned(),
+            })
+            .expect("backup")
+            .verified
+    );
+}
+
+#[test]
+fn the_per_job_cap_holds_at_the_command_boundary() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let (job_id, _task_id) = job_with_leaf(&service);
+    // 3999 pre-seeded rows: the 4000th add is accepted at the boundary.
+    seed_exceptions(&path, &job_id, 3999);
+    let version = job_state(&service, &job_id).version;
+    service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: "2099-01-01".into(),
+                expected_job_version: version,
+            },
+        )
+        .expect("4000th accepted");
+    assert_eq!(calendar_exception_count(&path), 4000);
+    // The 4001st is rejected by the transaction-scoped count check.
+    let version = job_state(&service, &job_id).version;
+    let error = service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: "2099-01-02".into(),
+                expected_job_version: version,
+            },
+        )
+        .expect_err("4001st rejected");
+    assert!(matches!(
+        error,
+        ApplicationError::ValidationFailed {
+            code: "calendar_too_many_exceptions",
+            ..
+        }
+    ));
+    assert_eq!(calendar_exception_count(&path), 4000);
+}
+
+// --- The staged-bad-exception wedge can no longer occur (item 3) -------------
+
+#[test]
+fn a_valid_exception_staged_before_a_schedule_start_stays_healthy() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let job_id = bare_job(&service);
+    // Stage a valid exception while the job has no schedule start.
+    let version = job_state(&service, &job_id).version;
+    service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: MONDAY.into(),
+                expected_job_version: version,
+            },
+        )
+        .expect("stage exception");
+    // Now set the schedule start and a leaf; the schedule computes cleanly.
+    let version = job_state(&service, &job_id).version;
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job_id.clone(),
+                schedule_start: Some(MONDAY.into()),
+                calendar: working_calendar(),
+                expected_job_version: version,
+            },
+        )
+        .expect("set start with a staged exception");
+    let task = service
+        .create_task(
+            command_context(),
+            CreateTaskRequest {
+                job_id: job_id.clone(),
+                parent_task_id: None,
+                name: "A".into(),
+                expected_job_version: job.version,
+            },
+        )
+        .expect("task");
+    service
+        .update_task_duration(
+            command_context(),
+            UpdateTaskDurationRequest {
+                task_id: task.task.id.clone(),
+                duration_minutes: Some(480),
+                expected_version: task.task.version,
+                expected_job_version: task.job_version,
+            },
+        )
+        .expect("duration");
+    // get_schedule is healthy and the staged closure shifted the leaf off Monday.
+    assert_eq!(
+        leaf_start(&service, &job_id, &task.task.id),
+        "2026-08-18T08:00:00"
+    );
+}
+
+#[test]
+fn a_staged_exception_that_inverts_later_actuals_is_caught_at_statusing() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let (job_id, task_id) = job_with_leaf(&service);
+    // Stage an exception on a Thursday.
+    let version = job_state(&service, &job_id).version;
+    service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: "2026-08-20".into(),
+                expected_job_version: version,
+            },
+        )
+        .expect("stage exception");
+    // Complete the leaf with equal actuals on the now-closed Thursday: the staged
+    // exception inverts normalization, so the statusing edit rejects.
+    let leaf = service
+        .list_tasks(&job_id)
+        .expect("tasks")
+        .tasks
+        .into_iter()
+        .find(|task| task.id == task_id)
+        .expect("leaf");
+    let version = job_state(&service, &job_id).version;
+    service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job_id.clone(),
+                data_date: Some("2026-08-21".into()),
+                expected_job_version: version,
+            },
+        )
+        .expect("data date");
+    let version = job_state(&service, &job_id).version;
+    let error = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: task_id.clone(),
+                clear: false,
+                percent_complete: Some(100),
+                actual_start: Some("2026-08-20".into()),
+                actual_finish: Some("2026-08-20".into()),
+                expected_version: leaf.version,
+                expected_job_version: version,
+            },
+        )
+        .expect_err("inverting actuals rejected at statusing");
+    assert!(matches!(
+        error,
+        ApplicationError::ValidationFailed {
+            code: "progress_normalized_order",
+            ..
+        }
+    ));
+}
+
+// --- calendar_json stays exception-free (item 4) ----------------------------
+
+#[test]
+fn update_schedule_strips_client_supplied_exceptions_from_calendar_json() {
+    let temp = tempfile::tempdir().expect("temp");
+    let path = temp.path().join("contractorproject.sqlite3");
+    let service = ApplicationService::open(&path).expect("open");
+    let (job_id, _task_id) = job_with_leaf(&service);
+
+    // A client attaches exceptions to the calendar in an update_schedule call.
+    let mut calendar = working_calendar();
+    calendar.exceptions = vec![NaiveDate::from_ymd_opt(2026, 8, 25).expect("date")];
+    let version = job_state(&service, &job_id).version;
+    let job = service
+        .update_schedule(
+            command_context(),
+            UpdateScheduleRequest {
+                job_id: job_id.clone(),
+                schedule_start: Some(MONDAY.into()),
+                calendar,
+                expected_job_version: version,
+            },
+        )
+        .expect("update schedule");
+    // The v9 table is the single source of truth: nothing was persisted there and
+    // calendar_json carries no exceptions.
+    assert!(job.calendar_exceptions.is_empty());
+    assert_eq!(calendar_exception_count(&path), 0);
+    assert!(!calendar_json(&path, &job_id).contains("exception"));
+
+    // Adding then removing a real exception also leaves calendar_json untouched.
+    let version = job_state(&service, &job_id).version;
+    service
+        .add_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: MONDAY.into(),
+                expected_job_version: version,
+            },
+        )
+        .expect("add");
+    assert!(!calendar_json(&path, &job_id).contains("exception"));
+    let version = job_state(&service, &job_id).version;
+    service
+        .remove_calendar_exception(
+            command_context(),
+            CalendarExceptionRequest {
+                job_id: job_id.clone(),
+                date: MONDAY.into(),
+                expected_job_version: version,
+            },
+        )
+        .expect("remove");
+    assert!(!calendar_json(&path, &job_id).contains("exception"));
 }

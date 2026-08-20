@@ -179,6 +179,84 @@ fn fnlt_on_an_exception_normalizes_back_to_the_prior_working_day() {
 }
 
 #[test]
+fn a_pre_start_exception_keeps_a_before_start_fnlt_deadline_correct() {
+    // Reviewer repro: start Wednesday, Tuesday (the day before) closed, FNLT the
+    // prior Monday. The Monday deadline must land on Monday 2026-01-05, NOT be
+    // pushed a full day earlier to Friday 2026-01-02 by an uncorrected
+    // negative-offset closed form.
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: date("2026-01-07"),       // Wednesday
+            calendar: calendar_with(&["2026-01-06"]), // Tuesday closed
+            tasks: vec![task("A", 480)],
+            dependencies: vec![],
+        },
+        &[constraint("A", None, Some("2026-01-05"))], // FNLT the prior Monday
+    )
+    .expect("valid schedule");
+    let a = &result.tasks[0];
+    assert_eq!(a.early_start, at("2026-01-07", "08:00"));
+    assert_eq!(a.early_finish, at("2026-01-07", "16:00"));
+    assert_eq!(a.late_finish, at("2026-01-05", "16:00"));
+    assert_eq!(a.late_start, at("2026-01-05", "08:00"));
+    assert_eq!(a.total_float_minutes, -480);
+    assert!(a.constraint_violated);
+    assert_eq!(result.directly_violated_leaf_task_ids, vec!["A"]);
+}
+
+#[test]
+fn an_exception_on_the_day_before_the_schedule_start_is_honored_backward() {
+    // FNLT lands on the closed day immediately before the start; it must
+    // normalize back past that closure to the prior Monday, not to the closed
+    // Tuesday.
+    let result = calculate_schedule_with_constraints(
+        &ScheduleInput {
+            schedule_start: date("2026-01-07"),       // Wednesday
+            calendar: calendar_with(&["2026-01-06"]), // Tuesday closed
+            tasks: vec![task("A", 480)],
+            dependencies: vec![],
+        },
+        &[constraint("A", None, Some("2026-01-06"))], // FNLT on the closed Tuesday
+    )
+    .expect("valid schedule");
+    assert_eq!(result.tasks[0].late_finish, at("2026-01-05", "16:00"));
+    assert!(result.tasks[0].constraint_violated);
+}
+
+#[test]
+fn an_ff_anchor_traverses_an_exception_run() {
+    // A(960) runs Mon-Tue, finishing Tuesday 16:00. FF+960 pushes B's finish two
+    // working days past A's finish; Wednesday and Thursday are closed, so B's
+    // finish lands on Monday 2026-01-12 and B runs that Monday.
+    let result = calculate_schedule(&ScheduleInput {
+        schedule_start: date(MONDAY),
+        calendar: calendar_with(&["2026-01-07", "2026-01-08"]),
+        tasks: vec![task("A", 960), task("B", 480)],
+        dependencies: vec![dep("A", "B", DependencyType::FinishFinish, 960)],
+    })
+    .expect("valid schedule");
+    assert_eq!(result.tasks[0].early_finish, at("2026-01-06", "16:00"));
+    assert_eq!(result.tasks[1].early_finish, at("2026-01-12", "16:00"));
+    assert_eq!(result.tasks[1].early_start, at("2026-01-12", "08:00"));
+}
+
+#[test]
+fn an_sf_anchor_traverses_an_exception_run() {
+    // A(480) starts Monday 08:00. SF+1440 requires EF(B) >= ES(A) + three working
+    // days of lag; that lag spans the closed Wednesday and Thursday, so B's finish
+    // lands on Friday 2026-01-09 and B (480) runs that day.
+    let result = calculate_schedule(&ScheduleInput {
+        schedule_start: date(MONDAY),
+        calendar: calendar_with(&["2026-01-07", "2026-01-08"]),
+        tasks: vec![task("A", 480), task("B", 480)],
+        dependencies: vec![dep("A", "B", DependencyType::StartFinish, 1440)],
+    })
+    .expect("valid schedule");
+    assert_eq!(result.tasks[1].early_finish, at("2026-01-09", "16:00"));
+    assert_eq!(result.tasks[1].early_start, at("2026-01-09", "08:00"));
+}
+
+#[test]
 fn a_data_date_on_an_exception_advances_to_the_next_working_instant() {
     // Data date Wednesday (closed) -> Thursday 08:00. Both leaves start no earlier
     // than Thursday.
@@ -311,7 +389,10 @@ fn an_exception_on_a_non_working_weekday_is_a_no_op() {
 }
 
 #[test]
-fn an_exception_before_the_schedule_start_is_a_no_op() {
+fn an_exception_before_the_schedule_start_leaves_the_forward_schedule_unchanged() {
+    // A pre-start exception does not shift the forward schedule (which starts at
+    // or after the first working date). It is still honored by backward and
+    // negative-offset normalization near the start (see the FNLT repro above).
     let base = ScheduleInput {
         schedule_start: date(MONDAY),
         calendar: calendar_with(&[]),
@@ -433,14 +514,32 @@ fn out_of_range_exception_years_are_rejected() {
     );
 }
 
-#[test]
-fn more_than_four_thousand_exceptions_are_rejected() {
+fn calendar_dates(count: usize) -> Vec<String> {
     let mut day = date("2026-01-01");
-    let mut exceptions = Vec::new();
-    for _ in 0..4001 {
+    let mut exceptions = Vec::with_capacity(count);
+    for _ in 0..count {
         exceptions.push(day.format("%Y-%m-%d").to_string());
         day += Duration::days(1);
     }
+    exceptions
+}
+
+#[test]
+fn exactly_four_thousand_exceptions_are_accepted() {
+    let exceptions = calendar_dates(4000);
+    let refs: Vec<&str> = exceptions.iter().map(String::as_str).collect();
+    calculate_schedule(&ScheduleInput {
+        schedule_start: date(MONDAY),
+        calendar: calendar_with(&refs),
+        tasks: vec![task("A", 480)],
+        dependencies: vec![],
+    })
+    .expect("4000 exceptions accepted");
+}
+
+#[test]
+fn more_than_four_thousand_exceptions_are_rejected() {
+    let exceptions = calendar_dates(4001);
     let refs: Vec<&str> = exceptions.iter().map(String::as_str).collect();
     assert_eq!(reject_calendar(&refs), "calendar_too_many_exceptions");
 }
