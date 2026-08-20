@@ -1,0 +1,56 @@
+/* Focus-follow schedule-explanation panel (DESIGN.md §6 fact treatment). Hairline
+   frame, transparent ground, Condensed uppercase panel title, deterministic FACT
+   rows in Barlow 13px --color-text. No model-prose treatment here — that stays
+   reserved for the AI assistant layer. */
+.explanation-panel {
+  margin-block-start: var(--space-3);
+  padding: var(--space-3);
+  background: transparent;
+  border: var(--border-hairline) solid var(--color-divider);
+  border-radius: var(--radius-sm);
+}
+
+.explanation-panel__title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-2);
+  margin: 0 0 var(--space-2);
+}
+
+.explanation-panel__title-label {
+  font-family: var(--font-heading);
+  font-size: var(--font-size-panel);
+  font-weight: var(--font-heading-weight);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-text);
+}
+
+.explanation-panel__title-task {
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-neutral-700);
+}
+
+.explanation-panel__facts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+/* Deterministic facts: Barlow 13px --color-text (never the indented prose rule). */
+.explanation-panel__fact {
+  margin: 0;
+  font-family: var(--font-body);
+  font-size: 13px;
+  font-weight: 400;
+  line-height: 1.25;
+  color: var(--color-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.explanation-panel__fact--empty {
+  color: var(--color-neutral-700);
+}

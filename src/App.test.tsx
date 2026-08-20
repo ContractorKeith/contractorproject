@@ -1789,10 +1789,10 @@ function fixtureTask(
 
 function ganttReadModel(jobId: string) {
   return {
-    contractVersion: 6 as const, jobId, jobVersion: 1,
+    contractVersion: 7 as const, jobId, jobVersion: 1,
     scheduleStart: "2026-08-17T08:00:00", scheduleFinish: "2026-08-17T16:00:00",
     dataDate: null, baselineId: null, rowCount: 1, criticalTaskIds: ["task"], criticalPath: ["task"],
     calendar: { workingWeekdays: ["monday", "tuesday", "wednesday", "thursday", "friday"], exceptionDates: [] },
-    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null }],
+    rows: [{ taskId: "task", parentTaskId: null, logicalIndex: 0, depth: 1, positionInSet: 1, setSize: 1, sortKey: 0, wbs: "1", name: "Excavate", kind: "task" as const, hasChildren: false, durationMinutes: 480, start: "2026-08-17T08:00:00", finish: "2026-08-17T16:00:00", totalFloatMinutes: 0, startNoEarlierThan: null, finishNoLaterThan: null, constraintViolated: false, critical: true, milestone: false, summary: false, percentComplete: 0, actualStart: null, actualFinish: null, progressStatus: "notStarted" as const, predecessors: [], baseline: null, explanation: { kind: "scheduled" as const, taskId: "task", primaryDriver: { kind: "scheduleStart" as const }, otherBindingDrivers: [], startedActualStart: null, calendarGap: null, totalFloatMinutes: 0, critical: true, lateFinishLimit: { kind: "projectFinish" as const } } }],
   };
 }

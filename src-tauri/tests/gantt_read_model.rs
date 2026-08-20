@@ -1,3 +1,7 @@
+// The exact-contract fixtures build deeply nested `json!` trees; the explanation
+// facts push them past the default macro recursion budget.
+#![recursion_limit = "256"]
+
 use chrono::{NaiveDate, NaiveDateTime};
 use contractorproject_lib::gantt::{
     build_gantt_read_model, GanttBaselineSource, GanttBaselineTaskSource, GanttPredecessorLink,
@@ -55,7 +59,7 @@ fn empty_schedule_serializes_as_a_versioned_job_projection() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 6,
+            "contractVersion": 7,
             "jobId": "job-1",
             "jobVersion": 7,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -115,7 +119,7 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
     assert_eq!(
         serde_json::to_value(read_model).expect("serialize read model"),
         json!({
-            "contractVersion": 6,
+            "contractVersion": 7,
             "jobId": "job-1",
             "jobVersion": 1,
             "scheduleStart": "2026-01-05T08:00:00",
@@ -156,7 +160,26 @@ fn constrained_violating_leaf_serializes_the_exact_v4_contract() {
                 "actualFinish": null,
                 "progressStatus": "notStarted",
                 "predecessors": [],
-                "baseline": null
+                "baseline": null,
+                "explanation": {
+                    "kind": "scheduled",
+                    "taskId": "leaf",
+                    "primaryDriver": {
+                        "kind": "startConstraint",
+                        "date": "2026-01-06",
+                        "normalizedDate": "2026-01-06"
+                    },
+                    "otherBindingDrivers": [],
+                    "startedActualStart": null,
+                    "calendarGap": null,
+                    "totalFloatMinutes": -480,
+                    "critical": true,
+                    "lateFinishLimit": {
+                        "kind": "deadline",
+                        "date": "2026-01-05",
+                        "normalizedDate": "2026-01-05"
+                    }
+                }
             }]
         })
     );
@@ -270,7 +293,7 @@ fn statused_schedule_projects_the_v4_progress_facts_and_data_date() {
     })
     .expect("build statused read model");
 
-    assert_eq!(read_model.contract_version, 6);
+    assert_eq!(read_model.contract_version, 7);
     assert_eq!(read_model.data_date, Some(date_time("2026-01-07T08:00:00")));
 
     let summary = &read_model.rows[0];
@@ -1088,7 +1111,7 @@ fn calendar_facts_serialize_sorted_and_deduplicated() {
     })
     .expect("build read model");
 
-    assert_eq!(read_model.contract_version, 6);
+    assert_eq!(read_model.contract_version, 7);
     let value = serde_json::to_value(&read_model).expect("serialize read model");
     assert_eq!(
         value["calendar"],
@@ -1096,5 +1119,87 @@ fn calendar_facts_serialize_sorted_and_deduplicated() {
             "workingWeekdays": ["monday", "tuesday", "wednesday", "thursday", "friday"],
             "exceptionDates": ["2026-11-26", "2026-11-27", "2026-11-30"]
         })
+    );
+}
+
+fn single_leaf_source() -> GanttReadModelSource {
+    let schedule = calculate_schedule(&ScheduleInput {
+        schedule_start: NaiveDate::from_ymd_opt(2026, 1, 5).expect("valid date"),
+        calendar: standard_calendar(),
+        tasks: vec![ScheduleTask {
+            id: "A".into(),
+            parent_task_id: None,
+            duration_minutes: Some(480),
+        }],
+        dependencies: vec![],
+    })
+    .expect("calculate single-leaf schedule");
+    GanttReadModelSource {
+        job_id: "job-1".into(),
+        job_version: 1,
+        tasks: vec![GanttTaskSource {
+            id: "A".into(),
+            parent_task_id: None,
+            sort_key: 0,
+            name: "A".into(),
+            start_no_earlier_than: None,
+            finish_no_later_than: None,
+        }],
+        schedule,
+        calendar: standard_calendar(),
+        baseline: None,
+        predecessors: vec![],
+    }
+}
+
+#[test]
+fn row_explanation_serializes_the_exact_camel_case_kind_tags() {
+    let read_model = build_gantt_read_model(single_leaf_source()).expect("build read model");
+    let value = serde_json::to_value(&read_model).expect("serialize read model");
+    // `A(480)` alone: primary scheduleStart, no gap, float 0, projectFinish, critical.
+    assert_eq!(
+        value["rows"][0]["explanation"],
+        json!({
+            "kind": "scheduled",
+            "taskId": "A",
+            "primaryDriver": { "kind": "scheduleStart" },
+            "otherBindingDrivers": [],
+            "startedActualStart": null,
+            "calendarGap": null,
+            "totalFloatMinutes": 0,
+            "critical": true,
+            "lateFinishLimit": { "kind": "projectFinish" }
+        })
+    );
+}
+
+#[test]
+fn rejects_a_task_with_no_schedule_explanation() {
+    let mut source = single_leaf_source();
+    // Drop the only explanation so the leaf row cannot join one.
+    source.schedule.explanations.clear();
+    let error = build_gantt_read_model(source).expect_err("reject missing explanation");
+    assert_eq!(error.code(), "gantt_explanation_missing");
+    assert_eq!(
+        error,
+        GanttReadModelError::MissingExplanation {
+            task_id: "A".into()
+        }
+    );
+}
+
+#[test]
+fn rejects_a_task_with_a_duplicate_schedule_explanation() {
+    let mut source = single_leaf_source();
+    // Repeat the leaf's explanation so the join sees the id twice.
+    let duplicate = source.schedule.explanations[0].clone();
+    source.schedule.explanations.push(duplicate);
+    let error = build_gantt_read_model(source).expect_err("reject duplicate explanation");
+    assert_eq!(error.code(), "gantt_explanation_duplicate");
+    assert_eq!(
+        error,
+        GanttReadModelError::DuplicateExplanation {
+            task_id: "A".into()
+        }
     );
 }

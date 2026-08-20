@@ -38,6 +38,9 @@ export interface GanttTreegridProps {
   readModel: GanttReadModel;
   ariaLabel?: string;
   viewportHeight?: number;
+  /** Notified with the focused task id (null when none) so a sibling surface can
+   * follow the roving cell — e.g. the schedule-explanation panel. */
+  onActiveTaskChange?: (taskId: string | null) => void;
 }
 
 /** Authoritative, keyboard-operable work-breakdown projection for a Gantt schedule. */
@@ -45,6 +48,7 @@ export function GanttTreegrid({
   readModel,
   ariaLabel = "Work breakdown schedule",
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
+  onActiveTaskChange,
 }: GanttTreegridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowHeightProbeRef = useRef<HTMLDivElement>(null);
@@ -162,6 +166,13 @@ export function GanttTreegrid({
     },
     [focusMountedCell, rowVirtualizer],
   );
+
+  // Follow the focused task id (including collapse-driven focus recovery, which
+  // updates activeCell to the nearest visible ancestor). The grid markup is
+  // untouched; this only notifies a sibling surface such as the explanation panel.
+  useEffect(() => {
+    onActiveTaskChange?.(activeCell?.taskId ?? null);
+  }, [activeCell?.taskId, onActiveTaskChange]);
 
   useEffect(() => {
     if (visibleRows.length === 0) {

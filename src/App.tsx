@@ -1,7 +1,8 @@
-import { FormEvent, useEffect, useRef, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
+import { ExplanationPanel } from "./gantt/ExplanationPanel";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
@@ -569,7 +570,27 @@ function ScheduleProjection({ schedule, jobName }: { schedule: ScheduleLoadState
   if (schedule.readModel.rowCount === 0) {
     return <p className="gantt-state">No scheduled tasks yet.</p>;
   }
-  return <GanttTreegrid readModel={schedule.readModel} ariaLabel={`Schedule for ${jobName}`} />;
+  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} />;
+}
+
+// Holds the focused-task state so the explanation panel follows the treegrid's
+// roving cell. React renders the Rust-provided explanation facts and derives none.
+function LoadedSchedule({ readModel, jobName }: { readModel: GanttReadModel; jobName: string }) {
+  const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
+  const focusedRow = useMemo(
+    () => readModel.rows.find((row) => row.taskId === focusedTaskId) ?? null,
+    [focusedTaskId, readModel.rows],
+  );
+  return (
+    <>
+      <GanttTreegrid
+        readModel={readModel}
+        ariaLabel={`Schedule for ${jobName}`}
+        onActiveTaskChange={setFocusedTaskId}
+      />
+      <ExplanationPanel row={focusedRow} />
+    </>
+  );
 }
 
 function TaskList({

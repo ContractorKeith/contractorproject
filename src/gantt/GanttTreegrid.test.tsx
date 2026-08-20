@@ -1,6 +1,6 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { GanttReadModel, GanttRow } from "../types/gantt";
 import { GanttTreegrid } from "./GanttTreegrid";
@@ -30,13 +30,24 @@ function row(overrides: Partial<GanttRow> & Pick<GanttRow, "taskId" | "logicalIn
     progressStatus: "notStarted",
     predecessors: [],
     baseline: null,
+    explanation: {
+      kind: "scheduled",
+      taskId: overrides.taskId,
+      primaryDriver: { kind: "scheduleStart" },
+      otherBindingDrivers: [],
+      startedActualStart: null,
+      calendarGap: null,
+      totalFloatMinutes: 0,
+      critical: true,
+      lateFinishLimit: { kind: "projectFinish" },
+    },
     ...overrides,
   };
 }
 
 function model(rows: GanttRow[]): GanttReadModel {
   return {
-    contractVersion: 6,
+    contractVersion: 7,
     jobId: "job-1",
     jobVersion: 4,
     scheduleStart: "2026-08-17T08:00:00",
@@ -353,5 +364,26 @@ describe("GanttTreegrid", () => {
     );
 
     expect(outside).toHaveFocus();
+  });
+
+  it("reports the focused task id on cell movement and on collapse-driven recovery", async () => {
+    const user = userEvent.setup();
+    const onActiveTaskChange = vi.fn();
+    render(<GanttTreegrid readModel={model(fixtureRows)} onActiveTaskChange={onActiveTaskChange} />);
+
+    // The first row is the initial roving cell, reported on mount.
+    expect(onActiveTaskChange).toHaveBeenLastCalledWith("summary");
+
+    const summaryTask = screen.getByRole("rowheader", { name: /1 Site work, task/ });
+    summaryTask.focus();
+    await user.keyboard("{ArrowDown}");
+    expect(onActiveTaskChange).toHaveBeenLastCalledWith("task-a");
+
+    // Collapsing the summary hides the focused child; focus recovers to the
+    // summary and the callback follows that recovery.
+    summaryTask.focus();
+    await user.keyboard(" ");
+    expect(screen.queryByRole("row", { name: /1\.1 Layout/ })).not.toBeInTheDocument();
+    expect(onActiveTaskChange).toHaveBeenLastCalledWith("summary");
   });
 });
