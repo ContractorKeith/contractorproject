@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
@@ -36,6 +36,7 @@ export function App({ client = tauriJobClient }: AppProps) {
   const [archivedJobs, setArchivedJobs] = useState<Job[]>([]);
   const [name, setName] = useState("");
   const [loading, setLoading] = useState(true);
+  const [refreshingJobs, setRefreshingJobs] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
@@ -45,11 +46,17 @@ export function App({ client = tauriJobClient }: AppProps) {
   const [archivedLoading, setArchivedLoading] = useState(false);
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [taskLoads, setTaskLoads] = useState<Record<string, TaskLoadState>>({});
+  const [workspaceDirty, setWorkspaceDirty] = useState(false);
+  const [workspacePending, setWorkspacePending] = useState(false);
   const [theme, setTheme] = useState<ThemePreference>(loadThemePreference);
   const [backupPending, setBackupPending] = useState(false);
   const [backupResult, setBackupResult] = useState<"cancelled" | { destination: string; createdAtUtc: string; byteSize: number } | null>(null);
   const [backupError, setBackupError] = useState<string | null>(null);
   const backupButtonRef = useRef<HTMLButtonElement>(null);
+  const handleWorkspaceStateChange = useCallback(({ dirty, pending }: { dirty: boolean; pending: boolean }) => {
+    setWorkspaceDirty(dirty);
+    setWorkspacePending(pending);
+  }, []);
 
   useEffect(
     () =>
@@ -91,6 +98,13 @@ export function App({ client = tauriJobClient }: AppProps) {
       });
       setJobs((current) => [job, ...current]);
       setName("");
+      // The just-created record is authoritative even before the list query has
+      // observed it. Load its hierarchy directly so the first workspace opens.
+      setOpenJobId(job.id);
+      setTaskLoads((current) => ({ ...current, [job.id]: { status: "loading" } }));
+      void client.listTasks(job.id)
+        .then((hierarchy) => setTaskLoads((current) => ({ ...current, [job.id]: { status: "loaded", hierarchy } })))
+        .catch((reason: unknown) => setTaskLoads((current) => ({ ...current, [job.id]: { status: "error", message: errorMessage(reason) } })));
     } catch (reason: unknown) {
       setError(errorMessage(reason));
     } finally {
@@ -143,19 +157,29 @@ export function App({ client = tauriJobClient }: AppProps) {
   async function refreshJobs() {
     setArchiveConflict(false);
     setArchiveError(null);
-    setLoading(true);
+    setRefreshingJobs(true);
     try {
-      setJobs(await client.listJobs());
+      const refreshedJobs = await client.listJobs();
+      setJobs(refreshedJobs);
+      if (openJobId) {
+        const snapshot = await loadJobSnapshot(client, openJobId);
+        setJobs((current) => current.map((job) => job.id === snapshot.job.id ? snapshot.job : job));
+        setTaskLoads((current) => ({
+          ...current,
+          [openJobId]: { status: "loaded", hierarchy: snapshot.hierarchy },
+        }));
+      }
       if (archivedOpen) await loadArchivedJobs();
     } catch (reason: unknown) {
       setArchiveError(errorMessage(reason));
     } finally {
-      setLoading(false);
+      setRefreshingJobs(false);
     }
   }
 
   async function handleArchive(job: Job) {
     if (!client.archiveJob || pendingJobId) return;
+    if (openJobId === job.id && !confirmWorkspaceLeave()) return;
     setPendingJobId(job.id);
     setArchiveError(null);
     setArchiveConflict(false);
@@ -194,14 +218,17 @@ export function App({ client = tauriJobClient }: AppProps) {
     }
   }
 
-  async function handleToggleTasks(job: Job) {
-    if (openJobId === job.id) {
+  async function handleToggleTasks(job: Job, retry = false) {
+    if (openJobId === job.id && !retry) {
+      if (!confirmWorkspaceLeave()) return;
       setOpenJobId(null);
       return;
     }
 
+    if (openJobId && openJobId !== job.id && !confirmWorkspaceLeave()) return;
+
     setOpenJobId(job.id);
-    if (taskLoads[job.id]) return;
+    if (taskLoads[job.id]?.status === "loaded" || (!retry && taskLoads[job.id]?.status === "loading")) return;
 
     setTaskLoads((current) => ({
       ...current,
@@ -220,6 +247,16 @@ export function App({ client = tauriJobClient }: AppProps) {
         [job.id]: { status: "error", message: errorMessage(reason) },
       }));
     }
+  }
+
+  function confirmWorkspaceLeave(): boolean {
+    if (workspacePending) {
+      setError("Finish saving the selected task before changing jobs.");
+      return false;
+    }
+    if (workspaceDirty && !window.confirm("Discard the unsaved changes to this task?")) return false;
+    setWorkspaceDirty(false);
+    return true;
   }
 
   function handleHierarchyChange(jobId: string, hierarchy: TaskHierarchy) {
@@ -309,11 +346,10 @@ export function App({ client = tauriJobClient }: AppProps) {
         <section className="workspace-heading" aria-labelledby="jobs-heading">
           <div>
             <p className="eyebrow">Jobs</p>
-            <h1 id="jobs-heading">Your work, on your machine.</h1>
-            <p className="lede">
-              Start with one job. Schedules, crews, costs, and files will stay
-              local unless you choose to export them.
-            </p>
+            <h1 id="jobs-heading">{openJobId ? "Your jobs" : "Your work, on your machine."}</h1>
+            {!openJobId ? (
+              <p className="lede">Start with one job. Your schedule stays on this device.</p>
+            ) : null}
           </div>
 
           <form className="new-job" onSubmit={handleCreateJob}>
@@ -346,7 +382,7 @@ export function App({ client = tauriJobClient }: AppProps) {
           <div className="inline-error" role="alert">
             <strong>Job changed elsewhere.</strong>
             <span>Refresh before archiving or restoring so newer local work is not overwritten.</span>
-            <button type="button" onClick={() => void refreshJobs()} disabled={loading}>
+            <button type="button" onClick={() => void refreshJobs()} disabled={refreshingJobs}>
               Refresh jobs
             </button>
           </div>
@@ -385,19 +421,8 @@ export function App({ client = tauriJobClient }: AppProps) {
                     {String(index + 1).padStart(2, "0")}
                   </div>
                   <div className="job-card__content">
-                    <div className="job-card__meta">
-                      <span className="status-tag">{job.status}</span>
-                      <span>{job.timezone}</span>
-                    </div>
+                    <div className="job-card__meta"><span className="status-tag">{job.status}</span></div>
                     <h3>{job.name}</h3>
-                    <button
-                      className="archive-action"
-                      type="button"
-                      onClick={() => void handleArchive(job)}
-                      disabled={!client.archiveJob || pendingJobId !== null}
-                    >
-                      {pendingJobId === job.id ? "Archiving…" : "Archive job"}
-                    </button>
                     <button
                       className="task-disclosure"
                       type="button"
@@ -406,7 +431,15 @@ export function App({ client = tauriJobClient }: AppProps) {
                       aria-controls={`task-panel-${job.id}`}
                       onClick={() => void handleToggleTasks(job)}
                     >
-                      {openJobId === job.id ? "Hide tasks" : "View tasks"}
+                      {openJobId === job.id ? "Close workspace" : "Open schedule"}
+                    </button>
+                    <button
+                      className="archive-action"
+                      type="button"
+                      onClick={() => void handleArchive(job)}
+                      disabled={!client.archiveJob || pendingJobId !== null}
+                    >
+                      {pendingJobId === job.id ? "Archiving…" : "Archive job"}
                     </button>
                     {openJobId === job.id ? (
                       <TaskPanel
@@ -418,6 +451,8 @@ export function App({ client = tauriJobClient }: AppProps) {
                           handleHierarchyChange(job.id, hierarchy)
                         }
                         onJobChange={handleJobChange}
+                        onWorkspaceStateChange={handleWorkspaceStateChange}
+                        onRetry={() => void handleToggleTasks(job, true)}
                       />
                     ) : null}
                   </div>
@@ -471,6 +506,8 @@ function TaskPanel({
   client,
   onHierarchyChange,
   onJobChange,
+  onWorkspaceStateChange,
+  onRetry,
 }: {
   id: string;
   job: Job;
@@ -478,13 +515,45 @@ function TaskPanel({
   client: JobClient;
   onHierarchyChange: (hierarchy: TaskHierarchy) => void;
   onJobChange: (job: Job) => void;
+  onWorkspaceStateChange: (state: { dirty: boolean; pending: boolean }) => void;
+  onRetry: () => void;
 }) {
   const [schedule, setSchedule] = useState<ScheduleLoadState>({ status: "loading" });
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [selectedTaskDirty, setSelectedTaskDirty] = useState(false);
+  const [selectedTaskPending, setSelectedTaskPending] = useState(false);
+  const [pendingSelectionTaskId, setPendingSelectionTaskId] = useState<string | null>(null);
+  const [removedDraftNotice, setRemovedDraftNotice] = useState<string | null>(null);
+  const lastSelectedHierarchyRef = useRef<TaskHierarchy | null>(null);
+
+  useEffect(() => {
+    if (state.status === "loaded" && selectedTaskId === null && state.hierarchy.tasks[0]) {
+      setSelectedTaskId(state.hierarchy.tasks[0].id);
+    }
+  }, [selectedTaskId, state]);
+
+  useEffect(() => {
+    if (state.status !== "loaded") return;
+    const selectedRemoved = selectedTaskId !== null && !state.hierarchy.tasks.some((task) => task.id === selectedTaskId);
+    if (selectedTaskDirty && selectedRemoved) {
+      const name = lastSelectedHierarchyRef.current?.tasks.find((task) => task.id === selectedTaskId)?.name ?? "selected task";
+      setRemovedDraftNotice(`“${name}” was removed elsewhere. Your unsaved draft is still open until you discard it.`);
+    } else {
+      setRemovedDraftNotice(null);
+    }
+  }, [selectedTaskDirty, selectedTaskId, state]);
+
+  useEffect(() => {
+    onWorkspaceStateChange({ dirty: selectedTaskDirty, pending: selectedTaskPending });
+    return () => onWorkspaceStateChange({ dirty: false, pending: false });
+  }, [onWorkspaceStateChange, selectedTaskDirty, selectedTaskPending]);
 
   useEffect(() => {
     if (!client.getSchedule) return;
     let active = true;
-    setSchedule({ status: "loading" });
+    // Keep the current projection mounted while a hierarchy/version refresh asks
+    // Rust for the next one, so its active row and timeline position do not jump.
+    setSchedule((current) => current.status === "loaded" ? current : { status: "loading" });
     client.getSchedule(job.id)
       .then((readModel) => active && setSchedule({ status: "loaded", readModel }))
       .catch((reason: unknown) => active && setSchedule({ status: "error", message: errorMessage(reason) }));
@@ -500,58 +569,76 @@ function TaskPanel({
   if (state.status === "error") {
     return (
       <div id={id} className="task-panel task-panel--error" role="alert">
-        Couldn&apos;t load tasks. {state.message}
+        Couldn&apos;t load tasks. {state.message} <button type="button" onClick={onRetry}>Retry loading tasks</button>
       </div>
     );
   }
-  const children = groupTasksByParent(state.hierarchy.tasks);
+  const selectedRemoved = selectedTaskId !== null && !state.hierarchy.tasks.some((task) => task.id === selectedTaskId);
+  if (!selectedRemoved) lastSelectedHierarchyRef.current = state.hierarchy;
+  const hierarchy = selectedTaskDirty && selectedRemoved && lastSelectedHierarchyRef.current
+    ? lastSelectedHierarchyRef.current
+    : state.hierarchy;
+  const selectedTask = selectedTaskId === null
+    ? hierarchy.tasks[0]
+    : hierarchy.tasks.find((task) => task.id === selectedTaskId)
+    ?? null;
+  const selectTask = (taskId: string) => {
+    if (taskId === selectedTask?.id) return;
+    if (selectedTaskPending) return;
+    if (selectedTaskDirty && !window.confirm("Discard the unsaved changes to this task?")) {
+      setPendingSelectionTaskId(taskId);
+      return;
+    }
+    setSelectedTaskDirty(false);
+    setPendingSelectionTaskId(null);
+    setSelectedTaskId(taskId);
+  };
   return (
-    <div id={id} className="task-panel">
-      <TaskEditor
-        job={job}
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
-      <ScheduleSettings
-        job={job}
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
-      <CalendarExceptions
-        job={job}
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
-      <BaselineSettings
-        job={job}
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
-      <DependencyControls
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
-      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} /> : null}
-      {state.hierarchy.tasks.length === 0 ? <p>No tasks yet.</p> : null}
-      <TaskList
-        children={children}
-        parentTaskId={null}
-        label={`Tasks for ${job.name}`}
-        hierarchy={state.hierarchy}
-        client={client}
-        onHierarchyChange={onHierarchyChange}
-        onJobChange={onJobChange}
-      />
+    <div id={id} className="task-panel job-workspace">
+      <div className="job-workspace__heading">
+        <div>
+          <p className="eyebrow">Schedule</p>
+          <h2>{job.name}</h2>
+        </div>
+        <TaskEditor job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+      </div>
+      {!job.scheduleStart ? (
+        <div className="schedule-guidance" role="status">
+          <strong>Start your schedule</strong>
+          <span>Choose the first working day below, then add the work you need to track.</span>
+        </div>
+      ) : null}
+      <details className="schedule-setup" open={!job.scheduleStart}>
+        <summary>Schedule setup</summary>
+        <ScheduleSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+      </details>
+      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} onTaskSelection={selectTask} /> : null}
+      <section className="task-workspace" aria-label={`Tasks for ${job.name}`}>
+        {schedule.status !== "loaded" || schedule.readModel.rowCount === 0 ? (
+          <div className="task-workspace__list">
+            <h3>Work</h3>
+            {hierarchy.tasks.length === 0 ? <><p>No tasks yet.</p><p>Add the first piece of work above.</p></> : (
+              <TaskPicker tasks={hierarchy.tasks} label={`Tasks for ${job.name}`} selectedTaskId={selectedTask?.id ?? null} onSelect={selectTask} />
+            )}
+          </div>
+        ) : null}
+        {selectedTask ? (
+          <div className="task-workspace__editor">
+            <h3>Edit {selectedTask.name}</h3>
+            {removedDraftNotice ? <div role="alert">{removedDraftNotice} <button type="button" onClick={() => { setSelectedTaskDirty(false); setSelectedTaskId(null); setRemovedDraftNotice(null); }}>Discard removed task changes</button></div> : null}
+            <fieldset disabled={Boolean(removedDraftNotice)}>
+              <TaskEditor key={selectedTask.id} job={job} task={selectedTask} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} onDirtyChange={setSelectedTaskDirty} onPendingChange={setSelectedTaskPending} />
+            </fieldset>
+            {pendingSelectionTaskId ? <button type="button" onClick={() => selectTask(pendingSelectionTaskId)}>Edit selected task</button> : null}
+          </div>
+        ) : null}
+      </section>
+      <details className="advanced-schedule">
+        <summary>Advanced schedule settings</summary>
+        <CalendarExceptions job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+        <BaselineSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+        <DependencyControls hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+      </details>
     </div>
   );
 }
@@ -560,7 +647,7 @@ function hierarchyVersion(state: TaskLoadState): number {
   return state.status === "loaded" ? state.hierarchy.jobVersion : 0;
 }
 
-function ScheduleProjection({ schedule, jobName }: { schedule: ScheduleLoadState; jobName: string }) {
+function ScheduleProjection({ schedule, jobName, onTaskSelection }: { schedule: ScheduleLoadState; jobName: string; onTaskSelection: (taskId: string) => void }) {
   if (schedule.status === "loading") {
     return <p className="gantt-state" aria-live="polite">Loading schedule…</p>;
   }
@@ -570,12 +657,12 @@ function ScheduleProjection({ schedule, jobName }: { schedule: ScheduleLoadState
   if (schedule.readModel.rowCount === 0) {
     return <p className="gantt-state">No scheduled tasks yet.</p>;
   }
-  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} />;
+  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} onTaskSelection={onTaskSelection} />;
 }
 
 // Holds the focused-task state so the explanation panel follows the treegrid's
 // roving cell. React renders the Rust-provided explanation facts and derives none.
-function LoadedSchedule({ readModel, jobName }: { readModel: GanttReadModel; jobName: string }) {
+function LoadedSchedule({ readModel, jobName, onTaskSelection }: { readModel: GanttReadModel; jobName: string; onTaskSelection: (taskId: string) => void }) {
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [todayDate] = useState(() => {
     const now = new Date();
@@ -594,56 +681,60 @@ function LoadedSchedule({ readModel, jobName }: { readModel: GanttReadModel; job
         readModel={readModel}
         ariaLabel={`Schedule for ${jobName}`}
         todayDate={todayDate}
-        onActiveTaskChange={setFocusedTaskId}
+        onActiveTaskChange={(taskId) => {
+          setFocusedTaskId(taskId);
+          if (taskId) onTaskSelection(taskId);
+        }}
       />
       <ExplanationPanel row={focusedRow} />
     </>
   );
 }
 
-function TaskList({
-  children,
-  parentTaskId,
-  label,
-  hierarchy,
-  client,
-  onHierarchyChange,
-  onJobChange,
-}: {
-  children: Map<string | null, Task[]>;
-  parentTaskId: string | null;
-  label?: string;
-  hierarchy: TaskHierarchy;
-  client: JobClient;
-  onHierarchyChange: (hierarchy: TaskHierarchy) => void;
-  onJobChange: (job: Job) => void;
-}) {
-  const tasks = children.get(parentTaskId) ?? [];
+function TaskPicker({ tasks, label, selectedTaskId, onSelect }: { tasks: Task[]; label: string; selectedTaskId: string | null; onSelect: (taskId: string) => void }) {
   return (
     <ol className="task-tree" aria-label={label}>
       {tasks.map((task) => (
         <li key={task.id}>
-          <TaskEditor
-            task={task}
-            hierarchy={hierarchy}
-            client={client}
-            onHierarchyChange={onHierarchyChange}
-            onJobChange={onJobChange}
-          />
-          {children.has(task.id) ? (
-            <TaskList
-              children={children}
-              parentTaskId={task.id}
-              hierarchy={hierarchy}
-              client={client}
-              onHierarchyChange={onHierarchyChange}
-              onJobChange={onJobChange}
-            />
-          ) : null}
+          <button type="button" className={task.id === selectedTaskId ? "task-picker__item task-picker__item--selected" : "task-picker__item"} onClick={() => onSelect(task.id)}>
+            {task.name}
+          </button>
         </li>
       ))}
     </ol>
   );
+}
+
+type DurationUnit = "days" | "hours" | "minutes";
+
+function formatDurationInput(minutes: number | null | undefined, unit: DurationUnit, workdayMinutes: number): string {
+  if (minutes == null) return "";
+  const divisor = unit === "days" ? workdayMinutes : unit === "hours" ? 60 : 1;
+  return String(minutes / divisor);
+}
+
+/** Undefined means invalid; null preserves the deliberate unset-duration state. */
+function parseDurationInput(value: string, unit: DurationUnit, workdayMinutes: number): number | null | undefined {
+  if (value.trim() === "") return null;
+  const parsed = Number(value);
+  const multiplier = unit === "days" ? workdayMinutes : unit === "hours" ? 60 : 1;
+  const minutes = parsed * multiplier;
+  const nearestMinute = Math.round(minutes);
+  // A persisted integer rendered as working days may return as 12.999999999999998
+  // after the browser parses it. Accept only the tiny IEEE-754 residue around a
+  // safe integer; meaningful fractional-minute input remains invalid.
+  const roundingTolerance = Number.EPSILON * Math.max(1, Math.abs(minutes)) * 8;
+  if (
+    !Number.isFinite(minutes) ||
+    minutes < 0 ||
+    !Number.isSafeInteger(nearestMinute) ||
+    Math.abs(minutes - nearestMinute) > roundingTolerance
+  ) return undefined;
+  return nearestMinute;
+}
+
+function durationInputMatchesPersisted(value: string, unit: DurationUnit, persisted: number | null | undefined, workdayMinutes: number): boolean {
+  return parseDurationInput(value, unit, workdayMinutes) === (persisted ?? null);
 }
 
 function TaskEditor({
@@ -653,6 +744,8 @@ function TaskEditor({
   client,
   onHierarchyChange,
   onJobChange,
+  onDirtyChange,
+  onPendingChange,
 }: {
   job?: Job;
   task?: Task;
@@ -660,7 +753,10 @@ function TaskEditor({
   client: JobClient;
   onHierarchyChange: (hierarchy: TaskHierarchy) => void;
   onJobChange: (job: Job) => void;
+  onDirtyChange?: (dirty: boolean) => void;
+  onPendingChange?: (pending: boolean) => void;
 }) {
+  const workdayMinutes = job?.calendar?.workdayDurationMinutes ?? DEFAULT_CALENDAR.workdayDurationMinutes;
   const [name, setName] = useState(task?.name ?? "");
   const [draftBaseVersion, setDraftBaseVersion] = useState<number | null>(null);
   const [newChildName, setNewChildName] = useState("");
@@ -668,9 +764,8 @@ function TaskEditor({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
-  const [duration, setDuration] = useState(
-    task?.durationMinutes == null ? "" : String(task.durationMinutes),
-  );
+  const [duration, setDuration] = useState(() => formatDurationInput(task?.durationMinutes, "days", workdayMinutes));
+  const [durationUnit, setDurationUnit] = useState<DurationUnit>("days");
   const [durationBaseVersion, setDurationBaseVersion] = useState<number | null>(
     null,
   );
@@ -691,7 +786,7 @@ function TaskEditor({
   const [progressBaseVersion, setProgressBaseVersion] = useState<number | null>(
     null,
   );
-  const isRootCreator = Boolean(job);
+  const isRootCreator = !task;
   const label = isRootCreator ? "New root task" : `Task name for ${task!.name}`;
   const siblings = hierarchy.tasks.filter(
     (candidate) => candidate.parentTaskId === task?.parentTaskId,
@@ -706,9 +801,7 @@ function TaskEditor({
     if (draftBaseVersion === null) setName(task.name);
     else if (task.version !== draftBaseVersion) setConflict(true);
     if (durationBaseVersion === null) {
-      setDuration(
-        task.durationMinutes == null ? "" : String(task.durationMinutes),
-      );
+      setDuration(formatDurationInput(task.durationMinutes, durationUnit, workdayMinutes));
     } else if (task.version !== durationBaseVersion) {
       setConflict(true);
     }
@@ -727,7 +820,16 @@ function TaskEditor({
     } else if (task.version !== progressBaseVersion) {
       setConflict(true);
     }
-  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, progressBaseVersion, task]);
+  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, durationUnit, progressBaseVersion, task, workdayMinutes]);
+
+  useEffect(() => {
+    onDirtyChange?.(draftBaseVersion !== null || durationBaseVersion !== null || constraintBaseVersion !== null || progressBaseVersion !== null || newChildName !== "" || newParentTaskId !== null || pending);
+  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, newChildName, newParentTaskId, onDirtyChange, pending, progressBaseVersion]);
+
+  useEffect(() => {
+    onPendingChange?.(pending);
+    return () => onPendingChange?.(false);
+  }, [onPendingChange, pending]);
 
   async function run(
     action: () => Promise<TaskHierarchy>,
@@ -815,6 +917,24 @@ function TaskEditor({
     } finally {
       setPending(false);
     }
+  }
+
+  async function saveDuration() {
+    if (!task || !client.updateTaskDuration || pending) return;
+    const parsed = parseDurationInput(duration, durationUnit, workdayMinutes);
+    if (parsed === undefined) {
+      setError("Duration must be a finite, nonnegative value that resolves to a whole minute.");
+      return;
+    }
+    await run(
+      () => client.updateTaskDuration!({
+        taskId: task.id,
+        durationMinutes: parsed,
+        expectedVersion: durationBaseVersion ?? task.version,
+        expectedJobVersion: hierarchy.jobVersion,
+      }),
+      () => setDurationBaseVersion(null),
+    );
   }
 
   async function saveProgress(clear: boolean) {
@@ -921,52 +1041,66 @@ function TaskEditor({
           aria-label={`Actions for ${task.name}`}
         >
           <label className="task-editor__duration">
-            <span>Duration (min)</span>
+            <span>Duration</span>
             <input
               aria-label={`Duration for ${task.name}`}
               type="number"
               min="0"
+              step="any"
               value={duration}
               onChange={(event) => {
                 const nextDuration = event.target.value;
                 setDuration(nextDuration);
-                const storedDuration =
-                  task.durationMinutes == null
-                    ? ""
-                    : String(task.durationMinutes);
                 setDurationBaseVersion(
-                  nextDuration === storedDuration
+                  durationInputMatchesPersisted(nextDuration, durationUnit, task.durationMinutes, workdayMinutes)
                     ? null
                     : (current) => current ?? task.version,
                 );
               }}
             />
+            <select aria-label={`Duration unit for ${task.name}`} value={durationUnit} onChange={(event) => {
+              const nextUnit = event.target.value as DurationUnit;
+              const exact = parseDurationInput(duration, durationUnit, workdayMinutes);
+              setDurationUnit(nextUnit);
+              setDuration(exact === undefined ? duration : formatDurationInput(exact, nextUnit, workdayMinutes));
+            }}>
+              <option value="days">working days</option>
+              <option value="hours">hours</option>
+              <option value="minutes">minutes</option>
+            </select>
           </label>
           <button
             type="button"
             disabled={
               pending ||
               !client.updateTaskDuration ||
-              duration ===
-                (task.durationMinutes == null
-                  ? ""
-                  : String(task.durationMinutes))
+              durationInputMatchesPersisted(duration, durationUnit, task.durationMinutes, workdayMinutes)
             }
-            onClick={() =>
-              void run(
-                () =>
-                  client.updateTaskDuration!({
-                    taskId: task.id,
-                    durationMinutes: duration === "" ? null : Number(duration),
-                    expectedVersion: durationBaseVersion ?? task.version,
-                    expectedJobVersion: hierarchy.jobVersion,
-                  }),
-                () => setDurationBaseVersion(null),
-              )
-            }
+            onClick={() => void saveDuration()}
           >
             Save duration
           </button>
+          {!isSummary && client.updateTaskProgress ? (
+            <fieldset className="task-editor__progress">
+              <legend>Progress</legend>
+              <label>
+                Percent complete
+                <input aria-label={`Percent complete for ${task.name}`} type="number" min="0" max="100" step="1" value={percentComplete} disabled={pending} onChange={(event) => { setPercentComplete(event.target.value); setProgressBaseVersion((current) => current ?? task.version); }} />
+              </label>
+              <label>
+                Actual start
+                <input aria-label={`Actual start for ${task.name}`} type="date" value={actualStart} disabled={pending} onChange={(event) => { setActualStart(event.target.value); setProgressBaseVersion((current) => current ?? task.version); }} />
+              </label>
+              <label>
+                Actual finish
+                <input aria-label={`Actual finish for ${task.name}`} type="date" value={actualFinish} disabled={pending} onChange={(event) => { setActualFinish(event.target.value); setProgressBaseVersion((current) => current ?? task.version); }} />
+              </label>
+              <button type="button" disabled={pending || percentComplete === ""} onClick={() => void saveProgress(false)}>Save progress</button>
+              <button type="button" disabled={pending || task.percentComplete == null} onClick={() => void saveProgress(true)}>Clear progress</button>
+            </fieldset>
+          ) : null}
+          <details className="task-editor__advanced">
+            <summary>Advanced task details</summary>
           {!isSummary ? (
             <fieldset className="task-editor__constraints">
               <legend>Schedule constraints</legend>
@@ -1031,67 +1165,6 @@ function TaskEditor({
                 onClick={() => void saveConstraint("finish_no_later_than", null)}
               >
                 Clear finish constraint
-              </button>
-            </fieldset>
-          ) : null}
-          {!isSummary && client.updateTaskProgress ? (
-            <fieldset className="task-editor__progress">
-              <legend>Progress</legend>
-              <label>
-                Percent complete
-                <input
-                  aria-label={`Percent complete for ${task.name}`}
-                  type="number"
-                  min="0"
-                  max="100"
-                  step="1"
-                  value={percentComplete}
-                  disabled={pending}
-                  onChange={(event) => {
-                    setPercentComplete(event.target.value);
-                    setProgressBaseVersion((current) => current ?? task.version);
-                  }}
-                />
-              </label>
-              <label>
-                Actual start
-                <input
-                  aria-label={`Actual start for ${task.name}`}
-                  type="date"
-                  value={actualStart}
-                  disabled={pending}
-                  onChange={(event) => {
-                    setActualStart(event.target.value);
-                    setProgressBaseVersion((current) => current ?? task.version);
-                  }}
-                />
-              </label>
-              <label>
-                Actual finish
-                <input
-                  aria-label={`Actual finish for ${task.name}`}
-                  type="date"
-                  value={actualFinish}
-                  disabled={pending}
-                  onChange={(event) => {
-                    setActualFinish(event.target.value);
-                    setProgressBaseVersion((current) => current ?? task.version);
-                  }}
-                />
-              </label>
-              <button
-                type="button"
-                disabled={pending || percentComplete === ""}
-                onClick={() => void saveProgress(false)}
-              >
-                Save progress
-              </button>
-              <button
-                type="button"
-                disabled={pending || task.percentComplete == null}
-                onClick={() => void saveProgress(true)}
-              >
-                Clear progress
               </button>
             </fieldset>
           ) : null}
@@ -1199,6 +1272,7 @@ function TaskEditor({
               Add subtask
             </button>
           </form>
+          </details>
         </div>
       ) : null}
       {conflict ? (
