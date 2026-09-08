@@ -426,10 +426,11 @@
   width: 12%;
 }
 
-/* The % Done cell reserves a nonshrinking "NN%" numeral. Its status word may
-   ellipsize inside the remaining width, so narrow panes never hide the percent. */
+/* The % Done cell reserves a nonshrinking "NN%" numeral, including clearance
+   for wider Linux fallback fonts. Its status word may ellipsize inside the
+   remaining width, so narrow panes never hide the percent. */
 .gantt-treegrid__progress-column {
-  width: 8%;
+  width: 9%;
 }
 
 /* Float keeps 15%; the stacked "Constraint / violated" fact needs it
@@ -440,7 +441,7 @@
 
 /* Date columns carry the widest facts; keep headroom for wide fallback fonts. */
 .gantt-treegrid__date-column {
-  width: 20%;
+  width: 19.5%;
 }
 
 /* Widened from 5% to seat the explicit per-link annotations ("T2 SS +120 min").
@@ -472,10 +473,10 @@
   padding-inline: var(--space-1);
 }
 
-/* The narrow detailed pane needs two more pixels for wide fallback glyphs in
-   Start/Finish. Keep the column allocation (and therefore timeline width) fixed. */
+/* The narrower date columns preserve their text space by using two pixels less
+   inline padding than other tight fact cells. Timeline width stays fixed. */
 .gantt-treegrid td:has(.gantt-treegrid__date) {
-  padding-inline: calc(var(--space-1) - 1px);
+  padding-inline: calc(var(--space-1) - 2px);
 }
 
 .gantt-treegrid thead {
@@ -520,7 +521,7 @@
 
 /* Hierarchy emphasis (heading family + weight) stays on the Name cell only. The
    date/number cells keep the body weight so a summary's Start/Finish facts hold
-   their >=5% width headroom at the 20% date columns (weight 600 was the widest
+   their >=5% width headroom at the 19.5% date columns (weight 600 was the widest
    instance and clipped the bar at the 460px minimum layout). */
 .gantt-treegrid__summary-row > th[role="rowheader"] {
   font-family: var(--font-heading);
