@@ -11,12 +11,23 @@
 
 .gantt-schedule__toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-1);
   padding-block-end: var(--space-2);
 }
 
-.gantt-schedule__toolbar button {
+.gantt-schedule__filters,
+.gantt-schedule__zoom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.gantt-schedule__toolbar button,
+.gantt-schedule__search input {
   min-height: var(--control-height-small);
   padding: 0 var(--space-3);
   color: var(--color-text);
@@ -29,6 +40,86 @@
   color: var(--color-on-action);
   background: var(--color-action);
   border-color: var(--color-action);
+}
+
+.gantt-schedule__search input {
+  width: min(18rem, 45vw);
+  background: var(--color-bg);
+}
+
+.gantt-schedule__result-count {
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-schedule__reset {
+  color: var(--color-neutral-700) !important;
+}
+
+.schedule-summary {
+  margin-block-end: var(--space-3);
+  border-block: var(--border-hairline) solid var(--color-divider);
+}
+
+.schedule-summary__facts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0;
+}
+
+.schedule-summary__facts > div {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-inline-end: var(--border-hairline) solid var(--color-divider);
+}
+
+.schedule-summary__facts > div:last-child {
+  border-inline-end: 0;
+}
+
+.schedule-summary__facts dt {
+  color: var(--color-neutral-700);
+  font-family: var(--font-heading);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-heading-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.schedule-summary__facts dd {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-table);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.schedule-summary__next-name,
+.schedule-summary__next-date {
+  display: block;
+}
+
+.schedule-summary__next-date {
+  margin-top: 1px;
+  color: var(--color-neutral-700);
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-summary__context {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+}
+
+@media (max-width: 900px) {
+  .schedule-summary__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedule-summary__facts > div:nth-child(2n) {
+    border-inline-end: 0;
+  }
 }
 
 .gantt-treegrid-scrollport {
@@ -300,11 +391,10 @@
   width: 12%;
 }
 
-/* The % Done cell stacks a short "NN%" over a status word that wraps freely, so
-   it yields a point to the annotated Predecessors column. Its numeral clipping
-   is a container-overflow issue tracked separately; width alone cannot fix it. */
+/* The % Done cell reserves a nonshrinking "NN%" numeral. Its status word may
+   ellipsize inside the remaining width, so narrow panes never hide the percent. */
 .gantt-treegrid__progress-column {
-  width: 6%;
+  width: 8%;
 }
 
 /* Float keeps 15%; the stacked "Constraint / violated" fact needs it
@@ -315,7 +405,7 @@
 
 /* Date columns carry the widest facts; keep headroom for wide fallback fonts. */
 .gantt-treegrid__date-column {
-  width: 21%;
+  width: 20%;
 }
 
 /* Widened from 5% to seat the explicit per-link annotations ("T2 SS +120 min").
@@ -572,11 +662,26 @@
   display: inline-flex;
   flex-direction: column;
   align-items: flex-end;
+  min-width: 0;
+  max-width: 100%;
   gap: 1px;
+  font-family: var(--font-heading);
   font-variant-numeric: tabular-nums;
 }
 
+.gantt-treegrid td:has(.gantt-treegrid__progress) {
+  padding-inline: 0;
+}
+
+.gantt-treegrid__progress-numeral {
+  flex: none;
+}
+
 .gantt-treegrid__progress-status {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-neutral-700);
   font-size: var(--font-size-meta);
 }
