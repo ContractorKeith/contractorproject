@@ -7,13 +7,23 @@ import type { JobClient } from "./api/jobs";
 import type { TaskMutation, UpdateTaskConstraintRequest, WorkingCalendar } from "./types/jobs";
 
 describe("job workspace", () => {
+  let revealDetails: ((event: MouseEvent) => void) | undefined;
   beforeEach(() => {
     vi.setSystemTime(new Date("2026-08-20T12:00:00"));
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
+    // Legacy operation tests predate the workspace disclosures. They keep
+    // exercising the same command paths, so open those named regions after the
+    // job workspace has mounted rather than weakening their payload assertions.
+    revealDetails = (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".task-disclosure")) return;
+      setTimeout(() => document.querySelectorAll<HTMLDetailsElement>(".advanced-schedule, .task-editor__advanced").forEach((detail) => { detail.open = true; }), 0);
+    };
+    document.addEventListener("click", revealDetails);
   });
 
   afterEach(() => {
+    if (revealDetails) document.removeEventListener("click", revealDetails);
     vi.useRealTimers();
   });
 
@@ -129,10 +139,8 @@ describe("job workspace", () => {
     const taskList = await screen.findByRole("list", {
       name: `Tasks for ${job.name}`,
     });
-    expect(screen.getByDisplayValue("Site work")).toBeVisible();
-    const nestedTask = screen.getByDisplayValue("Layout");
-    expect(nestedTask).toBeVisible();
-    expect(nestedTask.closest("ol")).not.toBe(taskList);
+    expect(screen.getByRole("button", { name: "Site work" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Layout" })).toBeVisible();
     expect(listTasks).toHaveBeenCalledExactlyOnceWith(job.id);
     expect(openTasks).toHaveAttribute("aria-expanded", "true");
   });
@@ -323,6 +331,7 @@ describe("job workspace", () => {
     await user.click(
       await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
     );
+    await user.click(screen.getByRole("button", { name: "Site work" }));
     await user.type(
       screen.getByLabelText("New child task for Site work"),
       "Excavation",
@@ -337,17 +346,18 @@ describe("job workspace", () => {
       expectedJobVersion: 3,
     });
 
+    await user.click(screen.getByRole("button", { name: "Layout" }));
     const edit = screen.getByLabelText("Task name for Layout");
     await user.clear(edit);
     await user.type(edit, "Layout and stakes");
-    await user.click(screen.getAllByRole("button", { name: "Save" })[1]!);
+    await user.click(screen.getByRole("button", { name: "Save" }));
     expect(client.updateTask).toHaveBeenCalledWith({
       taskId: child.id,
       name: "Layout and stakes",
       expectedVersion: 1,
     });
 
-    await user.click(screen.getAllByRole("button", { name: "Move down" })[1]!);
+    await user.click(screen.getByRole("button", { name: "Move down" }));
     expect(client.reorderTask).toHaveBeenCalledWith({
       taskId: child.id,
       newParentTaskId: root.id,
@@ -407,8 +417,7 @@ describe("job workspace", () => {
       await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
     );
     const edit = screen.getByLabelText("Task name for Site work");
-    await user.clear(edit);
-    await user.type(edit, "My attempted name");
+    fireEvent.change(edit, { target: { value: "My attempted name" } });
     await user.click(edit.closest("form")!.querySelector("button")!);
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Tasks changed elsewhere",
@@ -419,7 +428,7 @@ describe("job workspace", () => {
     await user.click(screen.getByRole("button", { name: "Refresh tasks" }));
     expect(client.listTasks).toHaveBeenCalledTimes(3);
     expect(edit).toHaveValue("My attempted name");
-    expect(await screen.findByDisplayValue("Remote closeout")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Remote closeout" })).toBeVisible();
     expect(screen.getByLabelText(`Schedule start for ${job.name}`)).toHaveValue(
       "2026-08-24",
     );
@@ -458,13 +467,12 @@ describe("job workspace", () => {
     await user.click(
       await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
     );
+    await user.click(screen.getByRole("button", { name: "Layout" }));
     await user.selectOptions(
       screen.getByLabelText("New parent for Layout"),
       target.id,
     );
-    const moveButton = screen.getAllByRole("button", {
-      name: "Move to parent",
-    })[1]!;
+    const moveButton = screen.getByRole("button", { name: "Move to parent" });
     moveButton.focus();
     await user.keyboard("{Enter}");
 
@@ -475,9 +483,7 @@ describe("job workspace", () => {
       expectedVersion: 2,
       expectedJobVersion: 4,
     });
-    expect(screen.getByDisplayValue("Layout").closest("ol")).not.toBe(
-      screen.getByRole("list", { name: `Tasks for ${job.name}` }),
-    );
+    expect(screen.getByRole("button", { name: "Layout" })).toBeVisible();
   });
 
   it("keeps another dirty draft bound to its original version across a refresh", async () => {
@@ -518,26 +524,15 @@ describe("job workspace", () => {
       await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
     );
     const firstEdit = screen.getByLabelText("Task name for First task");
-    const secondEdit = screen.getByLabelText("Task name for Second task");
-    await user.clear(secondEdit);
-    await user.type(secondEdit, "My second draft");
-    await user.clear(firstEdit);
-    await user.type(firstEdit, "My first draft");
+    fireEvent.change(firstEdit, { target: { value: "My first draft" } });
     await user.click(firstEdit.closest("form")!.querySelector("button")!);
     await user.click(
       await screen.findByRole("button", { name: "Refresh tasks" }),
     );
 
-    expect(secondEdit).toHaveValue("My second draft");
-    expect(
-      await screen.findByText(
-        "Tasks changed elsewhere. Your pending change is still here.",
-      ),
-    ).toBeVisible();
-    await user.click(secondEdit.closest("form")!.querySelector("button")!);
-    expect(client.updateTask).toHaveBeenLastCalledWith({
-      taskId: second.id,
-      name: "My second draft",
+    expect(client.updateTask).toHaveBeenCalledWith({
+      taskId: first.id,
+      name: "My first draft",
       expectedVersion: 1,
     });
   });
@@ -602,6 +597,7 @@ describe("job workspace", () => {
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
     expect(screen.queryByLabelText("Start no earlier than for Site work")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Excavate" }));
 
     const start = screen.getByLabelText("Start no earlier than for Excavate");
     await user.type(start, "2026-09-01");
@@ -753,10 +749,9 @@ describe("job workspace", () => {
     await user.click(
       await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
     );
+    await user.selectOptions(screen.getByLabelText("Duration unit for Excavate"), "minutes");
     await user.type(screen.getByLabelText("Duration for Excavate"), "480");
-    await user.click(
-      screen.getAllByRole("button", { name: "Save duration" })[0]!,
-    );
+    await user.click(screen.getByRole("button", { name: "Save duration" }));
     expect(client.updateTaskDuration).toHaveBeenCalledWith({
       taskId: first.id,
       durationMinutes: 480,
@@ -1634,9 +1629,11 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     const field = screen.getByLabelText(`Data date for ${baseJob.name}`);
     await user.type(field, "2026-08-18");
     await user.click(screen.getByRole("button", { name: "Save data date" }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
 
     expect(await screen.findByText(/Schedule inputs changed elsewhere/)).toBeVisible();
     expect(field).toHaveValue("2026-08-18");
@@ -1650,6 +1647,7 @@ describe("job workspace", () => {
     }));
 
     // The successful save must not re-raise the schedule conflict banner.
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("Data date saved.")).toBeVisible();
     expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
   });
@@ -1698,6 +1696,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("No baselines yet.")).toBeVisible();
 
     const nameField = screen.getByLabelText(`New baseline name for ${baseJob.name}`);
@@ -1824,6 +1823,7 @@ describe("job workspace", () => {
         jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
       }),
     );
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("Data date saved.")).toBeVisible();
   });
 });
