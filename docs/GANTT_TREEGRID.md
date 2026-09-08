@@ -90,9 +90,14 @@ offscreen or empty result. Hiding details clamps an active diagnostic column to
 Finish while preserving the active task.
 
 The disclosure control has a 24-pixel target but is removed from the tab order
-because the active task cell owns keyboard collapse and expansion. The surface
-does not claim selection semantics; focus and future selection remain separate
-states.
+because the active task cell owns keyboard collapse and expansion. The grid
+exposes focus rather than `aria-selected`; the sibling editor can retain its
+prior task when its unsaved-draft guard rejects a switch.
+
+`initialActiveTaskId` optionally carries the already edited task into a newly
+mounted projection. After CSS row height is measured, the grid positions that
+row in the virtual viewport without taking document focus. This preserves the
+editor when saving the last missing duration first makes the schedule calculable.
 
 ## Focus-follow explanation panel
 
@@ -102,9 +107,9 @@ collapse-driven focus recovery (when a collapsed summary hides the focused
 child, the callback follows focus to the nearest visible ancestor). A projection
 reorder that keeps the focused task alive does not re-fire the callback (the id
 is unchanged); the panel refreshes instead through the app's row lookup against
-the new read model. At the component-contract level the callback passes `null`
-once on mount (the notify effect runs before the initial roving cell is set)
-and whenever filtering leaves no visible rows. A reload that
+the new read model. At the component-contract level the callback reports the
+initial active row (the supplied task when present, otherwise the first row),
+or `null` when filtering leaves no visible rows. A reload that
 drops the focused task recovers the roving cell to the first visible row, so
 the panel settles on a surviving task rather than a stale or empty state. The callback is held in a ref and
 the notify effect depends only on the focused task id, so an inline-lambda

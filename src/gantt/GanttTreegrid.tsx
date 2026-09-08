@@ -45,6 +45,8 @@ export interface GanttTreegridProps {
   todayDate?: string | undefined;
   /** The application starts compact; verification consumers can retain all facts. */
   initialDetailsVisible?: boolean;
+  /** Task already selected by a sibling editor when this projection first mounts. */
+  initialActiveTaskId?: string | null;
   /** Notified with the focused task id (null when none) so a sibling surface can
    * follow the roving cell — e.g. the schedule-explanation panel. */
   onActiveTaskChange?: (taskId: string | null) => void;
@@ -57,12 +59,14 @@ export function GanttTreegrid({
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
   todayDate,
   initialDetailsVisible = true,
+  initialActiveTaskId = null,
   onActiveTaskChange,
 }: GanttTreegridProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const rowHeightProbeRef = useRef<HTMLDivElement>(null);
   const cellRefs = useRef(new Map<string, HTMLTableCellElement>());
   const shouldRestoreFocusRef = useRef(false);
+  const initialScrollRowHeightRef = useRef<number | null>(null);
   const [rowHeight, setRowHeight] = useState(ROW_HEIGHT_FALLBACK);
   const [zoom, setZoom] = useState<GanttZoom>("week");
   const [zoomAnchor, setZoomAnchor] = useState<{
@@ -80,8 +84,13 @@ export function GanttTreegrid({
     [collapsedTaskIds, filter, readModel, search],
   );
   const visibleRows = presentation.rows;
+  const initialActiveRowIndex = initialActiveTaskId === null
+    ? -1
+    : visibleRows.findIndex((row) => row.taskId === initialActiveTaskId);
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(() =>
-    readModel.rows[0] ? { taskId: readModel.rows[0].taskId, columnIndex: 0 } : null,
+    initialActiveRowIndex >= 0
+      ? { taskId: visibleRows[initialActiveRowIndex]!.taskId, columnIndex: 0 }
+      : readModel.rows[0] ? { taskId: readModel.rows[0].taskId, columnIndex: 0 } : null,
   );
 
   useLayoutEffect(() => {
@@ -105,6 +114,7 @@ export function GanttTreegrid({
     getScrollElement: () => scrollRef.current,
     estimateSize: () => rowHeight,
     getItemKey: (index) => visibleRows[index]?.taskId ?? index,
+    initialOffset: Math.max(0, initialActiveRowIndex) * ROW_HEIGHT_FALLBACK,
     overscan: OVERSCAN,
     initialRect: { width: 1100, height: viewportHeight },
     observeElementRect: (_instance, callback) => {
@@ -115,6 +125,15 @@ export function GanttTreegrid({
       return () => undefined;
     },
   });
+
+  useLayoutEffect(() => {
+    if (initialActiveRowIndex < 0 || initialScrollRowHeightRef.current === rowHeight) return;
+    // The initial offset uses the 28px fallback before CSS is measured. Re-run
+    // positioning after measurement so an offscreen selected task receives the
+    // mounted roving tab stop without taking document focus.
+    rowVirtualizer.scrollToIndex(initialActiveRowIndex, { align: "auto" });
+    initialScrollRowHeightRef.current = rowHeight;
+  }, [initialActiveRowIndex, rowHeight, rowVirtualizer]);
   const virtualRows = rowVirtualizer.getVirtualItems();
   const activeCellIsMounted = virtualRows.some(
     (virtualRow) => visibleRows[virtualRow.index]?.taskId === activeCell?.taskId,

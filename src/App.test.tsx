@@ -456,8 +456,10 @@ describe("job workspace", () => {
     expect(client.listTasks).toHaveBeenCalledTimes(3);
     expect(edit).toHaveValue("My attempted name");
     expect(screen.getByRole("button", { name: "Remote closeout" })).toBeVisible();
-    expect(screen.getByLabelText(`Schedule start for ${job.name}`)).toHaveValue(
-      "2026-08-24",
+    await waitFor(() =>
+      expect(screen.getByLabelText(`Schedule start for ${job.name}`)).toHaveValue(
+        "2026-08-24",
+      ),
     );
   });
 

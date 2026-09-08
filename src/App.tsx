@@ -617,7 +617,7 @@ function TaskPanel({
         <summary>Schedule setup</summary>
         <ScheduleSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
       </details>
-      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} jobVersion={state.hierarchy.jobVersion} onTaskSelection={selectTask} onRetry={() => setScheduleReload((current) => current + 1)} /> : null}
+      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} jobVersion={state.hierarchy.jobVersion} initialActiveTaskId={selectedTaskId} onTaskSelection={selectTask} onRetry={() => setScheduleReload((current) => current + 1)} /> : null}
       <section className="task-workspace" aria-label={`Tasks for ${job.name}`}>
         {schedule.status !== "loaded" || schedule.readModel.rowCount === 0 ? (
           <div className="task-workspace__list">
@@ -652,7 +652,7 @@ function hierarchyVersion(state: TaskLoadState): number {
   return state.status === "loaded" ? state.hierarchy.jobVersion : 0;
 }
 
-function ScheduleProjection({ schedule, jobName, jobVersion, onTaskSelection, onRetry }: { schedule: ScheduleLoadState; jobName: string; jobVersion: number; onTaskSelection: (taskId: string) => void; onRetry: () => void }) {
+function ScheduleProjection({ schedule, jobName, jobVersion, initialActiveTaskId, onTaskSelection, onRetry }: { schedule: ScheduleLoadState; jobName: string; jobVersion: number; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void; onRetry: () => void }) {
   if (schedule.status === "loading") {
     return <p className="gantt-state" aria-live="polite">Loading schedule…</p>;
   }
@@ -665,12 +665,12 @@ function ScheduleProjection({ schedule, jobName, jobVersion, onTaskSelection, on
   if (schedule.readModel.rowCount === 0) {
     return <p className="gantt-state">No scheduled tasks yet.</p>;
   }
-  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} current={schedule.readModel.jobVersion === jobVersion} onTaskSelection={onTaskSelection} />;
+  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} current={schedule.readModel.jobVersion === jobVersion} initialActiveTaskId={initialActiveTaskId} onTaskSelection={onTaskSelection} />;
 }
 
 // Holds the focused-task state so the explanation panel follows the treegrid's
 // roving cell. React renders the Rust-provided explanation facts and derives none.
-function LoadedSchedule({ readModel, jobName, current, onTaskSelection }: { readModel: GanttReadModel; jobName: string; current: boolean; onTaskSelection: (taskId: string) => void }) {
+function LoadedSchedule({ readModel, jobName, current, initialActiveTaskId, onTaskSelection }: { readModel: GanttReadModel; jobName: string; current: boolean; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void }) {
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [todayDate] = useState(() => {
     const now = new Date();
@@ -694,6 +694,7 @@ function LoadedSchedule({ readModel, jobName, current, onTaskSelection }: { read
         ariaLabel={`Schedule for ${jobName}`}
         todayDate={todayDate}
         initialDetailsVisible={false}
+        initialActiveTaskId={initialActiveTaskId}
         viewportHeight={360}
         onActiveTaskChange={(taskId) => {
           setFocusedTaskId(taskId);

@@ -126,16 +126,17 @@ y=875). These are fixture measurements, not a claim about every job size.
 [After](review-evidence/workspace-after.png)
 
 Parent and independent reviews returned fixes for progress numerals, cramped
-names, lost selection after saves, unsaved draft handling, precise minute/unit
+names, lost selection after saves and when a schedule first becomes calculable,
+unsaved draft handling, precise minute/unit
 round trips, summary duration controls, startup guidance, duplicate schedule
 fetches, accessible labels/headings/contrast and stale exports. Each accepted
 fix received another review. Original command/persistence scenarios remain
 covered; the full-App browser fixture adds the new contractor workflows.
 
-TypeScript checking, the production web build, 96 Vitest tests and 32 Playwright
+TypeScript checking, the production web build, 97 Vitest tests and 32 Playwright
 browser tests pass on the integrated changes. The native Tauri build without
 bundling also passes. The 1,000-row performance gate passes with scroll p95
-15.7 ms, p99 18.2 ms, zero row drift and zero long tasks. An initial run during
+14.7 ms, p99 15.6 ms, zero row drift and zero long tasks. An initial run during
 other projects' CPU-heavy builds missed the unchanged 25 ms p95 threshold;
 independent review and an isolated rerun resolved that verification failure.
 GitHub's wider fallback font also exposed date headroom and percent glyph

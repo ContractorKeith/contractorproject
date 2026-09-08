@@ -67,6 +67,26 @@ describe("workspace state guards", () => {
     expect(await screen.findByRole("heading", { name: "Edit Inspection" })).toBeVisible();
   });
 
+  it("keeps the fallback-selected task when its first saved duration makes the Gantt computable", async () => {
+    const initial = hierarchy(1, [task("a", "Layout"), { ...task("b", "Inspection"), durationMinutes: null }]);
+    const computed = hierarchy(2, [task("a", "Layout", 2), { ...task("b", "Inspection", 2), durationMinutes: 60 }]);
+    const getSchedule = vi.fn()
+      .mockRejectedValueOnce({ kind: "validation", code: "summary_without_children", message: "summary task must have at least one child" })
+      .mockResolvedValue({ ...scheduled(), jobVersion: 2 });
+    const user = userEvent.setup();
+    render(<App client={client({ listTasks: vi.fn().mockResolvedValue(initial), getSchedule, updateTaskDuration: vi.fn().mockResolvedValue(computed) })} />);
+    await open(user);
+
+    await user.click(await screen.findByRole("button", { name: "Inspection" }));
+    expect(await screen.findByRole("heading", { name: "Edit Inspection" })).toBeVisible();
+    await user.type(screen.getByLabelText("Duration for Inspection"), "1");
+    await user.click(screen.getByRole("button", { name: "Save duration" }));
+
+    await screen.findByRole("treegrid", { name: "Schedule for Oak House" });
+    expect(screen.getByRole("heading", { name: "Edit Inspection" })).toBeVisible();
+    expect(screen.getByRole("gridcell", { name: /2 Inspection, WBS/ })).toHaveAttribute("tabindex", "0");
+  });
+
   it("keeps a typed draft mounted and disabled when refresh removes its task", async () => {
     const updateTask = vi.fn().mockRejectedValue({ kind: "version_conflict" });
     const listTasks = vi.fn().mockResolvedValueOnce(hierarchy()).mockResolvedValueOnce(hierarchy(1, [task("b", "Inspection")]));
