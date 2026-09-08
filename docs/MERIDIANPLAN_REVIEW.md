@@ -135,9 +135,12 @@ covered; the full-App browser fixture adds the new contractor workflows.
 TypeScript checking, the production web build, 96 Vitest tests and 32 Playwright
 browser tests pass on the integrated changes. The native Tauri build without
 bundling also passes. The 1,000-row performance gate passes with scroll p95
-15.6 ms, p99 19.3 ms, zero row drift and zero long tasks. An initial run during
+15.7 ms, p99 18.2 ms, zero row drift and zero long tasks. An initial run during
 other projects' CPU-heavy builds missed the unchanged 25 ms p95 threshold;
 independent review and an isolated rerun resolved that verification failure.
+GitHub's wider fallback font also exposed date headroom and percent glyph
+clipping at 760 pixels. The final CSS adds date content space and aligns
+progress inside its cell, preserving the column allocation and test thresholds.
 Rust formatting, Clippy with
 warnings denied, and all-target tests pass: 251 tests passed, one pre-existing
 performance test ignored. Browser fixtures

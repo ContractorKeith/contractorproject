@@ -471,6 +471,12 @@
   padding-inline: var(--space-1);
 }
 
+/* The narrow detailed pane needs two more pixels for wide fallback glyphs in
+   Start/Finish. Keep the column allocation (and therefore timeline width) fixed. */
+.gantt-treegrid td:has(.gantt-treegrid__date) {
+  padding-inline: calc(var(--space-1) - 1px);
+}
+
 .gantt-treegrid thead {
   position: sticky;
   z-index: 2;
@@ -513,7 +519,7 @@
 
 /* Hierarchy emphasis (heading family + weight) stays on the Name cell only. The
    date/number cells keep the body weight so a summary's Start/Finish facts hold
-   their >=5% width headroom at the 21% date columns (weight 600 was the widest
+   their >=5% width headroom at the 20% date columns (weight 600 was the widest
    instance and clipped the bar at the 460px minimum layout). */
 .gantt-treegrid__summary-row > th[role="rowheader"] {
   font-family: var(--font-heading);
@@ -693,11 +699,14 @@
 }
 
 .gantt-treegrid__progress {
-  display: inline-flex;
+  display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
+  box-sizing: border-box;
+  width: 100%;
   min-width: 0;
   max-width: 100%;
+  padding-inline-start: 1px;
   gap: 1px;
   font-family: var(--font-heading);
   font-variant-numeric: tabular-nums;
