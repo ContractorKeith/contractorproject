@@ -473,8 +473,8 @@
   padding-inline: var(--space-1);
 }
 
-/* The narrower date columns preserve their text space by using two pixels less
-   inline padding than other tight fact cells. Timeline width stays fixed. */
+/* The narrower date columns recover space through tighter inline padding, keeping
+   their facts readable while the timeline width stays fixed. */
 .gantt-treegrid td:has(.gantt-treegrid__date) {
   padding-inline: calc(var(--space-1) - 2px);
 }
