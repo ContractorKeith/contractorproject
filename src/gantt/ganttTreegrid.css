@@ -26,9 +26,10 @@
   padding-inline: var(--space-1);
 }
 .gantt-schedule--compact .gantt-treegrid td { font-size: 11px; }
-.gantt-schedule--compact .gantt-treegrid :is(th, td):is(:nth-child(5), :nth-child(6)) {
+.gantt-schedule--compact .gantt-treegrid :is(th, td):is(:nth-child(4), :nth-child(5), :nth-child(6)) {
   text-align: center;
 }
+.gantt-schedule--compact .gantt-treegrid__progress { align-items: center; }
 .gantt-schedule--compact .gantt-treegrid__task-copy {
   display: block;
   flex: 1;
