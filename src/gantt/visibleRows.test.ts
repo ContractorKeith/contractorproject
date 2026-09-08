@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import { GANTT_READ_MODEL_VERSION, type GanttReadModel, type GanttRow } from "../types/gantt";
-import { selectVisibleGanttRows } from "./visibleRows";
+import { selectPresentedGanttRows, selectVisibleGanttRows } from "./visibleRows";
 
 function row(
   taskId: string,
@@ -100,5 +100,43 @@ describe("Gantt visible-row projection", () => {
     const readModel = nestedReadModel();
 
     expect(selectVisibleGanttRows(readModel, new Set())).toEqual(readModel.rows);
+  });
+
+  it("keeps matching leaves with ancestor context and temporarily reveals them through collapse", () => {
+    const readModel = nestedReadModel();
+    const target = readModel.rows[2]!;
+    target.name = "Permit inspection";
+    target.progressStatus = "inProgress";
+
+    const presentation = selectPresentedGanttRows(
+      readModel,
+      new Set(["phase-1", "package-1"]),
+      "inProgress",
+      "permit",
+    );
+
+    expect(presentation.filtering).toBe(true);
+    expect(presentation.rows.map((item) => item.taskId)).toEqual([
+      "phase-1",
+      "package-1",
+      "task-1",
+    ]);
+    expect(presentation.rows.map((item) => item.logicalIndex)).toEqual([0, 1, 2]);
+  });
+
+  it("filters attention from unfinished leaves without counting summaries", () => {
+    const readModel = nestedReadModel();
+    readModel.rows[0]!.constraintViolated = true;
+    readModel.rows[2]!.totalFloatMinutes = -60;
+    readModel.rows[4]!.progressStatus = "completed";
+    readModel.rows[4]!.constraintViolated = true;
+
+    const presentation = selectPresentedGanttRows(readModel, new Set(), "attention", "");
+
+    expect(presentation.rows.map((item) => item.taskId)).toEqual([
+      "phase-1",
+      "package-1",
+      "task-1",
+    ]);
   });
 });

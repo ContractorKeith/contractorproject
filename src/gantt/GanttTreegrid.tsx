@@ -19,7 +19,10 @@ import type {
 } from "../types/gantt";
 import { formatInstant, formatSignedMinutes } from "./format";
 import { GANTT_ZOOMS, GanttTimeline, type GanttZoom } from "./GanttTimeline";
-import { selectVisibleGanttRows } from "./visibleRows";
+import {
+  selectPresentedGanttRows,
+  type GanttTaskFilter,
+} from "./visibleRows";
 import "./ganttTreegrid.css";
 
 const ROW_HEIGHT_FALLBACK = 28;
@@ -65,7 +68,13 @@ export function GanttTreegrid({
   } | null>(null);
   const [hoveredTaskId, setHoveredTaskId] = useState<string | null>(null);
   const [collapsedTaskIds, setCollapsedTaskIds] = useState<ReadonlySet<string>>(() => new Set<string>());
-  const visibleRows = useMemo(() => selectVisibleGanttRows(readModel, collapsedTaskIds), [collapsedTaskIds, readModel]);
+  const [filter, setFilter] = useState<GanttTaskFilter>("all");
+  const [search, setSearch] = useState("");
+  const presentation = useMemo(
+    () => selectPresentedGanttRows(readModel, collapsedTaskIds, filter, search),
+    [collapsedTaskIds, filter, readModel, search],
+  );
+  const visibleRows = presentation.rows;
   const [activeCell, setActiveCell] = useState<ActiveCell | null>(() =>
     readModel.rows[0] ? { taskId: readModel.rows[0].taskId, columnIndex: 0 } : null,
   );
@@ -241,6 +250,7 @@ export function GanttTreegrid({
     row: GanttRow,
     rowIndex: number,
     columnIndex: number,
+    hierarchyReadOnly = false,
   ) {
     let nextRowIndex = rowIndex;
     let nextColumnIndex = columnIndex;
@@ -267,7 +277,7 @@ export function GanttTreegrid({
         nextColumnIndex = columns.length - 1;
         break;
       case "ArrowRight":
-        if (columnIndex === TREE_COLUMN_INDEX && row.hasChildren && collapsedTaskIds.has(row.taskId)) {
+        if (!hierarchyReadOnly && columnIndex === TREE_COLUMN_INDEX && row.hasChildren && collapsedTaskIds.has(row.taskId)) {
           toggleCollapsed(row);
           event.preventDefault();
           return;
@@ -275,7 +285,7 @@ export function GanttTreegrid({
         nextColumnIndex += 1;
         break;
       case "ArrowLeft":
-        if (columnIndex === TREE_COLUMN_INDEX && row.hasChildren && !collapsedTaskIds.has(row.taskId)) {
+        if (!hierarchyReadOnly && columnIndex === TREE_COLUMN_INDEX && row.hasChildren && !collapsedTaskIds.has(row.taskId)) {
           toggleCollapsed(row);
           event.preventDefault();
           return;
@@ -289,7 +299,7 @@ export function GanttTreegrid({
         break;
       case "Enter":
       case " ":
-        if (columnIndex === TREE_COLUMN_INDEX && row.hasChildren) {
+        if (!hierarchyReadOnly && columnIndex === TREE_COLUMN_INDEX && row.hasChildren) {
           toggleCollapsed(row);
           event.preventDefault();
         }
@@ -327,14 +337,58 @@ export function GanttTreegrid({
     setZoom(nextZoom);
   }
 
+  function resetPresentation() {
+    setFilter("all");
+    setSearch("");
+  }
+
   return (
     <section className="gantt-schedule">
-      <div className="gantt-schedule__toolbar" role="group" aria-label="Timeline zoom">
-        {GANTT_ZOOMS.map((option) => (
-          <button type="button" key={option} aria-pressed={zoom === option} onClick={() => changeZoom(option)}>
-            {option[0]!.toUpperCase() + option.slice(1)}
-          </button>
-        ))}
+      <div className="gantt-schedule__toolbar">
+        <div className="gantt-schedule__filters" role="group" aria-label="Schedule filters">
+          <label className="gantt-schedule__search">
+            <span className="visually-hidden">Search tasks or work breakdown</span>
+            <input
+              type="search"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              placeholder="Search tasks or WBS"
+              aria-label="Search tasks or WBS"
+            />
+          </label>
+          {(
+            [
+              ["all", "All work"],
+              ["attention", "Needs attention"],
+              ["inProgress", "In progress"],
+              ["completed", "Completed"],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              type="button"
+              key={value}
+              aria-pressed={filter === value}
+              onClick={() => setFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
+          {presentation.filtering ? (
+            <button type="button" className="gantt-schedule__reset" onClick={resetPresentation}>
+              Reset
+            </button>
+          ) : null}
+          <span className="gantt-schedule__result-count" aria-live="polite">
+            {presentation.matchCount === 1 ? "1 result" : `${presentation.matchCount} results`}
+          </span>
+        </div>
+        <div className="gantt-schedule__zoom" role="group" aria-label="Timeline zoom">
+          {GANTT_ZOOMS.map((option) => (
+            <button type="button" key={option} aria-pressed={zoom === option} onClick={() => changeZoom(option)}>
+              {option[0]!.toUpperCase() + option.slice(1)}
+            </button>
+          ))}
+        </div>
       </div>
       <div
         className="gantt-treegrid-scrollport"
@@ -373,7 +427,9 @@ export function GanttTreegrid({
               aria-colcount={columns.length}
             >
               {visibleRows.length === 0 ? (
-                <caption className="gantt-treegrid__empty">No scheduled tasks</caption>
+                <caption className="gantt-treegrid__empty">
+                  {presentation.filtering ? "No matching tasks" : "No scheduled tasks"}
+                </caption>
               ) : null}
               <colgroup>
                 <col className="gantt-treegrid__wbs-column" />
@@ -404,7 +460,8 @@ export function GanttTreegrid({
                       key={ganttRow.taskId}
                       row={ganttRow}
                       visibleIndex={virtualRow.index}
-                      collapsed={collapsedTaskIds.has(ganttRow.taskId)}
+                      collapsed={presentation.filtering ? false : collapsedTaskIds.has(ganttRow.taskId)}
+                      hierarchyReadOnly={presentation.filtering}
                       tabStopCell={tabStopCell}
                       registerCell={(key, element) => {
                         if (element) cellRefs.current.set(key, element);
@@ -444,11 +501,18 @@ interface TaskRowProps {
   row: GanttRow;
   visibleIndex: number;
   collapsed: boolean;
+  hierarchyReadOnly: boolean;
   tabStopCell: ActiveCell | null;
   registerCell: (key: string, element: HTMLTableCellElement | null) => void;
   onActivate: (event: MouseEvent<HTMLTableCellElement>, row: GanttRow, columnIndex: number) => void;
   onFocusCell: (row: GanttRow, columnIndex: number) => void;
-  onKeyDown: (event: KeyboardEvent<HTMLTableCellElement>, row: GanttRow, rowIndex: number, columnIndex: number) => void;
+  onKeyDown: (
+    event: KeyboardEvent<HTMLTableCellElement>,
+    row: GanttRow,
+    rowIndex: number,
+    columnIndex: number,
+    hierarchyReadOnly: boolean,
+  ) => void;
   onToggle: (row: GanttRow) => void;
   onHover: (taskId: string | null) => void;
 }
@@ -457,6 +521,7 @@ function TaskRow({
   row,
   visibleIndex,
   collapsed,
+  hierarchyReadOnly,
   tabStopCell,
   registerCell,
   onActivate,
@@ -470,7 +535,7 @@ function TaskRow({
   const cells = [
     row.wbs,
     <span className="gantt-treegrid__task" style={{ "--gantt-depth": row.depth } as CSSProperties} key="task">
-      {row.hasChildren ? (
+      {row.hasChildren && !hierarchyReadOnly ? (
         <button
           type="button"
           className="gantt-treegrid__disclosure"
@@ -551,7 +616,7 @@ function TaskRow({
             ref={(element) => registerCell(cellKey({ taskId: row.taskId, columnIndex }), element)}
             onClick={(event) => onActivate(event, row, columnIndex)}
             onFocus={() => onFocusCell(row, columnIndex)}
-            onKeyDown={(event) => onKeyDown(event, row, visibleIndex, columnIndex)}
+            onKeyDown={(event) => onKeyDown(event, row, visibleIndex, columnIndex, hierarchyReadOnly)}
           >
             {content}
           </Cell>
@@ -611,7 +676,7 @@ function ProgressValue({ row }: { row: GanttRow }) {
       className={`gantt-treegrid__progress gantt-treegrid__progress--${row.progressStatus}`}
       data-testid={`progress-${row.taskId}`}
     >
-      <span>{`${row.percentComplete}%`}</span>
+      <span className="gantt-treegrid__progress-numeral">{`${row.percentComplete}%`}</span>
       <span className="gantt-treegrid__progress-status">{progressStatusText(row.progressStatus)}</span>
     </span>
   );
