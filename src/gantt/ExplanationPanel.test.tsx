@@ -102,6 +102,20 @@ describe("ExplanationPanel", () => {
     expect(screen.getByText("Finish limited by successor C FS +480 min")).toBeInTheDocument();
   });
 
+  it("uses known task names and preserves unknown relationship identities", () => {
+    render(<ExplanationPanel taskNames={new Map([["A", "Inspection"]])} row={row("Backfill", "b", {
+      kind: "scheduled", taskId: "b",
+      primaryDriver: { kind: "predecessor", taskId: "A", dependencyType: "FS", lagMinutes: 60 },
+      otherBindingDrivers: [], startedActualStart: null, calendarGap: null,
+      totalFloatMinutes: 0, critical: true,
+      lateFinishLimit: { kind: "successor", taskId: "C", dependencyType: "FF", lagMinutes: 0 },
+    })} />);
+    expect(screen.getByRole("heading")).toHaveTextContent("Backfill");
+    expect(screen.getByRole("heading")).not.toHaveTextContent("· b");
+    expect(screen.getByText("Driver After Inspection FS +60 min")).toBeInTheDocument();
+    expect(screen.getByText("Finish limited by successor C FF")).toBeInTheDocument();
+  });
+
   it("appends the critical marker to negative float and names the deadline limit", () => {
     render(
       <ExplanationPanel

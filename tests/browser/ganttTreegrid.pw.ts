@@ -45,6 +45,34 @@ test("virtualizes 1,000 logical rows without accessibility violations", async ({
   expect(results.violations).toEqual([]);
 });
 
+test("compact columns keep names readable and preserve the active task when details hide", async ({ page }) => {
+  const task = page.locator('tr[data-task-id="phase-1-task-1"]');
+  await task.getByRole("gridcell").last().click();
+  await page.getByRole("button", { name: "Hide schedule details" }).click();
+  await expect(page.getByRole("treegrid")).toHaveAttribute("aria-colcount", "6");
+  await expect(task.locator('[tabindex="0"]')).toHaveCount(1);
+
+  for (const width of [1440, 760]) {
+    await page.setViewportSize({ width, height: 900 });
+    const name = task.locator(".gantt-treegrid__task-copy > span").first();
+    await expect(name).toHaveText("Activity 1");
+    const fit = await name.evaluate((element) => ({ width: element.clientWidth, textWidth: element.scrollWidth }));
+    expect(fit.width).toBeGreaterThanOrEqual(90);
+    expect(fit.textWidth).toBeLessThanOrEqual(fit.width);
+    const heights = await task.evaluate((row) => ({
+      actual: row.getBoundingClientRect().height,
+      configured: parseFloat(getComputedStyle(row).getPropertyValue("--row-h")),
+    }));
+    expect(heights.actual).toBeCloseTo(heights.configured, 1);
+  }
+  await task.locator('[tabindex="0"]').focus();
+  await page.keyboard.press("End");
+  await expect(task.getByRole("gridcell").last()).toBeFocused();
+  await page.getByRole("button", { name: "Show schedule details" }).click();
+  await expect(page.getByRole("treegrid")).toHaveAttribute("aria-colcount", "8");
+  await expect(task.locator('[tabindex="0"]')).toHaveCount(1);
+});
+
 test("announces visible constraint values and direct violations without color-only state", async ({ page }) => {
   await page.locator(".gantt-schedule").evaluate((schedule) => {
     (schedule as HTMLElement).style.setProperty("--font-heading", "system-ui, sans-serif");
@@ -224,6 +252,98 @@ test("announces progress facts, draws the data-date marker, and stays accessible
 
   const results = await new AxeBuilder({ page }).include(".gantt-treegrid-scrollport").analyze();
   expect(results.violations).toEqual([]);
+});
+
+test("keeps the complete percent numeral visible at supported narrow layouts", async ({ page }) => {
+  await page.locator(".gantt-schedule").evaluate((schedule) => {
+    (schedule as HTMLElement).style.setProperty("--font-heading", "system-ui, sans-serif");
+  });
+  const progress = page.getByTestId("progress-phase-1-task-1");
+  const numeral = progress.locator(".gantt-treegrid__progress-numeral");
+
+  for (const width of [1100, 760]) {
+    await page.setViewportSize({ width, height: 700 });
+    if (width === 760) {
+      await page.getByTestId("gantt-scrollport").evaluate((scrollport) => {
+        const schedule = scrollport.closest<HTMLElement>(".gantt-schedule");
+        if (!schedule) throw new Error("Schedule surface is missing");
+        schedule.style.width = "724px";
+      });
+    }
+    await expect(numeral).toHaveText("100%");
+    const fit = await numeral.evaluate((element) => {
+      const cell = element.closest<HTMLElement>("td");
+      if (!cell) throw new Error("Progress cell is missing");
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      const rect = range.getBoundingClientRect();
+      const cellRect = cell.getBoundingClientRect();
+      return {
+        textWidth: rect.width,
+        progressWidth: element.getBoundingClientRect().width,
+        cellLeft: cellRect.left,
+        cellRight: cellRect.right,
+        textLeft: rect.left,
+        textRight: rect.right,
+      };
+    });
+    expect(fit.progressWidth, `numeral width @${width}`).toBeGreaterThanOrEqual(fit.textWidth);
+    expect(fit.textLeft, `numeral left fit @${width}`).toBeGreaterThanOrEqual(fit.cellLeft);
+    expect(fit.textRight, `numeral right fit @${width}`).toBeLessThanOrEqual(fit.cellRight);
+  }
+});
+
+test("filters with ancestor context, preserves saved collapse, and keeps keyboard focus valid", async ({ page }) => {
+  const phase = page.getByRole("rowheader", { name: /1 Phase 1, task/ });
+  await phase.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator('tr[data-task-id="phase-1-task-50"]')).toHaveCount(0);
+
+  const search = page.getByRole("searchbox", { name: "Search tasks or WBS" });
+  await search.fill("1.50");
+  await expect(page.locator('tr[data-task-id="phase-1"]')).toBeVisible();
+  await expect(page.locator('tr[data-task-id="phase-1"]')).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator('tr[data-task-id="phase-1-task-50"]')).toBeVisible();
+  await expect(page.getByText("1 result", { exact: true })).toBeVisible();
+  await expect(page.getByRole("button", { name: /Collapse Phase 1|Expand Phase 1/ })).toHaveCount(0);
+
+  await phase.focus();
+  await page.keyboard.press("Space");
+  await expect(page.locator('tr[data-task-id="phase-1-task-50"]')).toBeVisible();
+  await page.keyboard.press("ArrowDown");
+  await expect(page.getByRole("rowheader", { name: /1\.50 Activity 50, task/ })).toBeFocused();
+
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.locator('tr[data-task-id="phase-1"]')).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator('tr[data-task-id="phase-1-task-50"]')).toHaveCount(0);
+
+  await search.fill("does not exist");
+  await expect(page.getByText("No matching tasks", { exact: true })).toBeVisible();
+  await expect(page.getByText("0 results", { exact: true })).toBeVisible();
+});
+
+test("recovers virtualization and focus when filtering an offscreen task then no results", async ({ page }) => {
+  const scrollport = page.getByTestId("gantt-scrollport");
+  await scrollport.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+  });
+  await expect(page.locator('tr[data-task-id="phase-10-task-99"]')).toBeVisible();
+
+  const search = page.getByRole("searchbox", { name: "Search tasks or WBS" });
+  await search.fill("10.99");
+  await expect(page.getByText("1 result", { exact: true })).toBeVisible();
+  const target = page.getByRole("rowheader", { name: /10\.99 Activity 99, task/ });
+  await expect(target).toBeVisible();
+  await target.focus();
+  await expect(target).toBeFocused();
+  expect(await page.locator("tbody tr[data-task-id]").count()).toBeLessThan(10);
+
+  await search.fill("not-a-task");
+  await expect(page.getByText("No matching tasks", { exact: true })).toBeVisible();
+  await expect(page.locator('.gantt-treegrid [role="rowheader"][tabindex="0"], .gantt-treegrid [role="gridcell"][tabindex="0"]')).toHaveCount(0);
+
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.locator('.gantt-treegrid [role="rowheader"][tabindex="0"], .gantt-treegrid [role="gridcell"][tabindex="0"]')).toHaveCount(1);
 });
 
 test("shades non-working time and distinguishes calendar exceptions", async ({ page }) => {

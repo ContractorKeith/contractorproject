@@ -9,14 +9,60 @@
   --row-h-compact: 60px;
 }
 
+/* Everyday work keeps names legible. Diagnostics and baseline numbers remain
+   one toggle away; both presentations use the same rows and timeline facts. */
+.gantt-schedule--compact {
+  --row-h: 44px;
+  --row-h-compact: 44px;
+  --gantt-wbs-width: clamp(500px, 55vw, 760px);
+}
+
+.gantt-schedule--compact .gantt-treegrid__wbs-column { width: 8%; }
+.gantt-schedule--compact .gantt-treegrid__name-column { width: 32%; }
+.gantt-schedule--compact .gantt-treegrid__duration-column { width: 11%; }
+.gantt-schedule--compact .gantt-treegrid__progress-column { width: 13%; }
+.gantt-schedule--compact .gantt-treegrid__date-column { width: 18%; }
+.gantt-schedule--compact .gantt-treegrid :is(th, td) {
+  padding-inline: var(--space-1);
+}
+.gantt-schedule--compact .gantt-treegrid td { font-size: 11px; }
+.gantt-schedule--compact .gantt-treegrid :is(th, td):is(:nth-child(4), :nth-child(5), :nth-child(6)) {
+  text-align: center;
+}
+.gantt-schedule--compact .gantt-treegrid__progress { align-items: center; }
+.gantt-schedule--compact .gantt-treegrid__task-copy {
+  display: block;
+  flex: 1;
+  overflow: hidden;
+}
+.gantt-schedule--compact .gantt-treegrid__task-copy > span:first-child {
+  display: block;
+  font-size: var(--font-size-table);
+}
+.gantt-schedule--compact .gantt-treegrid__states {
+  display: block;
+  font-size: var(--font-size-meta);
+}
+
 .gantt-schedule__toolbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: var(--space-1);
   padding-block-end: var(--space-2);
 }
 
-.gantt-schedule__toolbar button {
+.gantt-schedule__filters,
+.gantt-schedule__zoom {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+}
+
+.gantt-schedule__toolbar button,
+.gantt-schedule__search input {
   min-height: var(--control-height-small);
   padding: 0 var(--space-3);
   color: var(--color-text);
@@ -29,6 +75,86 @@
   color: var(--color-on-action);
   background: var(--color-action);
   border-color: var(--color-action);
+}
+
+.gantt-schedule__search input {
+  width: min(18rem, 45vw);
+  background: var(--color-bg);
+}
+
+.gantt-schedule__result-count {
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+  font-variant-numeric: tabular-nums;
+}
+
+.gantt-schedule__reset {
+  color: var(--color-neutral-700) !important;
+}
+
+.schedule-summary {
+  margin-block-end: var(--space-3);
+  border-block: var(--border-hairline) solid var(--color-divider);
+}
+
+.schedule-summary__facts {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  margin: 0;
+}
+
+.schedule-summary__facts > div {
+  min-width: 0;
+  padding: var(--space-2) var(--space-3);
+  border-inline-end: var(--border-hairline) solid var(--color-divider);
+}
+
+.schedule-summary__facts > div:last-child {
+  border-inline-end: 0;
+}
+
+.schedule-summary__facts dt {
+  color: var(--color-neutral-700);
+  font-family: var(--font-heading);
+  font-size: var(--font-size-meta);
+  font-weight: var(--font-heading-weight);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.schedule-summary__facts dd {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-table);
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+.schedule-summary__next-name,
+.schedule-summary__next-date {
+  display: block;
+}
+
+.schedule-summary__next-date {
+  margin-top: 1px;
+  color: var(--color-neutral-700);
+  font-variant-numeric: tabular-nums;
+}
+
+.schedule-summary__context {
+  margin: 0;
+  padding: var(--space-1) var(--space-3);
+  color: var(--color-neutral-700);
+  font-size: var(--font-size-meta);
+}
+
+@media (max-width: 900px) {
+  .schedule-summary__facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .schedule-summary__facts > div:nth-child(2n) {
+    border-inline-end: 0;
+  }
 }
 
 .gantt-treegrid-scrollport {
@@ -300,11 +426,11 @@
   width: 12%;
 }
 
-/* The % Done cell stacks a short "NN%" over a status word that wraps freely, so
-   it yields a point to the annotated Predecessors column. Its numeral clipping
-   is a container-overflow issue tracked separately; width alone cannot fix it. */
+/* The % Done cell reserves a nonshrinking "NN%" numeral, including clearance
+   for wider Linux fallback fonts. Its status word may ellipsize inside the
+   remaining width, so narrow panes never hide the percent. */
 .gantt-treegrid__progress-column {
-  width: 6%;
+  width: 9%;
 }
 
 /* Float keeps 15%; the stacked "Constraint / violated" fact needs it
@@ -315,7 +441,7 @@
 
 /* Date columns carry the widest facts; keep headroom for wide fallback fonts. */
 .gantt-treegrid__date-column {
-  width: 21%;
+  width: 19.5%;
 }
 
 /* Widened from 5% to seat the explicit per-link annotations ("T2 SS +120 min").
@@ -345,6 +471,12 @@
 .gantt-treegrid td:has(.gantt-treegrid__predecessors),
 .gantt-treegrid :is(th, td):first-child {
   padding-inline: var(--space-1);
+}
+
+/* The narrower date columns recover space through tighter inline padding, keeping
+   their facts readable while the timeline width stays fixed. */
+.gantt-treegrid td:has(.gantt-treegrid__date) {
+  padding-inline: calc(var(--space-1) - 2px);
 }
 
 .gantt-treegrid thead {
@@ -389,7 +521,7 @@
 
 /* Hierarchy emphasis (heading family + weight) stays on the Name cell only. The
    date/number cells keep the body weight so a summary's Start/Finish facts hold
-   their >=5% width headroom at the 21% date columns (weight 600 was the widest
+   their >=5% width headroom at the 19.5% date columns (weight 600 was the widest
    instance and clipped the bar at the 460px minimum layout). */
 .gantt-treegrid__summary-row > th[role="rowheader"] {
   font-family: var(--font-heading);
@@ -569,14 +701,32 @@
 }
 
 .gantt-treegrid__progress {
-  display: inline-flex;
+  display: flex;
   flex-direction: column;
-  align-items: flex-end;
+  align-items: flex-start;
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  padding-inline-start: 1px;
   gap: 1px;
+  font-family: var(--font-heading);
   font-variant-numeric: tabular-nums;
 }
 
+.gantt-treegrid td:has(.gantt-treegrid__progress) {
+  padding-inline: 0;
+}
+
+.gantt-treegrid__progress-numeral {
+  flex: none;
+}
+
 .gantt-treegrid__progress-status {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--color-neutral-700);
   font-size: var(--font-size-meta);
 }

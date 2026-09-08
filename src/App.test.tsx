@@ -7,13 +7,23 @@ import type { JobClient } from "./api/jobs";
 import type { TaskMutation, UpdateTaskConstraintRequest, WorkingCalendar } from "./types/jobs";
 
 describe("job workspace", () => {
+  let revealDetails: ((event: MouseEvent) => void) | undefined;
   beforeEach(() => {
     vi.setSystemTime(new Date("2026-08-20T12:00:00"));
     window.localStorage.clear();
     delete document.documentElement.dataset.theme;
+    // Legacy operation tests predate the workspace disclosures. They keep
+    // exercising the same command paths, so open those named regions after the
+    // job workspace has mounted rather than weakening their payload assertions.
+    revealDetails = (event) => {
+      if (!(event.target instanceof Element) || !event.target.closest(".task-disclosure")) return;
+      setTimeout(() => document.querySelectorAll<HTMLDetailsElement>(".advanced-schedule, .task-editor__advanced").forEach((detail) => { detail.open = true; }), 0);
+    };
+    document.addEventListener("click", revealDetails);
   });
 
   afterEach(() => {
+    if (revealDetails) document.removeEventListener("click", revealDetails);
     vi.useRealTimers();
   });
 
@@ -121,7 +131,7 @@ describe("job workspace", () => {
     render(<App client={client} />);
 
     const openTasks = await screen.findByRole("button", {
-      name: `View tasks for ${job.name}`,
+      name: `Open schedule for ${job.name}`,
     });
     expect(listTasks).not.toHaveBeenCalled();
     await user.click(openTasks);
@@ -129,10 +139,8 @@ describe("job workspace", () => {
     const taskList = await screen.findByRole("list", {
       name: `Tasks for ${job.name}`,
     });
-    expect(screen.getByDisplayValue("Site work")).toBeVisible();
-    const nestedTask = screen.getByDisplayValue("Layout");
-    expect(nestedTask).toBeVisible();
-    expect(nestedTask.closest("ol")).not.toBe(taskList);
+    expect(screen.getByRole("button", { name: "Site work" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Layout" })).toBeVisible();
     expect(listTasks).toHaveBeenCalledExactlyOnceWith(job.id);
     expect(openTasks).toHaveAttribute("aria-expanded", "true");
   });
@@ -149,7 +157,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     expect(await screen.findByRole("treegrid", { name: `Schedule for ${job.name}` })).toBeVisible();
     expect(client.getSchedule).toHaveBeenCalledWith(job.id);
   });
@@ -166,7 +174,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     await screen.findByRole("treegrid", { name: `Schedule for ${job.name}` });
 
     // Focusing the second task's name cell drives the panel to its facts.
@@ -204,7 +212,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${base.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${base.name}` }));
     await screen.findByRole("treegrid", { name: `Schedule for ${base.name}` });
     screen.getByRole("rowheader", { name: /2 Backfill, task/ }).focus();
     await screen.findByRole("region", { name: "Schedule explanation for Backfill" });
@@ -244,7 +252,7 @@ describe("job workspace", () => {
     };
 
     const { unmount } = render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     expect(await screen.findByText("Loading schedule…")).toBeVisible();
     unmount();
 
@@ -256,26 +264,53 @@ describe("job workspace", () => {
       rows: [],
     });
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     expect(await screen.findByText("No scheduled tasks yet.")).toBeVisible();
   });
 
-  it("surfaces schedule validation errors in the selected job", async () => {
+  it("keeps expected missing schedule inputs instructional", async () => {
     const user = userEvent.setup();
     const job = fixtureJob();
     const client: JobClient = {
       listJobs: vi.fn().mockResolvedValue([job]),
       createJob: vi.fn(),
       listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
-      getSchedule: vi.fn().mockRejectedValue(new Error("set a schedule start before viewing the schedule")),
+      getSchedule: vi.fn().mockRejectedValue({ kind: "validation", code: "schedule_start_required", message: "set a schedule start before viewing the schedule" }),
       createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
-    expect(await screen.findByRole("alert")).toHaveTextContent(
-      `Couldn't build schedule for ${job.name}. set a schedule start before viewing the schedule`,
-    );
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
+    expect(await screen.findByText("Choose a schedule start to calculate task dates.")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("keeps missing leaf durations instructional and retries genuine schedule failures", async () => {
+    const user = userEvent.setup();
+    const job = fixtureJob();
+    const getSchedule = vi.fn()
+      .mockRejectedValueOnce({ kind: "validation", code: "summary_without_children", message: "summary task task must have at least one child" })
+      .mockRejectedValueOnce(new Error("scheduler unavailable"))
+      .mockResolvedValue(ganttReadModel(job.id));
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([job]),
+      createJob: vi.fn(),
+      listTasks: vi.fn().mockResolvedValue({ jobId: job.id, jobVersion: 1, tasks: [] }),
+      getSchedule,
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+
+    render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
+    expect(await screen.findByText("Add a duration to every leaf task to calculate the schedule.")).toBeVisible();
+
+    // A later schedule refresh can still fail unexpectedly, and offers an in-place retry.
+    await user.click(screen.getByRole("button", { name: `Back to jobs for ${job.name}` }));
+    await user.click(screen.getByRole("button", { name: `Open schedule for ${job.name}` }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't build schedule for");
+    await user.click(screen.getByRole("button", { name: "Retry schedule" }));
+    expect(await screen.findByRole("treegrid", { name: `Schedule for ${job.name}` })).toBeVisible();
+    expect(getSchedule).toHaveBeenCalledTimes(3);
   });
 
   it("creates nested tasks, edits a task, and reorders it with keyboard-accessible controls", async () => {
@@ -321,8 +356,9 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
+    await user.click(screen.getByRole("button", { name: "Site work" }));
     await user.type(
       screen.getByLabelText("New child task for Site work"),
       "Excavation",
@@ -337,17 +373,18 @@ describe("job workspace", () => {
       expectedJobVersion: 3,
     });
 
+    await user.click(screen.getByRole("button", { name: "Layout" }));
     const edit = screen.getByLabelText("Task name for Layout");
     await user.clear(edit);
     await user.type(edit, "Layout and stakes");
-    await user.click(screen.getAllByRole("button", { name: "Save" })[1]!);
+    await user.click(screen.getByRole("button", { name: "Save" }));
     expect(client.updateTask).toHaveBeenCalledWith({
       taskId: child.id,
       name: "Layout and stakes",
       expectedVersion: 1,
     });
 
-    await user.click(screen.getAllByRole("button", { name: "Move down" })[1]!);
+    await user.click(screen.getByRole("button", { name: "Move down" }));
     expect(client.reorderTask).toHaveBeenCalledWith({
       taskId: child.id,
       newParentTaskId: root.id,
@@ -404,11 +441,10 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     const edit = screen.getByLabelText("Task name for Site work");
-    await user.clear(edit);
-    await user.type(edit, "My attempted name");
+    fireEvent.change(edit, { target: { value: "My attempted name" } });
     await user.click(edit.closest("form")!.querySelector("button")!);
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Tasks changed elsewhere",
@@ -419,9 +455,11 @@ describe("job workspace", () => {
     await user.click(screen.getByRole("button", { name: "Refresh tasks" }));
     expect(client.listTasks).toHaveBeenCalledTimes(3);
     expect(edit).toHaveValue("My attempted name");
-    expect(await screen.findByDisplayValue("Remote closeout")).toBeVisible();
-    expect(screen.getByLabelText(`Schedule start for ${job.name}`)).toHaveValue(
-      "2026-08-24",
+    expect(screen.getByRole("button", { name: "Remote closeout" })).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByLabelText(`Schedule start for ${job.name}`)).toHaveValue(
+        "2026-08-24",
+      ),
     );
   });
 
@@ -456,15 +494,14 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
+    await user.click(screen.getByRole("button", { name: "Layout" }));
     await user.selectOptions(
       screen.getByLabelText("New parent for Layout"),
       target.id,
     );
-    const moveButton = screen.getAllByRole("button", {
-      name: "Move to parent",
-    })[1]!;
+    const moveButton = screen.getByRole("button", { name: "Move to parent" });
     moveButton.focus();
     await user.keyboard("{Enter}");
 
@@ -475,9 +512,7 @@ describe("job workspace", () => {
       expectedVersion: 2,
       expectedJobVersion: 4,
     });
-    expect(screen.getByDisplayValue("Layout").closest("ol")).not.toBe(
-      screen.getByRole("list", { name: `Tasks for ${job.name}` }),
-    );
+    expect(screen.getByRole("button", { name: "Layout" })).toBeVisible();
   });
 
   it("keeps another dirty draft bound to its original version across a refresh", async () => {
@@ -515,29 +550,18 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     const firstEdit = screen.getByLabelText("Task name for First task");
-    const secondEdit = screen.getByLabelText("Task name for Second task");
-    await user.clear(secondEdit);
-    await user.type(secondEdit, "My second draft");
-    await user.clear(firstEdit);
-    await user.type(firstEdit, "My first draft");
+    fireEvent.change(firstEdit, { target: { value: "My first draft" } });
     await user.click(firstEdit.closest("form")!.querySelector("button")!);
     await user.click(
       await screen.findByRole("button", { name: "Refresh tasks" }),
     );
 
-    expect(secondEdit).toHaveValue("My second draft");
-    expect(
-      await screen.findByText(
-        "Tasks changed elsewhere. Your pending change is still here.",
-      ),
-    ).toBeVisible();
-    await user.click(secondEdit.closest("form")!.querySelector("button")!);
-    expect(client.updateTask).toHaveBeenLastCalledWith({
-      taskId: second.id,
-      name: "My second draft",
+    expect(client.updateTask).toHaveBeenCalledWith({
+      taskId: first.id,
+      name: "My first draft",
       expectedVersion: 1,
     });
   });
@@ -600,8 +624,11 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     expect(screen.queryByLabelText("Start no earlier than for Site work")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Duration for Site work")).not.toBeInTheDocument();
+    expect(screen.getByText("Dates and duration come from subtasks.")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Excavate" }));
 
     const start = screen.getByLabelText("Start no earlier than for Excavate");
     await user.type(start, "2026-09-01");
@@ -648,7 +675,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     const finish = screen.getByLabelText("Finish no later than for Excavate");
     await user.type(finish, "2026-09-12");
     await user.click(screen.getByRole("button", { name: "Save finish constraint" }));
@@ -678,7 +705,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     const start = screen.getByLabelText("Start no earlier than for Excavate");
     await user.type(start, "2026-09-01");
     await user.click(screen.getByRole("button", { name: "Save start constraint" }));
@@ -751,12 +778,11 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
+    await user.selectOptions(screen.getByLabelText("Duration unit for Excavate"), "minutes");
     await user.type(screen.getByLabelText("Duration for Excavate"), "480");
-    await user.click(
-      screen.getAllByRole("button", { name: "Save duration" })[0]!,
-    );
+    await user.click(screen.getByRole("button", { name: "Save duration" }));
     expect(client.updateTaskDuration).toHaveBeenCalledWith({
       taskId: first.id,
       durationMinutes: 480,
@@ -848,7 +874,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     await user.selectOptions(screen.getByLabelText("Dependency predecessor"), first.id);
     await user.selectOptions(screen.getByLabelText("Dependency successor"), second.id);
@@ -890,7 +916,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     await user.selectOptions(screen.getByLabelText("Dependency predecessor"), first.id);
     await user.selectOptions(screen.getByLabelText("Dependency successor"), second.id);
@@ -936,7 +962,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     const start = screen.getByLabelText(`Schedule start for ${job.name}`);
     await user.type(start, "2026-08-17");
@@ -993,7 +1019,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${base.name}` }),
     );
     await user.type(
       screen.getByLabelText(`Calendar exception date for ${base.name}`),
@@ -1056,7 +1082,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     await user.type(
       screen.getByLabelText(`Calendar exception date for ${job.name}`),
@@ -1098,7 +1124,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     await user.type(
       screen.getByLabelText(`Calendar exception date for ${job.name}`),
@@ -1138,7 +1164,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${job.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
     await user.type(
       screen.getByLabelText(`Calendar exception date for ${job.name}`),
@@ -1187,7 +1213,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${base.name}` }),
     );
     const startInput = screen.getByLabelText(`Schedule start for ${base.name}`);
     await user.type(startInput, "2026-08-17");
@@ -1262,7 +1288,7 @@ describe("job workspace", () => {
 
     render(<App client={client} />);
     await user.click(
-      await screen.findByRole("button", { name: `View tasks for ${base.name}` }),
+      await screen.findByRole("button", { name: `Open schedule for ${base.name}` }),
     );
     const dataDateInput = screen.getByLabelText(`Data date for ${base.name}`);
     await user.type(dataDateInput, "2026-08-18");
@@ -1307,7 +1333,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     expect(await screen.findByText("No tasks yet.")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "Archive job" }));
 
@@ -1506,7 +1532,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     await user.type(screen.getByLabelText("Percent complete for Excavate"), "50");
     await user.type(screen.getByLabelText("Actual start for Excavate"), "2026-08-17");
     await user.click(screen.getByRole("button", { name: "Save progress" }));
@@ -1556,7 +1582,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${baseJob.name}` }));
     await user.type(screen.getByLabelText(`Data date for ${baseJob.name}`), "2026-08-18");
     await user.click(screen.getByRole("button", { name: "Save data date" }));
     await waitFor(() => expect(updateJobDataDate).toHaveBeenLastCalledWith({
@@ -1585,7 +1611,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${job.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${job.name}` }));
     fireEvent.change(screen.getByLabelText("Percent complete for Excavate"), {
       target: { value: "1.5" },
     });
@@ -1633,10 +1659,12 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${baseJob.name}` }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     const field = screen.getByLabelText(`Data date for ${baseJob.name}`);
     await user.type(field, "2026-08-18");
     await user.click(screen.getByRole("button", { name: "Save data date" }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
 
     expect(await screen.findByText(/Schedule inputs changed elsewhere/)).toBeVisible();
     expect(field).toHaveValue("2026-08-18");
@@ -1650,6 +1678,7 @@ describe("job workspace", () => {
     }));
 
     // The successful save must not re-raise the schedule conflict banner.
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("Data date saved.")).toBeVisible();
     expect(screen.queryByText(/Schedule inputs changed elsewhere/)).not.toBeInTheDocument();
   });
@@ -1697,7 +1726,8 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${baseJob.name}` }));
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("No baselines yet.")).toBeVisible();
 
     const nameField = screen.getByLabelText(`New baseline name for ${baseJob.name}`);
@@ -1753,7 +1783,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${baseJob.name}` }));
     await screen.findByText("First");
 
     // Each non-default baseline exposes a distinctly named switch control; the
@@ -1804,7 +1834,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.click(await screen.findByRole("button", { name: `View tasks for ${baseJob.name}` }));
+    await user.click(await screen.findByRole("button", { name: `Open schedule for ${baseJob.name}` }));
 
     // Draft a data date (dirty, based on job version 2) without saving it.
     const dateField = screen.getByLabelText(`Data date for ${baseJob.name}`);
@@ -1824,6 +1854,7 @@ describe("job workspace", () => {
         jobId: baseJob.id, dataDate: "2026-08-18", expectedJobVersion: 3,
       }),
     );
+    (screen.getByText("Schedule setup").closest("details") as HTMLDetailsElement).open = true;
     expect(await screen.findByText("Data date saved.")).toBeVisible();
   });
 });

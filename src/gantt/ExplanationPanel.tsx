@@ -11,6 +11,8 @@ import "./explanationPanel.css";
 export interface ExplanationPanelProps {
   /** The focused schedule row, or null when nothing is focused. */
   row: GanttRow | null;
+  /** Resolve relationship identities to names in the contractor workspace. */
+  taskNames?: ReadonlyMap<string, string>;
 }
 
 /**
@@ -19,21 +21,21 @@ export interface ExplanationPanelProps {
  * scheduler's typed facts verbatim and never does schedule math. The model-prose
  * treatment stays reserved for the future AI assistant layer.
  */
-export function ExplanationPanel({ row }: ExplanationPanelProps) {
+export function ExplanationPanel({ row, taskNames }: ExplanationPanelProps) {
   const label = row ? `Schedule explanation for ${row.name}` : "Schedule explanation";
   return (
     <section className="explanation-panel" role="region" aria-label={label}>
-      <h3 className="explanation-panel__title">
+      <h2 className="explanation-panel__title">
         <span className="explanation-panel__title-label">Schedule explanation</span>
         {row ? (
           <span className="explanation-panel__title-task">
-            {row.name} · {row.taskId}
+            {row.name}{taskNames ? "" : ` · ${row.taskId}`}
           </span>
         ) : null}
-      </h3>
+      </h2>
       <div className="explanation-panel__facts">
         {row ? (
-          explanationFactLines(row.explanation).map((line, index) => (
+          explanationFactLines(row.explanation, taskNames).map((line, index) => (
             <p className="explanation-panel__fact" key={index}>
               {line}
             </p>
@@ -49,7 +51,7 @@ export function ExplanationPanel({ row }: ExplanationPanelProps) {
 }
 
 /** The ordered deterministic fact lines for one explanation. */
-function explanationFactLines(explanation: GanttTaskExplanation): string[] {
+function explanationFactLines(explanation: GanttTaskExplanation, names?: ReadonlyMap<string, string>): string[] {
   switch (explanation.kind) {
     case "summary":
       return ["Derived from children"];
@@ -60,9 +62,9 @@ function explanationFactLines(explanation: GanttTaskExplanation): string[] {
         )}`,
       ];
     case "scheduled": {
-      const lines = [`Driver ${driverText(explanation.primaryDriver)}`];
+      const lines = [`Driver ${driverText(explanation.primaryDriver, names)}`];
       for (const driver of explanation.otherBindingDrivers) {
-        lines.push(`Also ${driverText(driver)}`);
+        lines.push(`Also ${driverText(driver, names)}`);
       }
       if (explanation.startedActualStart) {
         lines.push(`Started ${formatInstant(explanation.startedActualStart)}`);
@@ -73,14 +75,14 @@ function explanationFactLines(explanation: GanttTaskExplanation): string[] {
         lines.push(`${nonWorkingDayCount} ${noun} between ${fromDate} and ${toDate}`);
       }
       lines.push(floatText(explanation.totalFloatMinutes, explanation.critical));
-      lines.push(limitText(explanation.lateFinishLimit));
+      lines.push(limitText(explanation.lateFinishLimit, names));
       return lines;
     }
   }
 }
 
 /** Driver rendering for a `Driver`/`Also` fact line. */
-function driverText(driver: GanttScheduleDriver): string {
+function driverText(driver: GanttScheduleDriver, names?: ReadonlyMap<string, string>): string {
   switch (driver.kind) {
     case "scheduleStart":
       return "Starts at schedule start";
@@ -94,7 +96,7 @@ function driverText(driver: GanttScheduleDriver): string {
     case "predecessor":
       // FS/SS bind the successor start; FF/SF bind its remaining-work finish.
       return `${finishAnchored(driver.dependencyType) ? "Finish after" : "After"} ${linkText(
-        driver.taskId,
+        names?.get(driver.taskId) ?? driver.taskId,
         driver.dependencyType,
         driver.lagMinutes,
       )}`;
@@ -108,7 +110,7 @@ function floatText(totalFloatMinutes: number, critical: boolean): string {
 }
 
 /** Late-finish limit fact line. */
-function limitText(limit: GanttLateFinishLimit): string {
+function limitText(limit: GanttLateFinishLimit, names?: ReadonlyMap<string, string>): string {
   switch (limit.kind) {
     case "deadline":
       return `Finish limited by deadline ${limit.date}${appliedFragment(
@@ -117,7 +119,7 @@ function limitText(limit: GanttLateFinishLimit): string {
       )}`;
     case "successor":
       return `Finish limited by successor ${linkText(
-        limit.taskId,
+        names?.get(limit.taskId) ?? limit.taskId,
         limit.dependencyType,
         limit.lagMinutes,
       )}`;

@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Locator } from "@playwright/test";
 
 interface PassResult {
   p95: number;
@@ -77,14 +77,14 @@ test("keeps the 1,000-row shared timeline within the ADR regression floor", asyn
 
   const collapseSamples: number[] = [];
   for (let index = 0; index < 10; index += 1) {
-    collapseSamples.push(await measureClick(page, '[aria-label$="Phase 1"]'));
+    collapseSamples.push(await measureClick(page.locator('[aria-label$="Phase 1"]')));
   }
   const zoomSamples: number[] = [];
   for (let index = 0; index < 10; index += 1) {
     const label = index % 2 === 0 ? "Day" : "Week";
-    zoomSamples.push(
-      await measureClick(page, `.gantt-schedule__toolbar button:nth-of-type(${label === "Day" ? 1 : 2})`),
-    );
+    const button = page.getByRole("button", { name: label, exact: true });
+    zoomSamples.push(await measureClick(button));
+    await expect(button).toHaveAttribute("aria-pressed", "true");
   }
 
   const evidence = {
@@ -122,13 +122,12 @@ function percentile(values: number[], value: number): number {
   return ordered[Math.max(0, Math.ceil(ordered.length * value) - 1)] ?? 0;
 }
 
-async function measureClick(page: import("@playwright/test").Page, selector: string): Promise<number> {
-  return page.evaluate(async (targetSelector) => {
-    const target = document.querySelector<HTMLElement>(targetSelector);
-    if (!target) throw new Error(`Benchmark target is missing: ${targetSelector}`);
+async function measureClick(locator: Locator): Promise<number> {
+  return locator.evaluate(async (element) => {
+    const target = element as HTMLElement;
     const start = performance.now();
     target.click();
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())));
     return performance.now() - start;
-  }, selector);
+  });
 }

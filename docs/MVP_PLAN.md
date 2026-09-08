@@ -1,7 +1,7 @@
 # MVP delivery plan
 
 Status: active
-Updated: 2026-08-20
+Updated: 2026-09-08
 
 The work is sequenced as tracer slices. Each slice leaves a usable path through the real desktop app and keeps scheduling, persistence, UI, and agent interfaces aligned.
 
@@ -54,6 +54,9 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
 
 ## 3. Gantt and baselines
 
+- [x] Deliver the [contractor-first workspace milestone](MERIDIANPLAN_REVIEW.md):
+  readable names, direct status answers, focused editing, search/filter and exports.
+
 - [x] Build the production work-breakdown/timeline split view from the accepted spike.
   - [x] Ship the virtualized semantic work-breakdown treegrid.
   - [x] Add the viewport-cropped SVG timeline in the shared scroll view.
@@ -62,7 +65,7 @@ Exit: known schedule fixtures reproduce expected dates, float, and critical task
 - [ ] Add constrained drag-to-reschedule with a preview before commit.
 - [x] Create immutable named baselines.
 - [x] Display baseline bars and start/finish/duration variance.
-- [ ] Add exportable schedule and variance views.
+- [x] Add exportable schedule and variance views (full-job CSV and printable HTML).
 
 Exit: a user can create a realistic schedule, set a baseline, change the plan, and understand the variance without inspecting raw data.
 
@@ -92,7 +95,8 @@ Exit: the app remains fully useful with AI disabled; with AI enabled, no model o
 ## 6. Interchange and hardening
 
 - [ ] Finalize versioned job archive export/import with path and checksum validation.
-- [ ] Add CSV export and a bounded CSV task import with mapping preview.
+- [x] Add CSV schedule export.
+- [ ] Add a bounded CSV task import with mapping preview.
 - [ ] Add crash recovery, migration rollback, and corrupted-database guidance.
 - [ ] Verify keyboard navigation, focus behavior, contrast, and screen-reader labels.
 - [ ] Test large jobs and define supported task/attachment limits.

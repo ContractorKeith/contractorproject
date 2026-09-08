@@ -19,7 +19,11 @@ geometry, progress facts, a data-date marker, timeline pan (drag + keyboard),
 a shell-injected deterministic today marker, baseline ghost bars,
 start/finish/duration variance, and per-task explanation facts surfaced in a
 focus-following panel) in the normal desktop workflow. The scheduling-core
-MVP section is complete. Last touched 2026-08-20.
+MVP section is complete. The contractor workspace now opens directly to a
+compact schedule with finish/progress/attention facts, hierarchy-aware search,
+one selected task editor with working-day/hour/minute entry, and full-job CSV
+and printable HTML downloads. Advanced scheduling controls remain available
+through disclosures. Last touched 2026-09-08.
 
 ## Commands
 
@@ -53,6 +57,7 @@ npm run tauri dev
 - `docs/GANTT_TREEGRID.md` owns the production work-breakdown interaction contract.
 - `docs/LOCAL_API.md` owns the local agent interface.
 - `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
+- `docs/MERIDIANPLAN_REVIEW.md` records the comparative audit and bounded UX milestone.
 - `src/` owns the React UI and its narrow Tauri command client.
 - `src-tauri/src/application.rs` is the public application seam used by UI commands and future agents.
 - `src-tauri/src/storage.rs` owns SQLite access and migrations.

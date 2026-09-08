@@ -196,7 +196,7 @@ html[data-platform="macos"] .brand-mark {
 }
 
 .brand__name span {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 .header-controls {
@@ -603,6 +603,116 @@ h1 {
   border-top: var(--border-hairline) solid var(--color-divider);
 }
 
+.job-workspace {
+  display: grid;
+  gap: var(--space-4);
+}
+
+.app-shell--job-open .workspace {
+  width: calc(100% - 2 * var(--layout-page-gutter));
+  max-width: none;
+  padding-block: var(--space-4);
+}
+
+.app-shell--job-open .workspace-heading,
+.app-shell--job-open .section-rule,
+.app-shell--job-open .job-card:not(:has(.job-workspace)),
+.app-shell--job-open .job-card__number,
+.app-shell--job-open .job-card__meta,
+.app-shell--job-open .job-card__content > h3,
+.app-shell--job-open .archived-section {
+  display: none;
+}
+
+.app-shell--job-open .job-section { margin-top: 0; }
+.app-shell--job-open .job-card { grid-template-columns: minmax(0, 1fr); }
+.app-shell--job-open .task-panel { margin-top: var(--space-3); }
+.app-shell--job-open .job-workspace .gantt-schedule--compact { --row-h: 44px; --row-h-compact: 44px; }
+.app-shell--job-open .task-workspace { grid-template-columns: minmax(0, 1fr); }
+.task-workspace__editor > fieldset { border: 0; padding: 0; min-width: 0; }
+.schedule-reading { min-width: 0; }
+
+.schedule-exports {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-end: var(--space-3);
+}
+.schedule-exports button { margin: 0; }
+.schedule-exports p { margin: 0; color: var(--color-neutral-700); font-size: var(--font-size-label); }
+
+.job-workspace__heading,
+.task-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 0.8fr);
+  gap: var(--space-4);
+  align-items: start;
+}
+
+.job-workspace__heading h1,
+.task-workspace :is(h2, h3) {
+  margin: var(--space-1) 0 0;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+}
+
+.job-workspace__heading h1 { font-size: var(--font-size-card-title); }
+
+.schedule-guidance {
+  display: grid;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border-left: var(--border-alert) solid var(--color-accent);
+  background: var(--color-accent-100);
+}
+
+.schedule-guidance span { color: var(--color-neutral-700); }
+
+.schedule-setup,
+.advanced-schedule,
+.task-editor__advanced {
+  padding: var(--space-3);
+  border: var(--border-hairline) solid var(--color-divider);
+}
+
+.schedule-setup summary,
+.advanced-schedule summary,
+.task-editor__advanced summary {
+  cursor: pointer;
+  font-family: var(--font-heading);
+  font-weight: var(--font-heading-weight);
+}
+
+.task-workspace {
+  border-top: var(--border-hairline) solid var(--color-divider);
+  padding-top: var(--space-4);
+}
+
+.task-workspace__list,
+.task-workspace__editor { min-width: 0; }
+
+.task-workspace__editor {
+  padding: var(--space-3);
+  background: var(--color-surface);
+}
+
+.task-picker__item {
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  color: var(--color-text);
+  text-align: left;
+  background: transparent;
+  border: var(--border-hairline) solid transparent;
+  cursor: pointer;
+}
+
+.task-picker__item:hover,
+.task-picker__item--selected {
+  background: var(--state-tag-bg);
+  border-color: var(--state-tag-border);
+}
+
 .task-panel--error {
   color: var(--color-accent-text);
 }
@@ -647,6 +757,24 @@ h1 {
 .task-editor__constraints legend {
   padding-inline: var(--space-1);
   color: var(--color-neutral-700);
+}
+
+.task-editor__progress,
+.task-editor__actuals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: var(--space-2);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-2);
+  border: var(--border-hairline) solid var(--color-divider);
+}
+
+.task-editor__advanced {
+  display: grid;
+  gap: var(--space-2);
+  width: 100%;
 }
 
 .task-editor__constraints label {
@@ -847,6 +975,11 @@ h1 {
   }
 
   .workspace-heading {
+    grid-template-columns: 1fr;
+  }
+
+  .job-workspace__heading,
+  .task-workspace {
     grid-template-columns: 1fr;
   }
 
