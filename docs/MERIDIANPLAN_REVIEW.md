@@ -140,8 +140,10 @@ bundling also passes. The 1,000-row performance gate passes with scroll p95
 other projects' CPU-heavy builds missed the unchanged 25 ms p95 threshold;
 independent review and an isolated rerun resolved that verification failure.
 GitHub's wider fallback font also exposed date headroom and percent glyph
-clipping at 760 pixels. The final CSS adds date content space and aligns
-progress inside its cell, preserving the column allocation and test thresholds.
+clipping at 760 pixels. The final CSS reserves more width for progress and
+tightens date padding, preserving table/timeline widths and test thresholds.
+[Final GitHub quality checks](https://github.com/ContractorKeith/contractorproject/actions/runs/34199789920)
+pass on the reviewed code merged in [PR #71](https://github.com/ContractorKeith/contractorproject/pull/71).
 Rust formatting, Clippy with
 warnings denied, and all-target tests pass: 251 tests passed, one pre-existing
 performance test ignored. Browser fixtures
