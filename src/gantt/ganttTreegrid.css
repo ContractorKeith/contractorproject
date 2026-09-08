@@ -9,6 +9,37 @@
   --row-h-compact: 60px;
 }
 
+/* Everyday work keeps names legible. Diagnostics and baseline numbers remain
+   one toggle away; both presentations use the same rows and timeline facts. */
+.gantt-schedule--compact {
+  --row-h: 44px;
+  --row-h-compact: 44px;
+  --gantt-wbs-width: clamp(500px, 55vw, 760px);
+}
+
+.gantt-schedule--compact .gantt-treegrid__wbs-column { width: 8%; }
+.gantt-schedule--compact .gantt-treegrid__name-column { width: 32%; }
+.gantt-schedule--compact .gantt-treegrid__duration-column { width: 11%; }
+.gantt-schedule--compact .gantt-treegrid__progress-column { width: 13%; }
+.gantt-schedule--compact .gantt-treegrid__date-column { width: 18%; }
+.gantt-schedule--compact .gantt-treegrid :is(th, td) {
+  padding-inline: var(--space-1);
+}
+.gantt-schedule--compact .gantt-treegrid td { font-size: 11px; }
+.gantt-schedule--compact .gantt-treegrid__task-copy {
+  display: block;
+  flex: 1;
+  overflow: hidden;
+}
+.gantt-schedule--compact .gantt-treegrid__task-copy > span:first-child {
+  display: block;
+  font-size: var(--font-size-table);
+}
+.gantt-schedule--compact .gantt-treegrid__states {
+  display: block;
+  font-size: var(--font-size-meta);
+}
+
 .gantt-schedule__toolbar {
   display: flex;
   align-items: center;

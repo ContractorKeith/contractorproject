@@ -45,6 +45,34 @@ test("virtualizes 1,000 logical rows without accessibility violations", async ({
   expect(results.violations).toEqual([]);
 });
 
+test("compact columns keep names readable and preserve the active task when details hide", async ({ page }) => {
+  const task = page.locator('tr[data-task-id="phase-1-task-1"]');
+  await task.getByRole("gridcell").last().click();
+  await page.getByRole("button", { name: "Hide schedule details" }).click();
+  await expect(page.getByRole("treegrid")).toHaveAttribute("aria-colcount", "6");
+  await expect(task.locator('[tabindex="0"]')).toHaveCount(1);
+
+  for (const width of [1440, 760]) {
+    await page.setViewportSize({ width, height: 900 });
+    const name = task.locator(".gantt-treegrid__task-copy > span").first();
+    await expect(name).toHaveText("Activity 1");
+    const fit = await name.evaluate((element) => ({ width: element.clientWidth, textWidth: element.scrollWidth }));
+    expect(fit.width).toBeGreaterThanOrEqual(90);
+    expect(fit.textWidth).toBeLessThanOrEqual(fit.width);
+    const heights = await task.evaluate((row) => ({
+      actual: row.getBoundingClientRect().height,
+      configured: parseFloat(getComputedStyle(row).getPropertyValue("--row-h")),
+    }));
+    expect(heights.actual).toBeCloseTo(heights.configured, 1);
+  }
+  await task.locator('[tabindex="0"]').focus();
+  await page.keyboard.press("End");
+  await expect(task.getByRole("gridcell").last()).toBeFocused();
+  await page.getByRole("button", { name: "Show schedule details" }).click();
+  await expect(page.getByRole("treegrid")).toHaveAttribute("aria-colcount", "8");
+  await expect(task.locator('[tabindex="0"]')).toHaveCount(1);
+});
+
 test("announces visible constraint values and direct violations without color-only state", async ({ page }) => {
   await page.locator(".gantt-schedule").evaluate((schedule) => {
     (schedule as HTMLElement).style.setProperty("--font-heading", "system-ui, sans-serif");
