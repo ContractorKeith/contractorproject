@@ -122,7 +122,7 @@ function client(overrides: Partial<JobClient> = {}): JobClient {
 }
 
 async function openWorkspace(user: ReturnType<typeof userEvent.setup>) {
-  await user.click(await screen.findByRole("button", { name: "View tasks for Oak House" }));
+  await user.click(await screen.findByRole("button", { name: "Open schedule for Oak House" }));
 }
 
 describe("task workspace", () => {

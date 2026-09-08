@@ -2,8 +2,10 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 
 import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
+import { ScheduleExports } from "./components/ScheduleExports";
 import { ExplanationPanel } from "./gantt/ExplanationPanel";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
+import { ScheduleSummary } from "./gantt/ScheduleSummary";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
   Baseline,
@@ -29,6 +31,7 @@ type TaskLoadState =
 type ScheduleLoadState =
   | { status: "loading" }
   | { status: "loaded"; readModel: GanttReadModel }
+  | { status: "setup"; message: string }
   | { status: "error"; message: string };
 
 export function App({ client = tauriJobClient }: AppProps) {
@@ -284,7 +287,7 @@ export function App({ client = tauriJobClient }: AppProps) {
   }
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${openJobId ? " app-shell--job-open" : ""}`}>
       <header className="app-header">
         <a className="brand" href="#main" aria-label="ContractorProject home">
           <BrandMark />
@@ -426,12 +429,12 @@ export function App({ client = tauriJobClient }: AppProps) {
                     <button
                       className="task-disclosure"
                       type="button"
-                      aria-label={`${openJobId === job.id ? "Hide" : "View"} tasks for ${job.name}`}
+                      aria-label={openJobId === job.id ? `Back to jobs for ${job.name}` : `Open schedule for ${job.name}`}
                       aria-expanded={openJobId === job.id}
                       aria-controls={`task-panel-${job.id}`}
                       onClick={() => void handleToggleTasks(job)}
                     >
-                      {openJobId === job.id ? "Close workspace" : "Open schedule"}
+                      {openJobId === job.id ? "Back to jobs" : "Open schedule"}
                     </button>
                     <button
                       className="archive-action"
@@ -524,6 +527,7 @@ function TaskPanel({
   const [selectedTaskPending, setSelectedTaskPending] = useState(false);
   const [pendingSelectionTaskId, setPendingSelectionTaskId] = useState<string | null>(null);
   const [removedDraftNotice, setRemovedDraftNotice] = useState<string | null>(null);
+  const [scheduleReload, setScheduleReload] = useState(0);
   const lastSelectedHierarchyRef = useRef<TaskHierarchy | null>(null);
 
   useEffect(() => {
@@ -549,6 +553,7 @@ function TaskPanel({
   }, [onWorkspaceStateChange, selectedTaskDirty, selectedTaskPending]);
 
   useEffect(() => {
+    if (state.status !== "loaded") return;
     if (!client.getSchedule) return;
     let active = true;
     // Keep the current projection mounted while a hierarchy/version refresh asks
@@ -556,9 +561,9 @@ function TaskPanel({
     setSchedule((current) => current.status === "loaded" ? current : { status: "loading" });
     client.getSchedule(job.id)
       .then((readModel) => active && setSchedule({ status: "loaded", readModel }))
-      .catch((reason: unknown) => active && setSchedule({ status: "error", message: errorMessage(reason) }));
+      .catch((reason: unknown) => active && setSchedule(scheduleLoadState(reason)));
     return () => { active = false; };
-  }, [client, hierarchyVersion(state), job.id, job.version]);
+  }, [client, hierarchyVersion(state), job.id, job.version, scheduleReload, state.status]);
   if (state.status === "loading") {
     return (
       <div id={id} className="task-panel">
@@ -598,7 +603,7 @@ function TaskPanel({
       <div className="job-workspace__heading">
         <div>
           <p className="eyebrow">Schedule</p>
-          <h2>{job.name}</h2>
+          <h1>{job.name}</h1>
         </div>
         <TaskEditor job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
       </div>
@@ -612,11 +617,11 @@ function TaskPanel({
         <summary>Schedule setup</summary>
         <ScheduleSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
       </details>
-      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} onTaskSelection={selectTask} /> : null}
+      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} jobVersion={state.hierarchy.jobVersion} onTaskSelection={selectTask} onRetry={() => setScheduleReload((current) => current + 1)} /> : null}
       <section className="task-workspace" aria-label={`Tasks for ${job.name}`}>
         {schedule.status !== "loaded" || schedule.readModel.rowCount === 0 ? (
           <div className="task-workspace__list">
-            <h3>Work</h3>
+            <h2>Work</h2>
             {hierarchy.tasks.length === 0 ? <><p>No tasks yet.</p><p>Add the first piece of work above.</p></> : (
               <TaskPicker tasks={hierarchy.tasks} label={`Tasks for ${job.name}`} selectedTaskId={selectedTask?.id ?? null} onSelect={selectTask} />
             )}
@@ -624,7 +629,7 @@ function TaskPanel({
         ) : null}
         {selectedTask ? (
           <div className="task-workspace__editor">
-            <h3>Edit {selectedTask.name}</h3>
+            <h2>Edit {selectedTask.name}</h2>
             {removedDraftNotice ? <div role="alert">{removedDraftNotice} <button type="button" onClick={() => { setSelectedTaskDirty(false); setSelectedTaskId(null); setRemovedDraftNotice(null); }}>Discard removed task changes</button></div> : null}
             <fieldset disabled={Boolean(removedDraftNotice)}>
               <TaskEditor key={selectedTask.id} job={job} task={selectedTask} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} onDirtyChange={setSelectedTaskDirty} onPendingChange={setSelectedTaskPending} />
@@ -647,22 +652,25 @@ function hierarchyVersion(state: TaskLoadState): number {
   return state.status === "loaded" ? state.hierarchy.jobVersion : 0;
 }
 
-function ScheduleProjection({ schedule, jobName, onTaskSelection }: { schedule: ScheduleLoadState; jobName: string; onTaskSelection: (taskId: string) => void }) {
+function ScheduleProjection({ schedule, jobName, jobVersion, onTaskSelection, onRetry }: { schedule: ScheduleLoadState; jobName: string; jobVersion: number; onTaskSelection: (taskId: string) => void; onRetry: () => void }) {
   if (schedule.status === "loading") {
     return <p className="gantt-state" aria-live="polite">Loading schedule…</p>;
   }
+  if (schedule.status === "setup") {
+    return <p className="gantt-state" role="status">{schedule.message}</p>;
+  }
   if (schedule.status === "error") {
-    return <div className="gantt-state gantt-state--error" role="alert">Couldn&apos;t build schedule for {jobName}. {schedule.message}</div>;
+    return <div className="gantt-state gantt-state--error" role="alert">Couldn&apos;t build schedule for {jobName}. {schedule.message} <button type="button" onClick={onRetry}>Retry schedule</button></div>;
   }
   if (schedule.readModel.rowCount === 0) {
     return <p className="gantt-state">No scheduled tasks yet.</p>;
   }
-  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} onTaskSelection={onTaskSelection} />;
+  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} current={schedule.readModel.jobVersion === jobVersion} onTaskSelection={onTaskSelection} />;
 }
 
 // Holds the focused-task state so the explanation panel follows the treegrid's
 // roving cell. React renders the Rust-provided explanation facts and derives none.
-function LoadedSchedule({ readModel, jobName, onTaskSelection }: { readModel: GanttReadModel; jobName: string; onTaskSelection: (taskId: string) => void }) {
+function LoadedSchedule({ readModel, jobName, current, onTaskSelection }: { readModel: GanttReadModel; jobName: string; current: boolean; onTaskSelection: (taskId: string) => void }) {
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [todayDate] = useState(() => {
     const now = new Date();
@@ -675,19 +683,25 @@ function LoadedSchedule({ readModel, jobName, onTaskSelection }: { readModel: Ga
     () => readModel.rows.find((row) => row.taskId === focusedTaskId) ?? null,
     [focusedTaskId, readModel.rows],
   );
+  const taskNames = useMemo(() => new Map(readModel.rows.map((row) => [row.taskId, row.name])), [readModel.rows]);
   return (
-    <>
+    <div className="schedule-reading" aria-busy={!current}>
+      <ScheduleSummary readModel={readModel} />
+      <ScheduleExports readModel={readModel} jobName={jobName} disabled={!current} />
+      {!current ? <p role="status">Updating schedule…</p> : null}
       <GanttTreegrid
         readModel={readModel}
         ariaLabel={`Schedule for ${jobName}`}
         todayDate={todayDate}
+        initialDetailsVisible={false}
+        viewportHeight={360}
         onActiveTaskChange={(taskId) => {
           setFocusedTaskId(taskId);
           if (taskId) onTaskSelection(taskId);
         }}
       />
-      <ExplanationPanel row={focusedRow} />
-    </>
+      <ExplanationPanel row={focusedRow} taskNames={taskNames} />
+    </div>
   );
 }
 
@@ -1040,46 +1054,48 @@ function TaskEditor({
           className="task-editor__actions"
           aria-label={`Actions for ${task.name}`}
         >
-          <label className="task-editor__duration">
-            <span>Duration</span>
-            <input
-              aria-label={`Duration for ${task.name}`}
-              type="number"
-              min="0"
-              step="any"
-              value={duration}
-              onChange={(event) => {
-                const nextDuration = event.target.value;
-                setDuration(nextDuration);
-                setDurationBaseVersion(
-                  durationInputMatchesPersisted(nextDuration, durationUnit, task.durationMinutes, workdayMinutes)
-                    ? null
-                    : (current) => current ?? task.version,
-                );
-              }}
-            />
-            <select aria-label={`Duration unit for ${task.name}`} value={durationUnit} onChange={(event) => {
-              const nextUnit = event.target.value as DurationUnit;
-              const exact = parseDurationInput(duration, durationUnit, workdayMinutes);
-              setDurationUnit(nextUnit);
-              setDuration(exact === undefined ? duration : formatDurationInput(exact, nextUnit, workdayMinutes));
-            }}>
-              <option value="days">working days</option>
-              <option value="hours">hours</option>
-              <option value="minutes">minutes</option>
-            </select>
-          </label>
-          <button
-            type="button"
-            disabled={
-              pending ||
-              !client.updateTaskDuration ||
-              durationInputMatchesPersisted(duration, durationUnit, task.durationMinutes, workdayMinutes)
-            }
-            onClick={() => void saveDuration()}
-          >
-            Save duration
-          </button>
+          {isSummary ? <p>Dates and duration come from subtasks.</p> : <>
+            <label className="task-editor__duration">
+              <span>Duration</span>
+              <input
+                aria-label={`Duration for ${task.name}`}
+                type="number"
+                min="0"
+                step="any"
+                value={duration}
+                onChange={(event) => {
+                  const nextDuration = event.target.value;
+                  setDuration(nextDuration);
+                  setDurationBaseVersion(
+                    durationInputMatchesPersisted(nextDuration, durationUnit, task.durationMinutes, workdayMinutes)
+                      ? null
+                      : (current) => current ?? task.version,
+                  );
+                }}
+              />
+              <select aria-label={`Duration unit for ${task.name}`} value={durationUnit} onChange={(event) => {
+                const nextUnit = event.target.value as DurationUnit;
+                const exact = parseDurationInput(duration, durationUnit, workdayMinutes);
+                setDurationUnit(nextUnit);
+                setDuration(exact === undefined ? duration : formatDurationInput(exact, nextUnit, workdayMinutes));
+              }}>
+                <option value="days">working days</option>
+                <option value="hours">hours</option>
+                <option value="minutes">minutes</option>
+              </select>
+            </label>
+            <button
+              type="button"
+              disabled={
+                pending ||
+                !client.updateTaskDuration ||
+                durationInputMatchesPersisted(duration, durationUnit, task.durationMinutes, workdayMinutes)
+              }
+              onClick={() => void saveDuration()}
+            >
+              Save duration
+            </button>
+          </>}
           {!isSummary && client.updateTaskProgress ? (
             <fieldset className="task-editor__progress">
               <legend>Progress</legend>
@@ -2163,6 +2179,25 @@ function errorMessage(reason: unknown): string {
     if (typeof message === "string") return message;
   }
   return "Please try again.";
+}
+
+/** Keeps normal first-time schedule setup instructional, while real failures remain actionable. */
+function scheduleLoadState(reason: unknown): ScheduleLoadState {
+  const code = scheduleValidationCode(reason);
+  if (code === "schedule_start_required") {
+    return { status: "setup", message: "Choose a schedule start to calculate task dates." };
+  }
+  if (code === "summary_without_children") {
+    return { status: "setup", message: "Add a duration to every leaf task to calculate the schedule." };
+  }
+  return { status: "error", message: errorMessage(reason) };
+}
+
+function scheduleValidationCode(reason: unknown): string | null {
+  if (reason && typeof reason === "object" && "code" in reason && typeof reason.code === "string") {
+    return reason.code;
+  }
+  return null;
 }
 
 function isVersionConflict(reason: unknown): boolean {

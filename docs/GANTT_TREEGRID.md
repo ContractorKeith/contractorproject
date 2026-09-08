@@ -1,7 +1,7 @@
 # Production Gantt treegrid
 
 Status: implemented
-Updated: 2026-08-20
+Updated: 2026-09-08
 
 `src/gantt/GanttTreegrid.tsx` is the authoritative work-breakdown surface for
 Gantt read-model contract v7. It renders a native HTML table with
@@ -18,9 +18,13 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
   `aria-rowindex="2"`, and collapse never renumbers later rows.
 - Depth, expanded state, sibling position, and sibling-set size come directly
   from the versioned read model.
-- The eight columns are WBS, Name, Duration, % Done, Start, Finish,
-  Predecessors, and Float (`aria-colcount="8"`). The Name column remains the
-  tree column and disclosure owner.
+- The contractor workspace defaults to six columns: WBS, Name, Duration,
+  % Done, Start and Finish (`aria-colcount="6"`). **Show schedule details** adds
+  Predecessors and Float (`aria-colcount="8"`), baseline and constraint text,
+  and precise timestamps. Standalone verification defaults to this detailed
+  mode. The Name column remains the tree column and disclosure owner. Compact
+  mode gives names more space, uses civil dates and whole hours when exact,
+  and preserves precise facts in accessible names and the explanation panel.
 - Task, duration, current and baseline dates, signed variance, total float,
   critical and milestone state, typed predecessor links, leaf constraint dates,
   and scheduler-provided constraint violations remain visible cell text. A
@@ -77,6 +81,14 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
   row; Page Up and Page Down move by a viewport; Left and Right collapse,
   expand, or return to a parent; Space or Enter toggles a summary.
 
+Name/WBS search and All / Needs attention / In progress / Completed filters
+preserve matching rows' ancestors. Match counts exclude contextual ancestors.
+Filtering temporarily expands the matching hierarchy; summary toggles are
+disabled until the filter clears, at which point saved collapse state returns.
+Filtering preserves Rust logical row indices, and recovers focus after an
+offscreen or empty result. Hiding details clamps an active diagnostic column to
+Finish while preserving the active task.
+
 The disclosure control has a 24-pixel target but is removed from the tab order
 because the active task cell owns keyboard collapse and expansion. The surface
 does not claim selection semantics; focus and future selection remain separate
@@ -92,20 +104,18 @@ reorder that keeps the focused task alive does not re-fire the callback (the id
 is unchanged); the panel refreshes instead through the app's row lookup against
 the new read model. At the component-contract level the callback passes `null`
 once on mount (the notify effect runs before the initial roving cell is set)
-and whenever the visible-row set is empty; the app never mounts the grid with
-zero rows, so after that first notify it always names a task. A reload that
+and whenever filtering leaves no visible rows. A reload that
 drops the focused task recovers the roving cell to the first visible row, so
 the panel settles on a surviving task rather than a stale or empty state. The callback is held in a ref and
 the notify effect depends only on the focused task id, so an inline-lambda
-consumer cannot re-fire or loop. The callback is the panel's only new coupling:
-the grid's markup, its eight-column contract (`aria-colcount="8"`), row height,
-and roving single-tab-stop model are all unchanged, and the supplemental
-timeline is untouched.
+consumer cannot re-fire or loop. The app also uses this callback to open its
+single task editor, subject to unsaved-draft and pending-write guards. The
+roving single-tab-stop model and supplemental timeline remain intact.
 
 `src/gantt/ExplanationPanel.tsx` renders below the treegrid in the schedule
 view (`App.tsx`). It is a non-modal, hairline-framed region following the
 DESIGN.md panel language: a Condensed uppercase panel title
-(`Schedule explanation`) with the focused task name and id, over deterministic
+(`Schedule explanation`) with the focused task name, over deterministic
 FACT rows in Barlow 13px `--color-text` — the DESIGN.md §6 "deterministic risk
 flags" treatment, never the indented model-prose treatment reserved for the AI
 layer. Each fact is the scheduler's own typed data rendered verbatim (no
@@ -118,7 +128,8 @@ predecessor driver reads `After <link>` for the start-anchored FS/SS types and
 `Finish after <link>` for the finish-anchored FF/SF types; constraint and
 deadline facts append ` · applied <date>` when normalization moved the entered
 date. Typed links reuse the Predecessors-cell format (`B FS +480 min`, lag
-dropped at zero).
+dropped at zero). The workspace resolves relationship IDs to task names;
+unknown IDs and standalone verification retain the identity as a fallback.
 With no focused task the panel reads `Focus a task to see what drives it.`
 
 **Accessibility contract:** the region carries `role="region"` and an aria-label

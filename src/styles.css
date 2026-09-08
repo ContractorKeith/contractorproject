@@ -196,7 +196,7 @@ html[data-platform="macos"] .brand-mark {
 }
 
 .brand__name span {
-  color: var(--color-accent);
+  color: var(--color-accent-text);
 }
 
 .header-controls {
@@ -608,6 +608,40 @@ h1 {
   gap: var(--space-4);
 }
 
+.app-shell--job-open .workspace {
+  width: calc(100% - 2 * var(--layout-page-gutter));
+  max-width: none;
+  padding-block: var(--space-4);
+}
+
+.app-shell--job-open .workspace-heading,
+.app-shell--job-open .section-rule,
+.app-shell--job-open .job-card:not(:has(.job-workspace)),
+.app-shell--job-open .job-card__number,
+.app-shell--job-open .job-card__meta,
+.app-shell--job-open .job-card__content > h3,
+.app-shell--job-open .archived-section {
+  display: none;
+}
+
+.app-shell--job-open .job-section { margin-top: 0; }
+.app-shell--job-open .job-card { grid-template-columns: minmax(0, 1fr); }
+.app-shell--job-open .task-panel { margin-top: var(--space-3); }
+.app-shell--job-open .job-workspace .gantt-schedule--compact { --row-h: 44px; --row-h-compact: 44px; }
+.app-shell--job-open .task-workspace { grid-template-columns: minmax(0, 1fr); }
+.task-workspace__editor > fieldset { border: 0; padding: 0; min-width: 0; }
+.schedule-reading { min-width: 0; }
+
+.schedule-exports {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-block-end: var(--space-3);
+}
+.schedule-exports button { margin: 0; }
+.schedule-exports p { margin: 0; color: var(--color-neutral-700); font-size: var(--font-size-label); }
+
 .job-workspace__heading,
 .task-workspace {
   display: grid;
@@ -616,12 +650,14 @@ h1 {
   align-items: start;
 }
 
-.job-workspace__heading h2,
-.task-workspace h3 {
+.job-workspace__heading h1,
+.task-workspace :is(h2, h3) {
   margin: var(--space-1) 0 0;
   font-family: var(--font-heading);
   font-weight: var(--font-heading-weight);
 }
+
+.job-workspace__heading h1 { font-size: var(--font-size-card-title); }
 
 .schedule-guidance {
   display: grid;

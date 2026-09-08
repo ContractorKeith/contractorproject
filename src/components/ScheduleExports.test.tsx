@@ -11,6 +11,18 @@ const readModel: GanttReadModel = { contractVersion: 7, jobId: "job", jobVersion
 afterEach(() => vi.restoreAllMocks());
 
 describe("ScheduleExports", () => {
+  it("blocks stale schedule downloads until the current projection arrives", async () => {
+    const download = vi.spyOn(exports, "downloadSchedule").mockImplementation(() => undefined);
+    const user = userEvent.setup();
+    const { rerender } = render(<ScheduleExports readModel={readModel} jobName="Oak job" disabled />);
+    await user.click(screen.getByRole("button", { name: "Export CSV" }));
+    await user.click(screen.getByRole("button", { name: "Download printable schedule" }));
+    expect(download).not.toHaveBeenCalled();
+    rerender(<ScheduleExports readModel={readModel} jobName="Oak job" />);
+    await user.click(screen.getByRole("button", { name: "Download printable schedule" }));
+    expect(download).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.html", "text/html");
+  });
+
   it("offers direct exports, reports a failure, and clears it on retry", async () => {
     const download = vi.spyOn(exports, "downloadSchedule")
       .mockImplementationOnce(() => { throw new Error("blocked"); })
@@ -22,7 +34,7 @@ describe("ScheduleExports", () => {
     expect(exports.downloadSchedule).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.csv", "text/csv");
     expect(screen.getByRole("alert")).toHaveTextContent("Couldn't download the schedule CSV. Try again.");
     expect(screen.getByRole("button", { name: "Download printable schedule" })).toBeVisible();
-    expect(screen.getByText("Open the downloaded schedule, then use your browser's Print command.")).toBeVisible();
+    expect(screen.getByText("Exports include all tasks. Open the HTML file to print.")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Export CSV" }));
     expect(download).toHaveBeenCalledTimes(2);
