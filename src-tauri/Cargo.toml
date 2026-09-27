@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Local-first project and job management for contractors"
 authors = ["ContractorKeith"]
 edition = "2021"
+default-run = "contractorproject"
 
 [lib]
 name = "contractorproject_lib"

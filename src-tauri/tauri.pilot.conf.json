@@ -1,0 +1,20 @@
+{
+  "productName": "ContractorProject Pilot",
+  "identifier": "com.contractorkeith.contractorproject.pilot",
+  "bundle": {
+    "externalBin": ["binaries/contractorproject-recovery","binaries/handoff-import"]
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "ContractorProject Pilot",
+        "width": 1180,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 540,
+        "resizable": true
+      }
+    ]
+  }
+}

@@ -300,6 +300,39 @@ impl ApplicationService {
         Ok(job)
     }
 
+    /// Creates a CRM hand-off job once per source opportunity. Replaying the
+    /// same imported name returns the existing job; changed imported content
+    /// for the same source identity is rejected without modifying either row.
+    pub fn import_handoff_job(
+        &self,
+        context: CommandContext,
+        request: CreateJobRequest,
+        source_system: String,
+        source_id: String,
+    ) -> Result<Job, ApplicationError> {
+        let context = context.validate()?;
+        let name = required_text("name", request.name, 120)?;
+        let timezone = required_text("timezone", request.timezone, 80)?;
+        let source_system = required_text("sourceSystem", source_system, 80)?;
+        let source_id = required_text("sourceId", source_id, 160)?;
+        let now = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+        let job = Job {
+            id: Uuid::now_v7().to_string(),
+            name: name.clone(),
+            status: JobStatus::Draft,
+            timezone,
+            schedule_start: None,
+            calendar: default_calendar(),
+            calendar_exceptions: Vec::new(),
+            data_date: None,
+            created_at: now.clone(),
+            updated_at: now,
+            version: 1,
+        };
+        self.store
+            .insert_handoff_job(&job, &context, &source_system, &source_id, &name)
+    }
+
     pub fn list_jobs(&self) -> Result<Vec<Job>, ApplicationError> {
         self.store.list_jobs()
     }

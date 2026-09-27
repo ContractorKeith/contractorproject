@@ -3,29 +3,34 @@ import { useState } from "react";
 import {
   createScheduleCsv,
   createScheduleReport,
-  downloadSchedule,
+  saveSchedule,
   safeScheduleFilename,
 } from "../scheduleExport";
 import type { GanttReadModel } from "../types/gantt";
 
 export function ScheduleExports({ readModel, jobName, disabled = false }: { readModel: GanttReadModel; jobName: string; disabled?: boolean }) {
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  function exportFile(kind: "csv" | "html") {
-    if (disabled) return;
+  async function exportFile(kind: "csv" | "html") {
+    if (disabled || saving) return;
+    setSaving(true);
     try {
       const content = kind === "csv" ? createScheduleCsv(readModel, jobName) : createScheduleReport(readModel, jobName);
-      downloadSchedule(content, safeScheduleFilename(jobName, kind), kind === "csv" ? "text/csv" : "text/html");
+      await saveSchedule(content, safeScheduleFilename(jobName, kind), kind);
       setError(null);
-    } catch {
-      setError(`Couldn't download the schedule ${kind.toUpperCase()}. Try again.`);
+    } catch (cause) {
+      const detail = typeof cause === "string" ? cause : cause instanceof Error ? cause.message : String(cause);
+      setError(`Couldn't save the schedule ${kind.toUpperCase()}: ${detail}`);
+    } finally {
+      setSaving(false);
     }
   }
 
   return <section className="schedule-exports" aria-label="Schedule exports">
-    <button type="button" disabled={disabled} onClick={() => exportFile("csv")}>Export CSV</button>
-    <button type="button" disabled={disabled} onClick={() => exportFile("html")}>Download printable schedule</button>
-    <p>Exports include all tasks. Open the HTML file to print.</p>
+    <button type="button" disabled={disabled || saving} onClick={() => void exportFile("csv")}>Export CSV</button>
+    <button type="button" disabled={disabled || saving} onClick={() => void exportFile("html")}>Download printable schedule</button>
+    <p>Exports include all tasks. Open the HTML file to print. Choose a new filename; existing files are kept.</p>
     {error ? <p role="alert">{error}</p> : null}
   </section>;
 }

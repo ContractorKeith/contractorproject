@@ -567,7 +567,7 @@ fn baseline_rows(path: &Path) -> Vec<String> {
         .expect("collect")
 }
 
-// --- Migration and backup/restore (v9) --------------------------------------
+// --- Migration and backup/restore (v9 and later) ----------------------------
 
 /// Writes an exact-v8 database (schema_migrations 1..8, typed dependencies, one
 /// scheduled leaf) so the v8 -> v9 upgrade can be exercised.
@@ -599,7 +599,7 @@ fn write_exact_v8_database(path: &Path) {
 }
 
 #[test]
-fn a_fresh_database_migrates_to_v9_with_the_calendar_exceptions_table() {
+fn a_fresh_database_applies_v9_and_later_schema_migrations() {
     let temp = tempfile::tempdir().expect("temp");
     let path = temp.path().join("contractorproject.sqlite3");
     let _service = ApplicationService::open(&path).expect("open");
@@ -609,7 +609,7 @@ fn a_fresh_database_migrates_to_v9_with_the_calendar_exceptions_table() {
             row.get(0)
         })
         .expect("version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'calendar_exceptions'",
@@ -632,7 +632,7 @@ fn an_exact_v8_database_upgrades_and_then_accepts_an_exception() {
             row.get(0)
         })
         .expect("version");
-    assert_eq!(migrated, 9);
+    assert_eq!(migrated, 10);
     // The migrated job accepts an exception, which shifts its leaf off Monday.
     assert_eq!(
         leaf_start(&service, "job-v8", "leaf"),
@@ -657,7 +657,7 @@ fn an_exact_v8_database_upgrades_and_then_accepts_an_exception() {
 }
 
 #[test]
-fn a_v9_database_with_an_exception_backs_up_and_restores() {
+fn the_current_database_with_an_exception_backs_up_and_restores() {
     let temp = tempfile::tempdir().expect("temp");
     let path = temp.path().join("contractorproject.sqlite3");
     let service = ApplicationService::open(&path).expect("open");
@@ -675,7 +675,7 @@ fn a_v9_database_with_an_exception_backs_up_and_restores() {
         .expect("add");
 
     let backup_dir = tempfile::tempdir().expect("temp");
-    let backup_path = backup_dir.path().join("v9.backup.sqlite3");
+    let backup_path = backup_dir.path().join("current.backup.sqlite3");
     let backup = service
         .create_verified_backup(CreateBackupRequest {
             destination: backup_path.to_string_lossy().into_owned(),
@@ -683,7 +683,7 @@ fn a_v9_database_with_an_exception_backs_up_and_restores() {
         .expect("backup");
     assert!(backup.verified);
 
-    let target = backup_dir.path().join("restored-v9");
+    let target = backup_dir.path().join("restored-current");
     let result = service
         .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
             backup_path: backup_path.to_string_lossy().into_owned(),
@@ -698,7 +698,7 @@ fn a_v9_database_with_an_exception_backs_up_and_restores() {
             row.get(0)
         })
         .expect("version");
-    assert_eq!(restored_version, 9);
+    assert_eq!(restored_version, 10);
     assert_eq!(calendar_exception_count(&restored), 1);
 }
 

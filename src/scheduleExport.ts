@@ -1,3 +1,5 @@
+import { invoke, isTauri } from "@tauri-apps/api/core";
+
 import type { GanttPredecessorLink, GanttReadModel, GanttRow } from "./types/gantt";
 
 const CSV_HEADERS = [
@@ -101,6 +103,21 @@ export function downloadSchedule(content: string, filename: string, mimeType: st
     link.remove();
     if (!clicked) URL.revokeObjectURL(url);
   }
+}
+
+/** Use Tauri's native save dialog on desktop; keep browser downloads for web/dev. */
+export async function saveSchedule(
+  content: string,
+  filename: string,
+  kind: "csv" | "html",
+): Promise<boolean> {
+  if (isTauri()) {
+    return invoke<boolean>("save_schedule_export", {
+      request: { kind, filename, content },
+    });
+  }
+  downloadSchedule(content, filename, kind === "csv" ? "text/csv" : "text/html");
+  return true;
 }
 
 function deadlineAttention(row: GanttRow): string {

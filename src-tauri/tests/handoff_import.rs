@@ -2,7 +2,9 @@
 //! envelope creates a job, a newer schemaVersion is refused, malformed JSON
 //! fails cleanly, and unknown fields are ignored (additive contract).
 
-use contractorproject_lib::application::ApplicationService;
+use contractorproject_lib::application::{
+    ApplicationService, CreateBackupRequest, VerifyRestoreRequest,
+};
 use contractorproject_lib::handoff_import::{import, Options};
 use std::path::{Path, PathBuf};
 
@@ -55,17 +57,113 @@ fn valid_envelope_creates_a_job_visible_through_list_jobs() {
 }
 
 #[test]
-fn a_second_import_creates_a_distinct_job() {
+fn retry_after_restart_returns_the_same_job_without_duplicate_audit() {
     let temp = tempfile::tempdir().expect("tempdir");
     let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
     let database = temp.path().join("contractorproject.sqlite3");
 
     let first = import(&options(envelope.clone(), database.clone())).expect("first import");
+    drop(ApplicationService::open(&database).expect("process restart reopen"));
     let second = import(&options(envelope, database.clone())).expect("second import");
-    assert_ne!(first.job_id, second.job_id);
+    assert_eq!(first.job_id, second.job_id);
 
     let service = ApplicationService::open(&database).expect("reopen database");
-    assert_eq!(service.list_jobs().expect("list jobs").len(), 2);
+    assert_eq!(service.list_jobs().expect("list jobs").len(), 1);
+    let audit_rows: i64 = rusqlite::Connection::open(&database)
+        .expect("open audit database")
+        .query_row("SELECT COUNT(*) FROM command_log", [], |row| row.get(0))
+        .expect("count audit rows");
+    assert_eq!(audit_rows, 1);
+}
+
+#[test]
+fn distinct_opportunities_create_distinct_jobs_and_changed_content_is_rejected() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let database = temp.path().join("contractorproject.sqlite3");
+    let original = write_envelope(temp.path(), "one.json", VALID_ENVELOPE);
+    let first = import(&options(original, database.clone())).expect("first import");
+    let other = write_envelope(
+        temp.path(),
+        "two.json",
+        &VALID_ENVELOPE
+            .replace("opportunity-1", "opportunity-2")
+            .replace("Backyard privacy fence", "Front yard gate"),
+    );
+    let second = import(&options(other, database.clone())).expect("distinct opportunity");
+    assert_ne!(first.job_id, second.job_id);
+
+    let changed = write_envelope(
+        temp.path(),
+        "changed.json",
+        &VALID_ENVELOPE.replace("Backyard privacy fence", "Changed fence scope"),
+    );
+    let error = import(&options(changed, database.clone())).expect_err("changed identity refused");
+    assert!(error.contains("different imported content"), "{error}");
+    let service = ApplicationService::open(&database).expect("reopen database");
+    let jobs = service.list_jobs().expect("list jobs");
+    assert_eq!(jobs.len(), 2);
+    let first_job = jobs
+        .iter()
+        .find(|job| job.id == first.job_id)
+        .expect("first job remains");
+    assert_eq!(first_job.name, "Backyard privacy fence");
+}
+
+#[test]
+fn retry_after_verified_restore_returns_the_mapped_job() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
+    let database = temp.path().join("source.sqlite3");
+    let backup = temp.path().join("source.backup.sqlite3");
+    let restored_data = temp.path().join("restored-app-data");
+    let first = import(&options(envelope.clone(), database.clone())).expect("first import");
+    let source = ApplicationService::open(&database).expect("open source");
+    source
+        .create_verified_backup(CreateBackupRequest {
+            destination: backup.to_string_lossy().into_owned(),
+        })
+        .expect("create verified backup");
+    source
+        .verify_restore_into_fresh_app_data(VerifyRestoreRequest {
+            backup_path: backup.to_string_lossy().into_owned(),
+            target_app_data_dir: restored_data.to_string_lossy().into_owned(),
+        })
+        .expect("restore into fresh app data");
+
+    let restored_database = restored_data.join("contractorproject.sqlite3");
+    let retried =
+        import(&options(envelope, restored_database.clone())).expect("retry after restore");
+    assert_eq!(retried.job_id, first.job_id);
+    let restored = ApplicationService::open(&restored_database).expect("reopen restored database");
+    assert_eq!(restored.list_jobs().expect("list restored jobs").len(), 1);
+}
+
+#[test]
+fn failed_audit_write_rolls_back_job_and_source_mapping_together() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
+    let database = temp.path().join("contractorproject.sqlite3");
+    ApplicationService::open(&database).expect("create application database");
+    rusqlite::Connection::open(&database)
+        .expect("open database")
+        .execute_batch(
+            "CREATE TRIGGER fail_import_audit BEFORE INSERT ON command_log
+             BEGIN SELECT RAISE(ABORT, 'blocked'); END;",
+        )
+        .expect("install audit failure trigger");
+
+    let error = import(&options(envelope, database.clone())).expect_err("audit failure rolls back");
+    assert!(error.contains("could not create the job"), "{error}");
+    let connection = rusqlite::Connection::open(&database).expect("reopen database");
+    let jobs: i64 = connection
+        .query_row("SELECT COUNT(*) FROM jobs", [], |row| row.get(0))
+        .unwrap();
+    let sources: i64 = connection
+        .query_row("SELECT COUNT(*) FROM external_job_sources", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!((jobs, sources), (0, 0));
 }
 
 #[test]
@@ -156,6 +254,48 @@ fn a_foreign_database_is_refused_and_left_untouched() {
     assert_eq!(service.list_jobs().expect("list jobs").len(), 1);
 }
 
+#[test]
+fn a_foreign_database_with_a_lookalike_migration_version_is_not_migrated() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let envelope = write_envelope(temp.path(), "handoff.json", VALID_ENVELOPE);
+    let foreign = temp.path().join("lookalike.sqlite3");
+    {
+        let connection = rusqlite::Connection::open(&foreign).expect("create lookalike database");
+        connection
+            .execute_batch(
+                "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+                 INSERT INTO schema_migrations VALUES (1, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (2, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (3, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (4, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (5, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (6, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (7, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (8, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (9, '2026-01-01T00:00:00.000Z');
+                 INSERT INTO schema_migrations VALUES (10, '2026-01-01T00:00:00.000Z');
+                 CREATE TABLE notes (id INTEGER PRIMARY KEY, body TEXT NOT NULL);
+                 INSERT INTO notes (body) VALUES ('preserve');",
+            )
+            .expect("seed lookalike schema");
+    }
+    let before = std::fs::read(&foreign).expect("read before");
+
+    let error = import(&options(envelope, foreign.clone())).expect_err("lookalike refused");
+    assert!(
+        error.contains("not a supported ContractorProject database"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&foreign).expect("read after"), before);
+    let connection =
+        rusqlite::Connection::open_with_flags(&foreign, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .expect("reopen unchanged file");
+    let notes: i64 = connection
+        .query_row("SELECT COUNT(*) FROM notes", [], |row| row.get(0))
+        .expect("notes table unchanged");
+    assert_eq!(notes, 1);
+}
+
 /// A database written by a newer build is refused rather than migrated
 /// backwards or half-read.
 #[test]
@@ -191,7 +331,7 @@ fn unknown_fields_and_a_missing_kind_are_treated_per_the_contract() {
           "schemaVersion": 1,
           "kind": "opportunity_handoff",
           "futureTopLevelField": { "anything": [1, 2, 3] },
-          "opportunity": { "name": "Side yard gate", "futureField": true },
+          "opportunity": { "id": "opportunity-side-gate", "name": "Side yard gate", "futureField": true },
           "contact": null
         }"#,
     );
@@ -213,7 +353,7 @@ fn unknown_fields_and_a_missing_kind_are_treated_per_the_contract() {
     let nameless = write_envelope(
         temp.path(),
         "nameless.json",
-        r#"{ "schemaVersion": 1, "kind": "opportunity_handoff", "opportunity": { "name": "  " } }"#,
+        r#"{ "schemaVersion": 1, "kind": "opportunity_handoff", "opportunity": { "id": "empty-name", "name": "  " } }"#,
     );
     let error = import(&options(nameless, temp.path().join("none.sqlite3")))
         .expect_err("blank name refused");

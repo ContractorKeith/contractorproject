@@ -3,8 +3,8 @@ use contractorproject_lib::application::{
 };
 use contractorproject_lib::application::{
     ApplicationError, ApplicationService, ArchiveJobRequest, CommandActor, CommandContext,
-    CreateBackupRequest, CreateJobRequest, CreateTaskRequest, JobStatus, RestoreJobRequest,
-    VerifyRestoreRequest,
+    CreateBackupRequest, CreateBaselineRequest, CreateJobRequest, CreateTaskRequest, JobStatus,
+    RestoreJobRequest, UpdateJobDataDateRequest, UpdateTaskProgressRequest, VerifyRestoreRequest,
 };
 use contractorproject_lib::application::{
     ReorderTaskRequest, TaskConstraintKind, UpdateTaskConstraintRequest, UpdateTaskRequest,
@@ -41,9 +41,12 @@ fn canonical_snapshot(path: &std::path::Path) -> Vec<Vec<String>> {
         .expect("open snapshot read-only");
     [
         "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version) FROM jobs ORDER BY id",
-        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version) FROM tasks ORDER BY id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q|%Q', id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, percent_complete, actual_start, actual_finish, created_at, updated_at, version) FROM tasks ORDER BY id",
         "SELECT printf('%Q|%Q|%Q|%Q', job_id, predecessor_task_id, successor_task_id, lag_minutes) FROM task_dependencies ORDER BY job_id, predecessor_task_id, successor_task_id",
         "SELECT printf('%Q|%Q|%Q|%Q|%Q', command_id, actor, client_name, created_at, summary) FROM command_log ORDER BY command_id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q', id, job_id, name, created_at, is_comparison_default) FROM baselines ORDER BY id",
+        "SELECT printf('%Q|%Q|%Q|%Q|%Q', baseline_id, task_id, start, finish, duration_minutes) FROM baseline_tasks ORDER BY baseline_id, task_id",
+        "SELECT printf('%Q|%Q|%Q|%Q', source_system, source_id, job_id, content_fingerprint) FROM external_job_sources ORDER BY source_system, source_id",
     ]
     .into_iter()
     .map(|query| {
@@ -1717,7 +1720,7 @@ fn version_one_database_is_backed_up_before_the_task_migration() {
             |row| row.get(0),
         )
         .expect("inspect command audit schema");
-    assert_eq!(migrated_version, 9);
+    assert_eq!(migrated_version, 10);
     assert_eq!(command_log_tables, 1);
     let backup_path = temp
         .path()
@@ -1916,7 +1919,7 @@ fn populated_exact_v4_backup_restores_read_only_then_owned_target_migrates_to_v5
                 0
             ))
             .expect("current version"),
-        9
+        10
     );
     assert_eq!(restored.query_row("SELECT COUNT(*) FROM pragma_table_info('tasks') WHERE name IN ('start_no_earlier_than', 'finish_no_later_than')", [], |row| row.get::<_, i64>(0)).expect("constraint fields"), 2);
 }
@@ -3094,16 +3097,58 @@ fn online_backup_preserves_a_consistent_populated_wal_snapshot_without_audit_wri
             },
         )
         .expect("schedule job");
-    let projection = service.get_schedule(&job.id).expect("build schedule");
+    let data_date = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("set data date");
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: activity.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: activity.task.version,
+                expected_job_version: data_date.version,
+            },
+        )
+        .expect("record actual start and progress");
+    service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job.id.clone(),
+                name: "Recovery baseline".into(),
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect("create baseline");
+    let job_state = service
+        .list_jobs()
+        .expect("list jobs")
+        .into_iter()
+        .find(|candidate| candidate.id == job.id)
+        .expect("find restored job");
     service
         .archive_job(
             command_context(),
             ArchiveJobRequest {
                 job_id: job.id.clone(),
-                expected_job_version: scheduled.version,
+                expected_job_version: job_state.version,
             },
         )
         .expect("archive job");
+    let projection = service
+        .get_schedule(&job.id)
+        .expect("build complete populated schedule");
     let active = service
         .create_job(
             command_context(),
@@ -3366,7 +3411,13 @@ fn online_backup_is_a_complete_snapshot_before_a_concurrent_wal_writer_commits()
 fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data() {
     let temp = tempfile::tempdir().expect("temporary app data");
     let database_path = temp.path().join("source.sqlite3");
-    let backup_path = temp.path().join("scheduled-job.backup.sqlite3");
+    let backup_path = std::env::var_os("PILOT_ACCEPTANCE_BACKUP")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| temp.path().join("scheduled-job.backup.sqlite3"));
+    assert!(
+        !backup_path.exists(),
+        "PILOT_ACCEPTANCE_BACKUP must name a new destination"
+    );
     let target_app_data_dir = temp.path().join("restored-app-data");
     let service = ApplicationService::open(&database_path).expect("open source service");
     let job = service
@@ -3457,12 +3508,52 @@ fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data
             },
         )
         .expect("schedule job");
+    let data_date = service
+        .update_job_data_date(
+            command_context(),
+            UpdateJobDataDateRequest {
+                job_id: job.id.clone(),
+                data_date: Some("2026-08-18".into()),
+                expected_job_version: scheduled.version,
+            },
+        )
+        .expect("set data date");
+    let progress = service
+        .update_task_progress(
+            command_context(),
+            UpdateTaskProgressRequest {
+                task_id: activity.task.id.clone(),
+                clear: false,
+                percent_complete: Some(50),
+                actual_start: Some("2026-08-17".into()),
+                actual_finish: None,
+                expected_version: activity.task.version,
+                expected_job_version: data_date.version,
+            },
+        )
+        .expect("record actual start and progress");
+    service
+        .create_baseline(
+            command_context(),
+            CreateBaselineRequest {
+                job_id: job.id.clone(),
+                name: "Recovery baseline".into(),
+                expected_job_version: progress.job_version,
+            },
+        )
+        .expect("create baseline");
+    let current_job = service
+        .list_jobs()
+        .expect("list current job")
+        .into_iter()
+        .find(|candidate| candidate.id == job.id)
+        .expect("find current job");
     service
         .archive_job(
             command_context(),
             ArchiveJobRequest {
                 job_id: job.id.clone(),
-                expected_job_version: scheduled.version,
+                expected_job_version: current_job.version,
             },
         )
         .expect("archive job");
@@ -3478,6 +3569,21 @@ fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data
             },
         )
         .expect("create active job");
+    let crm_job = service
+        .import_handoff_job(
+            CommandContext {
+                command_id: "pilot-crm-handoff".into(),
+                actor: CommandActor::Import,
+                client_name: "handoff-import".into(),
+            },
+            CreateJobRequest {
+                name: "Pilot CRM opportunity fence".into(),
+                timezone: "UTC".into(),
+            },
+            "ContractorCRM".into(),
+            "pilot-opportunity-1".into(),
+        )
+        .expect("import CRM job before backup");
     let audit_before_backup = command_log_count(&database_path);
     service
         .create_verified_backup(CreateBackupRequest {
@@ -3509,7 +3615,7 @@ fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data
         result,
         contractorproject_lib::application::RestoreVerificationResult {
             verified: true,
-            job_count: 2,
+            job_count: 3,
             task_count: 3,
             dependency_count: 1,
             command_log_count: audit_before_backup,
@@ -3519,6 +3625,22 @@ fn restore_verification_activates_only_a_verified_backup_point_in_fresh_app_data
     assert_eq!(canonical_snapshot(&restored_database_path), backup_snapshot);
     let restored =
         ApplicationService::open(&restored_database_path).expect("open restored service");
+    let retried_crm_job = restored
+        .import_handoff_job(
+            CommandContext {
+                command_id: "pilot-crm-handoff-retry".into(),
+                actor: CommandActor::Import,
+                client_name: "handoff-import".into(),
+            },
+            CreateJobRequest {
+                name: "Pilot CRM opportunity fence".into(),
+                timezone: "UTC".into(),
+            },
+            "ContractorCRM".into(),
+            "pilot-opportunity-1".into(),
+        )
+        .expect("CRM retry returns restored identity mapping");
+    assert_eq!(retried_crm_job.id, crm_job.id);
     assert_eq!(
         restored.get_schedule(&job.id).expect("restored schedule"),
         expected_projection
@@ -4119,7 +4241,7 @@ fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let typed_column: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('task_dependencies') WHERE name = 'dependency_type'",
@@ -4140,7 +4262,7 @@ fn migration_v8_rebuilds_dependencies_on_fresh_and_existing_v7_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 9);
+    assert_eq!(migrated_version, 10);
     let hierarchy = service.list_tasks("job-v7").expect("preserved links");
     assert_eq!(hierarchy.dependencies.len(), 1);
     assert_eq!(
@@ -4281,7 +4403,7 @@ fn verified_backup_and_clean_restore_accept_v8() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 9);
+    assert_eq!(restored_version, 10);
 }
 
 // Writes an exact-v7 database with one FS dependency for migration testing.
