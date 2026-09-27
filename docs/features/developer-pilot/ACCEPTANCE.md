@@ -1,6 +1,6 @@
 # Developer pilot acceptance
 
-Status: automated and installed clean candidate gates passed; merge pending.
+Status: engineering acceptance complete; PR #77 merged with all checks green.
 Date: 2026-09-27, America/New_York.
 
 ## Automated evidence
@@ -76,3 +76,7 @@ change this runtime. Integration is tracked in PR #77 and issue #72.
 
 This is single-operator schedule testing. Crew and cost planning, cloud sharing,
 client-data acceptance and public release remain outside this signoff.
+
+## Integration and handoff
+
+PR #77 merged as `193001c209107fa392a44eb52e6e2564b83c974a`. All final PR checks passed. Original main was fast-forwarded while preserving unrelated files. Independently extracted the retained ZIP, verified its signature and matched the installed executable hash. Fresh Project Pilot opens with zero jobs. Retained snapshots passed standalone integrity and foreign-key checks. The installed packaged importer passed cross-app retry/re-export acceptance.

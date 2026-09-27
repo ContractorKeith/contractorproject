@@ -27,3 +27,11 @@ CSV/HTML saved successfully and matched the fixture; HTML rendering was readable
 Cancel wrote nothing; an existing filename returned a visible error and preserved
 its exact hash. Synthetic data/snapshots/exports retained separately in Downloads.
 Artifact hash in ACCEPTANCE.md. PR #77 pushed; CI and merge remain.
+
+## 2026-09-27 — Pilot preparation complete
+
+PR #77 merged as 193001c209107fa392a44eb52e6e2564b83c974a after all PR checks passed.
+Original main fast-forwarded; complete branch reviewed. Retained ZIP independently
+extracted/signature-checked and matched to installed runtime. Fresh Project Pilot opens with zero jobs. Retained snapshots passed standalone integrity and foreign-key checks. The installed packaged importer passed cross-app retry/re-export acceptance.
+Normal app data and unrelated checkout files preserved.
+Next: Keith enters the remaining-work schedule and takeover forecast baseline with Sheets in parallel.
