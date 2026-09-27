@@ -29,6 +29,9 @@ pub enum ApplicationError {
     #[error("command {command_id} was already applied")]
     DuplicateCommand { command_id: String },
 
+    #[error("CRM opportunity identity already exists with different imported content")]
+    SourceIdentityConflict,
+
     #[error("backup destination already exists")]
     BackupDestinationExists,
 
@@ -65,6 +68,7 @@ impl ApplicationError {
             Self::ValidationFailed { .. } => "validation_failed",
             Self::VersionConflict { .. } => "version_conflict",
             Self::DuplicateCommand { .. } => "duplicate_command",
+            Self::SourceIdentityConflict => "source_identity_conflict",
             Self::BackupDestinationExists => "backup_destination_exists",
             Self::BackupFailed => "backup_failed",
             Self::BackupVerificationFailed => "backup_verification_failed",

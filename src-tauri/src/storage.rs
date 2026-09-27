@@ -28,7 +28,7 @@ use crate::work_breakdown::{plan_reorder, validate_parent_chain, validate_parent
 
 /// Highest migration this build applies. Tools that open a database file they
 /// did not create compare against it before writing anything.
-pub(crate) const LATEST_SCHEMA_VERSION: i64 = 9;
+pub(crate) const LATEST_SCHEMA_VERSION: i64 = 10;
 
 /// Per-job cap on dated calendar exceptions, mirroring the scheduler's
 /// `MAX_CALENDAR_EXCEPTIONS`. Enforced at the command boundary so it holds even
@@ -113,6 +113,62 @@ impl SqliteStore {
         write_audit_record(&transaction, context, &job.created_at, "created job")?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Atomically creates a CRM-originated job and its retry identity mapping.
+    /// The fingerprint is the normalized content Project currently imports
+    /// (the opportunity name); envelope timestamps and ignored fields do not
+    /// affect retry matching.
+    pub(crate) fn insert_handoff_job(
+        &self,
+        job: &Job,
+        context: &CommandContext,
+        source_system: &str,
+        source_id: &str,
+        content_fingerprint: &str,
+    ) -> Result<Job, ApplicationError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let existing: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT job_id, content_fingerprint FROM external_job_sources
+                 WHERE source_system = ?1 AND source_id = ?2",
+                params![source_system, source_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if let Some((job_id, existing_fingerprint)) = existing {
+            if existing_fingerprint != content_fingerprint {
+                return Err(ApplicationError::SourceIdentityConflict);
+            }
+            return read_job(&transaction, &job_id);
+        }
+
+        ensure_command_is_new(&transaction, context)?;
+        transaction.execute(
+            "INSERT INTO jobs (
+                id, name, status, timezone, schedule_start, calendar_json, created_at, updated_at, version
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                job.id,
+                job.name,
+                job.status.as_database_value(),
+                job.timezone,
+                job.schedule_start,
+                serde_json::to_string(&job.calendar).map_err(|error| ApplicationError::InvalidStoredData(error.to_string()))?,
+                job.created_at,
+                job.updated_at,
+                job.version,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO external_job_sources (source_system, source_id, job_id, content_fingerprint)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![source_system, source_id, job.id, content_fingerprint],
+        )?;
+        write_audit_record(&transaction, context, &job.created_at, "created job")?;
+        transaction.commit()?;
+        Ok(job.clone())
     }
 
     pub(crate) fn list_jobs(&self) -> Result<Vec<Job>, ApplicationError> {
@@ -1785,6 +1841,26 @@ impl SqliteStore {
             )?;
             transaction.commit()?;
         }
+        if !migration_applied(&connection, 10)? {
+            if database_existed {
+                self.back_up_before_migration(&connection, 10)?;
+            }
+            let transaction =
+                connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            transaction.execute_batch(
+                "CREATE TABLE external_job_sources (
+                    source_system TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    job_id TEXT NOT NULL UNIQUE,
+                    content_fingerprint TEXT NOT NULL,
+                    PRIMARY KEY (source_system, source_id),
+                    FOREIGN KEY (job_id) REFERENCES jobs(id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO schema_migrations (version, applied_at)
+                 VALUES (10, strftime('%Y-%m-%dT%H:%M:%fZ', 'now'));",
+            )?;
+            transaction.commit()?;
+        }
         Ok(())
     }
 
@@ -1813,7 +1889,7 @@ impl SqliteStore {
 // Indices 0..5 are required at every supported version; indices 5..7 (the
 // baseline tables) exist only from v7 onward; index 7 (calendar_exceptions)
 // only from v9 onward.
-const REQUIRED_BACKUP_TABLES: [&str; 8] = [
+const REQUIRED_BACKUP_TABLES: [&str; 9] = [
     "schema_migrations",
     "jobs",
     "tasks",
@@ -1822,6 +1898,7 @@ const REQUIRED_BACKUP_TABLES: [&str; 8] = [
     "baselines",
     "baseline_tasks",
     "calendar_exceptions",
+    "external_job_sources",
 ];
 
 #[derive(Clone, Copy)]
@@ -2152,6 +2229,32 @@ const CALENDAR_EXCEPTION_COLUMNS: [ColumnSpec; 2] = [
         primary_key_position: 2,
     },
 ];
+const EXTERNAL_JOB_SOURCE_COLUMNS: [ColumnSpec; 4] = [
+    ColumnSpec {
+        name: "source_system",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 1,
+    },
+    ColumnSpec {
+        name: "source_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 2,
+    },
+    ColumnSpec {
+        name: "job_id",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+    ColumnSpec {
+        name: "content_fingerprint",
+        data_type: "TEXT",
+        not_null: true,
+        primary_key_position: 0,
+    },
+];
 const BASELINE_TASK_COLUMNS: [ColumnSpec; 5] = [
     ColumnSpec {
         name: "baseline_id",
@@ -2379,6 +2482,11 @@ fn cleanup_empty_restore_reservation(target: &Path) -> Result<(), ApplicationErr
 }
 
 fn cleanup_unpublished_restore(staging: &Path, target: &Path) -> Result<(), ApplicationError> {
+    let staged_database = staging.join("contractorproject.sqlite3");
+    let target_database = target.join("contractorproject.sqlite3");
+    if same_regular_file(&staged_database, &target_database) {
+        std::fs::remove_file(&target_database).map_err(|_| ApplicationError::RestoreFailed)?;
+    }
     let staging_result = cleanup_owned_restore_staging(staging);
     let target_result = cleanup_empty_restore_reservation(target);
     if staging_result.is_err() || target_result.is_err() {
@@ -2388,13 +2496,11 @@ fn cleanup_unpublished_restore(staging: &Path, target: &Path) -> Result<(), Appl
 }
 
 fn same_regular_file(staged: &Path, target: &Path) -> bool {
-    match std::fs::symlink_metadata(target) {
-        Ok(metadata) if metadata.file_type().is_file() && !metadata.file_type().is_symlink() => {}
-        _ => return false,
-    }
-    match std::fs::metadata(staged) {
-        Ok(metadata) if metadata.file_type().is_file() => {}
-        _ => return false,
+    for path in [staged, target] {
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.file_type().is_file() => {}
+            _ => return false,
+        }
     }
     same_file::is_same_file(staged, target).unwrap_or(false)
 }
@@ -2402,12 +2508,21 @@ fn same_regular_file(staged: &Path, target: &Path) -> bool {
 /// Hard-linking is atomic and no-clobber: an unexpected file inside the
 /// reserved target makes the restore fail rather than replacing it.
 fn publish_restored_database(staged: &Path, target: &Path) -> Result<(), ApplicationError> {
+    publish_restored_database_with_sync(staged, target, |path| {
+        OpenOptions::new()
+            .write(true)
+            .open(path)
+            .and_then(|file| file.sync_all())
+    })
+}
+
+fn publish_restored_database_with_sync(
+    staged: &Path,
+    target: &Path,
+    sync_target: impl FnOnce(&Path) -> std::io::Result<()>,
+) -> Result<(), ApplicationError> {
     std::fs::hard_link(staged, target).map_err(|_| ApplicationError::RestoreFailed)?;
-    OpenOptions::new()
-        .write(true)
-        .open(target)
-        .and_then(|file| file.sync_all())
-        .map_err(|_| ApplicationError::RestoreFailed)
+    sync_target(target).map_err(|_| ApplicationError::RestoreFailed)
 }
 
 /// Copies an already-verified, static snapshot through SQLite's online backup
@@ -2479,7 +2594,7 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             row.get(0)
         })
         .map_err(|_| ApplicationError::BackupVerificationFailed)?;
-    if !matches!(schema_version, 4..=9) {
+    if !matches!(schema_version, 4..=10) {
         return Err(ApplicationError::BackupVerificationFailed);
     }
     // The base tables are required at every version; the baseline tables are
@@ -2527,6 +2642,18 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
+    if schema_version >= 10 {
+        let source_table_count: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                params![REQUIRED_BACKUP_TABLES[8]],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if source_table_count != 1 {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
     verify_supported_schema(&connection, schema_version)?;
     if schema_version >= 5 {
         verify_v5_constraint_domain(&connection)?;
@@ -2543,6 +2670,9 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
     if schema_version >= 9 {
         verify_v9_calendar_exception_domain(&connection)?;
     }
+    if schema_version >= 10 {
+        verify_v10_external_job_source_domain(&connection)?;
+    }
 
     // These bounded counts prove the core domain tables are readable without
     // exposing any customer or job content in the result or error surface.
@@ -2556,6 +2686,12 @@ fn verify_backup(destination: &Path) -> Result<VerifiedSnapshot, ApplicationErro
         dependency_count,
         command_log_count,
     })
+}
+
+/// Read-only validation for operator tools that must reject foreign databases
+/// before calling `ApplicationService::open`, whose normal path may migrate.
+pub(crate) fn verify_existing_project_database(path: &Path) -> Result<(), ApplicationError> {
+    verify_backup(path).map(|_| ())
 }
 
 fn verify_supported_schema(
@@ -2576,7 +2712,8 @@ fn verify_supported_schema(
         6 => &[1, 2, 3, 4, 5, 6],
         7 => &[1, 2, 3, 4, 5, 6, 7],
         8 => &[1, 2, 3, 4, 5, 6, 7, 8],
-        _ => &[1, 2, 3, 4, 5, 6, 7, 8, 9],
+        9 => &[1, 2, 3, 4, 5, 6, 7, 8, 9],
+        _ => &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
     };
     if migrations != expected_migrations {
         return Err(ApplicationError::BackupVerificationFailed);
@@ -2774,6 +2911,31 @@ fn verify_supported_schema(
             return Err(ApplicationError::BackupVerificationFailed);
         }
     }
+    if schema_version >= 10 {
+        verify_table_columns(
+            connection,
+            "external_job_sources",
+            &EXTERNAL_JOB_SOURCE_COLUMNS,
+        )?;
+        verify_foreign_keys(
+            connection,
+            "external_job_sources",
+            [("jobs", "job_id", "id")],
+        )?;
+        let sql: String = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'external_job_sources'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+        if !matches_supported_schema_sql(
+            &sql,
+            "createtableexternal_job_sourcessource_systemtextnotnullsource_idtextnotnulljob_idtextnotnulluniquecontent_fingerprinttextnotnullprimarykeysource_systemsource_idforeignkeyjob_idreferencesjobsidondeleterestrict",
+        ) {
+            return Err(ApplicationError::BackupVerificationFailed);
+        }
+    }
     let task_query = match schema_version {
         4 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
         5 => "SELECT id, job_id, parent_task_id, sort_key, name, duration_minutes, start_no_earlier_than, finish_no_later_than, created_at, updated_at, version FROM tasks ORDER BY job_id, parent_task_id, sort_key, id LIMIT 1",
@@ -2819,6 +2981,12 @@ fn verify_supported_schema(
             .and_then(|mut statement| statement.query([]).map(|_| ()))
             .map_err(|_| ApplicationError::BackupVerificationFailed)?;
     }
+    if schema_version >= 10 {
+        connection
+            .prepare("SELECT source_system, source_id, job_id, content_fingerprint FROM external_job_sources ORDER BY source_system, source_id LIMIT 1")
+            .and_then(|mut statement| statement.query([]).map(|_| ()))
+            .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    }
     Ok(())
 }
 
@@ -2854,6 +3022,42 @@ fn verify_v9_calendar_exception_domain(connection: &Connection) -> Result<(), Ap
         if !(2000..=2100).contains(&date.year()) {
             return Err(ApplicationError::BackupVerificationFailed);
         }
+    }
+    Ok(())
+}
+
+fn verify_v10_external_job_source_domain(connection: &Connection) -> Result<(), ApplicationError> {
+    let has_orphan: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM external_job_sources source
+                WHERE NOT EXISTS(SELECT 1 FROM jobs job WHERE job.id = source.job_id)
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if has_orphan {
+        return Err(ApplicationError::BackupVerificationFailed);
+    }
+    let invalid_identity: bool = connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM external_job_sources
+                WHERE trim(source_system) = '' OR trim(source_id) = ''
+                   OR trim(content_fingerprint) = ''
+                   OR source_system != trim(source_system)
+                   OR source_id != trim(source_id)
+                   OR content_fingerprint != trim(content_fingerprint)
+                   OR length(source_system) > 80 OR length(source_id) > 160
+                   OR length(content_fingerprint) > 120
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| ApplicationError::BackupVerificationFailed)?;
+    if invalid_identity {
+        return Err(ApplicationError::BackupVerificationFailed);
     }
     Ok(())
 }
@@ -4017,7 +4221,8 @@ mod backup_verification_tests {
     use super::{
         cleanup_empty_restore_reservation, cleanup_unpublished_restore,
         create_restore_staging_directory, owned_incomplete_paths, publish_restored_database,
-        reserve_fresh_restore_target, verify_backup, SqliteStore,
+        publish_restored_database_with_sync, reserve_fresh_restore_target, verify_backup,
+        SqliteStore,
     };
     use crate::error::ApplicationError;
     use rusqlite::Connection;
@@ -4121,6 +4326,30 @@ mod backup_verification_tests {
             b"do not remove"
         );
         assert!(target.is_dir());
+    }
+
+    #[test]
+    fn failed_post_link_sync_removes_only_the_published_restore_link() {
+        let temp = tempfile::tempdir().expect("temporary restore directory");
+        let target = temp.path().join("reserved-target");
+        reserve_fresh_restore_target(&target).expect("reserve target");
+        let staging = create_restore_staging_directory(&target).expect("create staging");
+        let staged_database = staging.join("contractorproject.sqlite3");
+        std::fs::write(&staged_database, b"verified staged database")
+            .expect("write staged database");
+        let target_database = target.join("contractorproject.sqlite3");
+
+        let error = publish_restored_database_with_sync(&staged_database, &target_database, |_| {
+            Err(std::io::Error::other("injected sync failure"))
+        })
+        .expect_err("sync failure is reported");
+        assert_eq!(error.kind(), "restore_failed");
+        assert!(super::same_regular_file(&staged_database, &target_database));
+
+        cleanup_unpublished_restore(&staging, &target)
+            .expect("remove owned hard link and fresh target reservation");
+        assert!(!target.exists());
+        assert!(!staging.exists());
     }
 
     #[test]

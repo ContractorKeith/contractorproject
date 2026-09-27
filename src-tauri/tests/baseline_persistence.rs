@@ -140,7 +140,7 @@ fn baseline_rows(path: &std::path::Path, baseline_id: &str) -> Vec<(String, Stri
 
 #[test]
 fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
-    // A fresh database opens directly at v7 with both baseline tables.
+    // A fresh database applies migration v7 and later schema additions.
     let fresh = tempfile::tempdir().expect("temp");
     let fresh_path = fresh.path().join("contractorproject.sqlite3");
     let _service = ApplicationService::open(&fresh_path).expect("open fresh");
@@ -150,7 +150,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let table_count: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN ('baselines', 'baseline_tasks')",
@@ -179,7 +179,7 @@ fn migration_v7_adds_baseline_tables_on_fresh_and_existing_v6_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 9);
+    assert_eq!(migrated_version, 10);
     assert_eq!(service.list_tasks("job-v6").expect("tasks").tasks.len(), 1);
     assert!(service
         .list_baselines("job-v6")
@@ -600,7 +600,7 @@ fn verified_backup_and_clean_restore_accept_v7_and_exact_v6() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 9);
+    assert_eq!(restored_version, 10);
 
     // An exact-v6 snapshot is still accepted by the restore preflight.
     let v6_dir = tempfile::tempdir().expect("temp");

@@ -3,6 +3,8 @@ mod domain;
 mod error;
 pub mod gantt;
 pub mod handoff_import;
+pub mod recovery_cli;
+mod schedule_export;
 pub mod scheduling;
 mod storage;
 mod work_breakdown;
@@ -91,6 +93,7 @@ impl From<ApplicationError> for CommandError {
             | ApplicationError::RestoreTargetExists
             | ApplicationError::RestoreFailed
             | ApplicationError::RestoreVerificationFailed
+            | ApplicationError::SourceIdentityConflict
             | ApplicationError::InvalidStoredData(_)
             | ApplicationError::Database(_)
             | ApplicationError::Io(_) => CommandErrorDetails::None {},
@@ -194,6 +197,61 @@ async fn create_verified_backup(
         })
         .map(Some)
         .map_err(Into::into)
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SaveScheduleExportRequest {
+    kind: schedule_export::ScheduleExportKind,
+    filename: String,
+    content: String,
+}
+
+#[tauri::command]
+async fn save_schedule_export(
+    app: AppHandle,
+    request: SaveScheduleExportRequest,
+) -> Result<bool, String> {
+    schedule_export::validate_export(request.kind, &request.filename, request.content.as_bytes())?;
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let dialog = app
+        .dialog()
+        .file()
+        .set_file_name(&request.filename)
+        .add_filter(request.kind.label(), &[request.kind.extension()]);
+    dialog.save_file(move |path| {
+        let _ = sender.send(path);
+    });
+
+    let selected = tauri::async_runtime::spawn_blocking(move || receiver.recv())
+        .await
+        .map_err(|error| format!("Save dialog worker failed: {error}"))?
+        .map_err(|error| format!("Save dialog did not return a result: {error}"))?;
+    let Some(selected) = selected else {
+        return Ok(false);
+    };
+    let destination = selected
+        .into_path()
+        .map_err(|_| "Choose a local filesystem destination.".to_owned())?;
+    let app_data = app
+        .path()
+        .app_data_dir()
+        .map_err(|error| format!("Could not locate app data: {error}"))?;
+    let request_kind = request.kind;
+    let filename = request.filename;
+    let content = request.content;
+    tauri::async_runtime::spawn_blocking(move || {
+        schedule_export::write_new_export(
+            &destination,
+            &app_data.join("contractorproject.sqlite3"),
+            request_kind,
+            &filename,
+            content.as_bytes(),
+        )
+    })
+    .await
+    .map_err(|error| format!("Export writer failed: {error}"))??;
+    Ok(true)
 }
 
 #[tauri::command]
@@ -384,6 +442,7 @@ pub fn run() {
             archive_job,
             restore_job,
             create_verified_backup,
+            save_schedule_export,
             create_task,
             list_tasks,
             get_schedule,

@@ -161,7 +161,7 @@ fn job_after(service: &ApplicationService, job_id: &str) -> Job {
 
 #[test]
 fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
-    // Fresh database opens directly at v6 with the new nullable columns.
+    // Fresh database applies v6 and later migrations with the nullable columns.
     let fresh = tempfile::tempdir().expect("temp");
     let fresh_path = fresh.path().join("contractorproject.sqlite3");
     let _service = ApplicationService::open(&fresh_path).expect("open fresh");
@@ -171,7 +171,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("schema version");
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
     let job_columns: i64 = connection
         .query_row(
             "SELECT COUNT(*) FROM pragma_table_info('jobs') WHERE name = 'data_date'",
@@ -200,7 +200,7 @@ fn migration_v6_adds_progress_columns_on_fresh_and_existing_v5_database() {
             row.get(0)
         })
         .expect("migrated version");
-    assert_eq!(migrated_version, 9);
+    assert_eq!(migrated_version, 10);
     let hierarchy = service.list_tasks("job-v5").expect("preserved tasks");
     assert_eq!(hierarchy.tasks.len(), 1);
     let leaf = &hierarchy.tasks[0];
@@ -785,7 +785,7 @@ fn backup_and_restore_verification_accept_v6_and_exact_v5_snapshots() {
             row.get(0)
         })
         .expect("restored version");
-    assert_eq!(restored_version, 9);
+    assert_eq!(restored_version, 10);
 }
 
 #[test]

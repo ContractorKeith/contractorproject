@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::application::{ApplicationService, CommandActor, CommandContext, CreateJobRequest};
-use crate::storage::LATEST_SCHEMA_VERSION;
+use crate::storage::{verify_existing_project_database, LATEST_SCHEMA_VERSION};
 
 /// The only envelope major version this build understands.
 pub const SUPPORTED_SCHEMA_VERSION: i64 = 1;
@@ -66,6 +66,7 @@ struct Envelope {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct EnvelopeOpportunity {
+    id: Option<String>,
     name: Option<String>,
 }
 
@@ -126,19 +127,21 @@ fn assign(
 /// Read + validate an envelope and create the matching job. Errors are
 /// user-facing strings; the caller prints them to stderr and exits nonzero.
 pub fn import(options: &Options) -> Result<ImportedJob, String> {
-    let name = read_opportunity_name(&options.envelope)?;
+    let (source_id, name) = read_opportunity(&options.envelope)?;
     let timezone = resolve_timezone(options.timezone.as_deref());
 
     guard_database(&options.database)?;
     let service = ApplicationService::open(&options.database)
         .map_err(|error| format!("could not open the database: {error}"))?;
     let job = service
-        .create_job(
+        .import_handoff_job(
             command_context(),
             CreateJobRequest {
                 name: name.clone(),
                 timezone,
             },
+            "ContractorCRM".to_owned(),
+            source_id,
         )
         .map_err(|error| format!("could not create the job: {error}"))?;
 
@@ -198,11 +201,17 @@ fn guard_database(database_path: &Path) -> Result<(), String> {
             database_path.display()
         ));
     }
+    verify_existing_project_database(database_path).map_err(|_| {
+        format!(
+            "{} is not a supported ContractorProject database (minimum schema v4); refusing to migrate it",
+            database_path.display()
+        )
+    })?;
     Ok(())
 }
 
 /// Envelope validation: version gate, kind gate, required opportunity name.
-fn read_opportunity_name(envelope_path: &Path) -> Result<String, String> {
+fn read_opportunity(envelope_path: &Path) -> Result<(String, String), String> {
     if !envelope_path.is_file() {
         return Err(format!(
             "envelope file not found: {}",
@@ -244,14 +253,18 @@ fn read_opportunity_name(envelope_path: &Path) -> Result<String, String> {
         None => return Err("envelope is missing kind".to_owned()),
     }
 
-    let name = envelope
+    let opportunity = envelope
         .opportunity
-        .and_then(|opportunity| opportunity.name)
-        .unwrap_or_default();
+        .ok_or_else(|| "envelope is missing opportunity".to_owned())?;
+    let source_id = opportunity.id.unwrap_or_default();
+    if source_id.trim().is_empty() {
+        return Err("envelope is missing opportunity.id".to_owned());
+    }
+    let name = opportunity.name.unwrap_or_default();
     if name.trim().is_empty() {
         return Err("envelope is missing opportunity.name".to_owned());
     }
-    Ok(name)
+    Ok((source_id, name))
 }
 
 /// Flag wins, then the process time zone, then UTC.

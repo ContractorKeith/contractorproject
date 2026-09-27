@@ -142,6 +142,10 @@ independent review and an isolated rerun resolved that verification failure.
 GitHub's wider fallback font also exposed date headroom and percent glyph
 clipping at 760 pixels. The final CSS reserves more width for progress and
 tightens date padding, preserving table/timeline widths and test thresholds.
+The September 27 developer-pilot check reduced detailed date-cell inline padding
+to zero after reproducing only 3% spare width at 760 pixels. The same browser
+assertion now measures 6.2%, above its unchanged 5% minimum; all 32 browser tests
+pass. Compact task-name and timeline widths remain unchanged.
 [Final GitHub quality checks](https://github.com/ContractorKeith/contractorproject/actions/runs/34199789920)
 pass on the reviewed code merged in [PR #71](https://github.com/ContractorKeith/contractorproject/pull/71).
 Rust formatting, Clippy with

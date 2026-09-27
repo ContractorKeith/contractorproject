@@ -1,9 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 
+const tauriMocks = vi.hoisted(() => ({ invoke: vi.fn(), isTauri: vi.fn(() => false) }));
+vi.mock("@tauri-apps/api/core", () => tauriMocks);
+
 import {
   createScheduleCsv,
   createScheduleReport,
   downloadSchedule,
+  saveSchedule,
   safeScheduleFilename,
 } from "./scheduleExport";
 import type { GanttReadModel, GanttRow } from "./types/gantt";
@@ -145,5 +149,19 @@ describe("schedule exports", () => {
     click.mockRestore();
     vi.unstubAllGlobals();
     vi.useRealTimers();
+  });
+
+  it("uses the native save command in Tauri and leaves cancellation to the dialog", async () => {
+    tauriMocks.isTauri.mockReturnValue(true);
+    tauriMocks.invoke.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    await expect(saveSchedule("csv", "job.csv", "csv")).resolves.toBe(true);
+    await expect(saveSchedule("html", "job.html", "html")).resolves.toBe(false);
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(1, "save_schedule_export", {
+      request: { kind: "csv", filename: "job.csv", content: "csv" },
+    });
+    expect(tauriMocks.invoke).toHaveBeenNthCalledWith(2, "save_schedule_export", {
+      request: { kind: "html", filename: "job.html", content: "html" },
+    });
+    tauriMocks.isTauri.mockReturnValue(false);
   });
 });

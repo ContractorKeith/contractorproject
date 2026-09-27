@@ -9,6 +9,10 @@ ContractorProject is a local-first, AI-native project and job management tool fo
 
 ## Status
 
+The personal developer pilot is tracked in `docs/features/developer-pilot/PLAN.md`.
+Use its isolated build and acceptance record before consulting use. The original
+release history below does not establish acceptance of a newer Pilot build.
+
 v0.1 scheduled-job tracer — persisted work breakdown, schedule inputs,
 SNET/FNLT constraints, audited data-date/progress statusing, immutable named
 baselines, all four dependency types (FS/SS/FF/SF with signed lag), dated

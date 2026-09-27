@@ -12,32 +12,32 @@ afterEach(() => vi.restoreAllMocks());
 
 describe("ScheduleExports", () => {
   it("blocks stale schedule downloads until the current projection arrives", async () => {
-    const download = vi.spyOn(exports, "downloadSchedule").mockImplementation(() => undefined);
+    const save = vi.spyOn(exports, "saveSchedule").mockResolvedValue(true);
     const user = userEvent.setup();
     const { rerender } = render(<ScheduleExports readModel={readModel} jobName="Oak job" disabled />);
     await user.click(screen.getByRole("button", { name: "Export CSV" }));
     await user.click(screen.getByRole("button", { name: "Download printable schedule" }));
-    expect(download).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
     rerender(<ScheduleExports readModel={readModel} jobName="Oak job" />);
     await user.click(screen.getByRole("button", { name: "Download printable schedule" }));
-    expect(download).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.html", "text/html");
+    expect(save).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.html", "html");
   });
 
   it("offers direct exports, reports a failure, and clears it on retry", async () => {
-    const download = vi.spyOn(exports, "downloadSchedule")
-      .mockImplementationOnce(() => { throw new Error("blocked"); })
-      .mockImplementation(() => undefined);
+    const save = vi.spyOn(exports, "saveSchedule")
+      .mockRejectedValueOnce(new Error("blocked"))
+      .mockResolvedValue(true);
     const user = userEvent.setup();
     render(<ScheduleExports readModel={readModel} jobName="Oak job" />);
 
     await user.click(screen.getByRole("button", { name: "Export CSV" }));
-    expect(exports.downloadSchedule).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.csv", "text/csv");
-    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't download the schedule CSV. Try again.");
+    expect(save).toHaveBeenCalledWith(expect.any(String), "Oak-job-schedule.csv", "csv");
+    expect(screen.getByRole("alert")).toHaveTextContent("Couldn't save the schedule CSV: blocked");
     expect(screen.getByRole("button", { name: "Download printable schedule" })).toBeVisible();
-    expect(screen.getByText("Exports include all tasks. Open the HTML file to print.")).toBeVisible();
+    expect(screen.getByText("Exports include all tasks. Open the HTML file to print. Choose a new filename; existing files are kept.")).toBeVisible();
 
     await user.click(screen.getByRole("button", { name: "Export CSV" }));
-    expect(download).toHaveBeenCalledTimes(2);
+    expect(save).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
 });
