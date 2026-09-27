@@ -18,3 +18,12 @@ dialog and a validated new-file writer. Luna's final gates passed: 98 UI, 32 bro
 the complete implementation and reran both export component tests after the help
 copy change. Real CRM importer retry/re-export E2E passed. Next: clean installed
 export acceptance and merge.
+
+## 2026-09-27 — Pinned native Project acceptance
+
+Installed clean source 672b645291878c617490636ba663f20d3747a9b4 with both operators and verified
+the complete ad-hoc signature. Restored schedule facts remained correct. Native
+CSV/HTML saved successfully and matched the fixture; HTML rendering was readable.
+Cancel wrote nothing; an existing filename returned a visible error and preserved
+its exact hash. Synthetic data/snapshots/exports retained separately in Downloads.
+Artifact hash in ACCEPTANCE.md. PR #77 pushed; CI and merge remain.
