@@ -55,7 +55,6 @@
   --font-body: "Barlow", system-ui, sans-serif;
   --font-heading-weight: 600;
   --font-body-medium: 500;
-  --font-size-hero: clamp(42px, 6vw, 72px);
   --font-size-card-title: 24px;
   --font-size-empty-title: 28px;
   --font-size-brand: 23px;
@@ -84,15 +83,12 @@
   --layout-page-gutter: clamp(18px, 3vw, 42px);
   --layout-content-max: 1120px;
   --layout-inline-total: 36px;
-  --layout-workspace-padding: clamp(42px, 7vw, 86px) 0 72px;
-  --layout-heading-gap: clamp(28px, 7vw, 96px);
+  --layout-workspace-padding: 20px 0 40px;
   --layout-form-min: 320px;
   --layout-form-max: 430px;
-  --layout-hero-max: 700px;
-  --layout-copy-max: 56ch;
   --layout-empty-copy-max: 46ch;
-  --layout-section-gap: clamp(52px, 8vw, 92px);
-  --layout-empty-min-height: 250px;
+  --layout-section-gap: 20px;
+  --layout-empty-min-height: 180px;
   --layout-job-min-height: 116px;
   --layout-job-index-width: 64px;
   --control-height: 42px;
@@ -205,29 +201,6 @@ html[data-platform="macos"] .brand-mark {
   gap: var(--space-4);
 }
 
-.storage-actions {
-  display: flex;
-  align-items: center;
-  gap: var(--space-3);
-}
-
-.theme-control {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  color: var(--color-neutral-700);
-  font-size: var(--font-size-meta);
-}
-
-.theme-control select {
-  height: var(--control-height-small);
-  padding: 0 var(--space-2);
-  color: var(--color-text);
-  background: var(--color-surface);
-  border: var(--border-hairline) solid var(--color-divider);
-  border-radius: var(--radius-sm);
-}
-
 .storage-state {
   display: flex;
   align-items: center;
@@ -275,15 +248,7 @@ html[data-platform="macos"] .brand-mark {
   padding: var(--layout-workspace-padding);
 }
 
-.workspace-heading {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(var(--layout-form-min), var(--layout-form-max));
-  gap: var(--layout-heading-gap);
-  align-items: end;
-}
-
 .eyebrow,
-.section-rule h2,
 .new-job label,
 .status-tag {
   margin: 0;
@@ -306,21 +271,11 @@ p {
 }
 
 h1 {
-  max-width: var(--layout-hero-max);
-  margin: var(--space-2) 0 var(--space-3);
-  font-family: var(--font-heading);
-  font-size: var(--font-size-hero);
-  font-weight: var(--font-heading-weight);
-  letter-spacing: -0.025em;
-  line-height: 0.94;
-}
-
-.lede {
-  max-width: var(--layout-copy-max);
   margin: 0;
-  color: var(--color-neutral-700);
-  font-size: var(--font-size-panel);
-  line-height: 1.55;
+  font-family: var(--font-heading);
+  font-size: var(--font-size-card-title);
+  font-weight: var(--font-heading-weight);
+  line-height: 1.15;
 }
 
 .new-job {
@@ -401,7 +356,7 @@ h1 {
   border-bottom: var(--border-hairline) solid var(--color-text);
 }
 
-.section-rule h2 {
+.section-rule h1 {
   font-size: var(--font-size-panel);
 }
 
@@ -515,7 +470,8 @@ h1 {
   border: var(--border-hairline) solid var(--state-tag-border);
 }
 
-.job-card h3 {
+.job-card h3,
+.job-card__content > h2 {
   margin: var(--space-2) 0 var(--space-1);
   font-family: var(--font-heading);
   font-size: var(--font-size-card-title);
@@ -611,15 +567,14 @@ h1 {
 .app-shell--job-open .workspace {
   width: calc(100% - 2 * var(--layout-page-gutter));
   max-width: none;
-  padding-block: var(--space-4);
+  padding-block: var(--space-2);
 }
 
-.app-shell--job-open .workspace-heading,
 .app-shell--job-open .section-rule,
 .app-shell--job-open .job-card:not(:has(.job-workspace)),
 .app-shell--job-open .job-card__number,
 .app-shell--job-open .job-card__meta,
-.app-shell--job-open .job-card__content > h3,
+.app-shell--job-open .job-card__content > h2,
 .app-shell--job-open .archived-section {
   display: none;
 }
@@ -961,23 +916,6 @@ h1 {
 }
 
 @media (max-width: 780px) {
-  .storage-state {
-    font-size: 0;
-  }
-
-  .storage-actions {
-    justify-content: flex-end;
-  }
-
-  .storage-state::after {
-    content: "Local";
-    font-size: var(--font-size-label);
-  }
-
-  .workspace-heading {
-    grid-template-columns: 1fr;
-  }
-
   .job-workspace__heading,
   .task-workspace {
     grid-template-columns: 1fr;

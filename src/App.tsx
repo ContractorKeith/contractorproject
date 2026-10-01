@@ -6,6 +6,8 @@ import { ScheduleExports } from "./components/ScheduleExports";
 import { ExplanationPanel } from "./gantt/ExplanationPanel";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { ScheduleSummary } from "./gantt/ScheduleSummary";
+import { SettingsDialog } from "./components/SettingsDialog";
+import { ThemeToggle } from "./components/ThemeToggle";
 import { loadThemePreference, watchTheme, type ThemePreference } from "./theme";
 import type {
   Baseline,
@@ -38,10 +40,12 @@ export function App({ client = tauriJobClient }: AppProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [archivedJobs, setArchivedJobs] = useState<Job[]>([]);
   const [name, setName] = useState("");
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [loading, setLoading] = useState(true);
   const [refreshingJobs, setRefreshingJobs] = useState(false);
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [createError, setCreateError] = useState<string | null>(null);
   const [archiveError, setArchiveError] = useState<string | null>(null);
   const [archiveConflict, setArchiveConflict] = useState(false);
   const [pendingJobId, setPendingJobId] = useState<string | null>(null);
@@ -70,6 +74,11 @@ export function App({ client = tauriJobClient }: AppProps) {
   );
 
   useEffect(() => {
+    // Wait for React to re-enable the button before restoring native dialog focus.
+    if (!backupPending && (backupResult || backupError)) backupButtonRef.current?.focus();
+  }, [backupPending, backupResult, backupError]);
+
+  useEffect(() => {
     let active = true;
     client
       .listJobs()
@@ -92,8 +101,14 @@ export function App({ client = tauriJobClient }: AppProps) {
     event.preventDefault();
     if (!name.trim() || creating) return;
 
+    if (workspacePending) {
+      setCreateError("Finish saving the selected task before creating another job.");
+      return;
+    }
+    if (workspaceDirty && !window.confirm("Discard the unsaved changes to this task?")) return;
+
     setCreating(true);
-    setError(null);
+    setCreateError(null);
     try {
       const job = await client.createJob({
         name: name.trim(),
@@ -101,6 +116,7 @@ export function App({ client = tauriJobClient }: AppProps) {
       });
       setJobs((current) => [job, ...current]);
       setName("");
+      setSettingsOpen(false);
       // The just-created record is authoritative even before the list query has
       // observed it. Load its hierarchy directly so the first workspace opens.
       setOpenJobId(job.id);
@@ -109,7 +125,7 @@ export function App({ client = tauriJobClient }: AppProps) {
         .then((hierarchy) => setTaskLoads((current) => ({ ...current, [job.id]: { status: "loaded", hierarchy } })))
         .catch((reason: unknown) => setTaskLoads((current) => ({ ...current, [job.id]: { status: "error", message: errorMessage(reason) } })));
     } catch (reason: unknown) {
-      setError(errorMessage(reason));
+      setCreateError(errorMessage(reason));
     } finally {
       setCreating(false);
     }
@@ -135,7 +151,6 @@ export function App({ client = tauriJobClient }: AppProps) {
       setBackupError(errorMessage(reason));
     } finally {
       setBackupPending(false);
-      backupButtonRef.current?.focus();
     }
   }
 
@@ -296,84 +311,40 @@ export function App({ client = tauriJobClient }: AppProps) {
           </span>
         </a>
         <div className="header-controls">
-          <label className="theme-control">
-            <span>Theme</span>
-            <select
-              aria-label="Theme"
-              value={theme}
-              onChange={(event) =>
-                setTheme(event.target.value as ThemePreference)
-              }
-            >
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-          <div className="storage-actions">
-            <div className="storage-state" aria-label="Local storage status">
-              <span className="storage-state__dot" />
-              Local SQLite · on this device
-            </div>
-            {client.createVerifiedBackup ? (
-              <button
-                ref={backupButtonRef}
-                className="backup-action"
-                type="button"
-                onClick={() => void handleCreateVerifiedBackup()}
-                disabled={backupPending}
-                aria-describedby="backup-status"
-              >
-                {backupPending ? "Creating backup…" : "Create verified backup"}
-              </button>
-            ) : null}
-          </div>
+          <ThemeToggle theme={theme} onChange={setTheme} />
+          <button
+            className="settings-trigger"
+            type="button"
+            aria-label="Open settings"
+            title="Settings"
+            aria-haspopup="dialog"
+            onClick={() => { setCreateError(null); setSettingsOpen(true); }}
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M9.5 2.5h5l.5 2.2 1.6.9 2.1-.7 2.5 4.3-1.7 1.5v2.6l1.7 1.5-2.5 4.3-2.1-.7-1.6.9-.5 2.2h-5L9 19.3l-1.6-.9-2.1.7-2.5-4.3 1.7-1.5v-2.6L2.8 9.2l2.5-4.3 2.1.7L9 4.7Z" />
+            </svg>
+          </button>
         </div>
       </header>
 
+      <SettingsDialog
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        jobName={name}
+        onJobNameChange={setName}
+        onCreateJob={handleCreateJob}
+        creating={creating}
+        createError={createError}
+        canCreateBackup={Boolean(client.createVerifiedBackup)}
+        backupPending={backupPending}
+        backupResult={backupResult}
+        backupError={backupError}
+        onCreateBackup={() => void handleCreateVerifiedBackup()}
+        backupButtonRef={backupButtonRef}
+      />
+
       <main id="main" className="workspace">
-        <div id="backup-status" className="backup-status" aria-live="polite">
-          {backupResult === "cancelled" ? "Backup cancelled. Your local data was not changed." : null}
-          {backupResult && backupResult !== "cancelled" ? (
-            <p>
-              Verified backup created: {backupResult.destination} · {backupResult.byteSize.toLocaleString()} bytes · {backupResult.createdAtUtc}
-            </p>
-          ) : null}
-        </div>
-        {backupError ? (
-          <div className="inline-error" role="alert">
-            <strong>Couldn&apos;t create verified backup.</strong>
-            <span>{backupError}</span>
-          </div>
-        ) : null}
-        <section className="workspace-heading" aria-labelledby="jobs-heading">
-          <div>
-            <p className="eyebrow">Jobs</p>
-            <h1 id="jobs-heading">{openJobId ? "Your jobs" : "Your work, on your machine."}</h1>
-            {!openJobId ? (
-              <p className="lede">Start with one job. Your schedule stays on this device.</p>
-            ) : null}
-          </div>
-
-          <form className="new-job" onSubmit={handleCreateJob}>
-            <label htmlFor="job-name">Job name</label>
-            <div className="new-job__controls">
-              <input
-                id="job-name"
-                name="jobName"
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder="e.g. Ridgeline Fence — Phase 2"
-                maxLength={120}
-                autoComplete="off"
-              />
-              <button type="submit" disabled={creating || !name.trim()}>
-                {creating ? "Creating…" : "Create job"}
-              </button>
-            </div>
-          </form>
-        </section>
-
         {error ? (
           <div className="inline-error" role="alert">
             <strong>Couldn&apos;t update local job data.</strong>
@@ -398,7 +369,7 @@ export function App({ client = tauriJobClient }: AppProps) {
 
         <section className="job-section" aria-label="Saved jobs">
           <div className="section-rule">
-            <h2>Local jobs</h2>
+            <h1 id="jobs-heading">Local jobs</h1>
             <span>{jobs.length}</span>
           </div>
 
@@ -412,7 +383,7 @@ export function App({ client = tauriJobClient }: AppProps) {
               <p className="eyebrow">Ready when you are</p>
               <h2>No jobs yet</h2>
               <p>
-                Create the first job above. It will be stored in this app&apos;s
+                Create your first job in Settings. It will be stored in this app&apos;s
                 local database.
               </p>
             </div>
@@ -425,7 +396,7 @@ export function App({ client = tauriJobClient }: AppProps) {
                   </div>
                   <div className="job-card__content">
                     <div className="job-card__meta"><span className="status-tag">{job.status}</span></div>
-                    <h3>{job.name}</h3>
+                    <h2>{job.name}</h2>
                     <button
                       className="task-disclosure"
                       type="button"
