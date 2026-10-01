@@ -80,3 +80,26 @@ client-data acceptance and public release remain outside this signoff.
 ## Integration and handoff
 
 PR #77 merged as `193001c209107fa392a44eb52e6e2564b83c974a`. All final PR checks passed. Original main was fast-forwarded while preserving unrelated files. Independently extracted the retained ZIP, verified its signature and matched the installed executable hash. Fresh Project Pilot opens with zero jobs. Retained snapshots passed standalone integrity and foreign-key checks. The installed packaged importer passed cross-app retry/re-export acceptance.
+
+## 2026-10-01 jobs UI update
+
+Source: `d22529f0306c7ad6b09bb3780e6de274d2115937`, clean at build.
+Archive: `ContractorProject-Pilot-d22529f0306c.zip` in `pilot-artifacts/`.
+SHA-256: `d624a26c8c04e7e4066bfda56a86c2292c5542d2e6a75ba072b0c6830a754911`.
+Version 0.1.0, macOS 26.6.2, aarch64-apple-darwin, ad-hoc signed local Pilot.
+
+Installed in `~/Applications/ContractorProject Pilot.app`. Deep strict signature
+verification passed and the installed executable hash matches the staged build.
+The prior installed app bundle is retained in
+`pilot-artifacts/installed-before-ui-20261001.app`. The Pilot data directory was
+not replaced or edited during installation; the existing job remains visible.
+
+Native UI inspection confirmed the compact local job list, moon/gear controls,
+both theme directions, remembered dark appearance after restart, and Settings
+with job creation and verified backups. The backup action opened the system Save
+dialog. Cancel returned visible feedback and focus to the re-enabled backup
+button; Escape closed Settings. No test jobs were added to the working profile.
+Creation, draft protection, dialog keyboard behavior and responsive layout passed
+in the synthetic browser suite. All 102 unit tests, 36 browser tests, TypeScript,
+production build and local Rust gates passed. Canonical docs are in
+opencontractoros PR #9; app integration is PR #81.

@@ -42,3 +42,10 @@ Next: Keith enters the remaining-work schedule and takeover forecast baseline wi
 - Review: Corrected dark-mode tokens, heading order, icon alignment, and legacy creation tests. Native dialog tests allow browser chrome focus while checking that the background page remains inert.
 - Checks: TypeScript, 102 unit tests, all 36 browser tests, production build, Rust fmt, Clippy and all Rust tests passed. Desktop/minimum-window layout and jobs-page accessibility passed. Canonical docs merged in opencontractoros PR #9.
 - Next: Build and verify the updated installed Pilot, then merge the app PR and remove the branch.
+
+### 2026-10-01 America/New_York - Installed UI acceptance
+
+- Outcome: Installed clean source `d22529f` and verified its signature and executable hash. The jobs page matches the requested compact layout; Settings and both theme directions work. The existing Pilot job remains visible and the data directory was left in place.
+- Fix: Native acceptance caught backup focus restoration happening before React re-enabled the button. Moved focus restoration to an effect; confirmed native cancellation now returns focus to the backup button.
+- Checks: 102 unit tests and all 36 browser tests pass, including a backup blur regression; typecheck/build pass. Native Save dialog, cancellation feedback, Settings Escape, and theme persistence after restart verified. Artifact evidence is in the Pilot acceptance record.
+- Next: Merge PR #81 after its checks pass. This entry changes no runtime code from the accepted build.
