@@ -57,3 +57,9 @@ Next: Keith enters the remaining-work schedule and takeover forecast baseline wi
 - Review: Wired job calendar length into grid, explanations and both exports; fixed validation copy, updated precision/draft tests and compacted baseline labels to fit the minimum window. Reviewed the complete scoped diff. Canonical docs merged in opencontractoros PR #10.
 - Checks: Typecheck/build, all 106 unit tests, all 37 browser tests, Rust fmt/Clippy and 265 Rust tests (one existing ignored) pass. Both theme callouts exceed 4.5:1 contrast and axe checks pass.
 - Next: Build a clean Pilot, verify the installed UI with existing data, and merge after PR checks.
+
+### 2026-10-01 America/New_York - Installed day-planning acceptance
+
+- Outcome: Installed clean source `c3be256` and verified its signature, executable hash and retained archive checksum. Native setup is readable in both themes and has no clock/minute fields. Settings shows Backups without the SQLite line. Existing job and data directory remain in place.
+- Checks: Native backup dialog/cancel/focus and Settings Escape pass; dark theme and existing job survive restart. No schedule or task data was changed for acceptance. Synthetic day-conversion and export checks passed in the full suite; package evidence is in the Pilot acceptance record. All initial PR CI checks pass.
+- Next: Merge PR #86 after final evidence-commit checks; this entry changes no runtime code.
