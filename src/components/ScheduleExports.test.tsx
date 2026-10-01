@@ -40,4 +40,17 @@ describe("ScheduleExports", () => {
     expect(save).toHaveBeenCalledTimes(2);
     expect(screen.queryByRole("alert")).toBeNull();
   });
+
+  it("passes the job workday length into both day-based exports", async () => {
+    const csv = vi.spyOn(exports, "createScheduleCsv");
+    const report = vi.spyOn(exports, "createScheduleReport");
+    vi.spyOn(exports, "saveSchedule").mockResolvedValue(true);
+    const user = userEvent.setup();
+    render(<ScheduleExports readModel={readModel} jobName="Oak job" workdayDurationMinutes={360} />);
+
+    await user.click(screen.getByRole("button", { name: "Export CSV" }));
+    await user.click(screen.getByRole("button", { name: "Download printable schedule" }));
+    expect(csv).toHaveBeenCalledWith(readModel, "Oak job", 360);
+    expect(report).toHaveBeenCalledWith(readModel, "Oak job", 360);
+  });
 });

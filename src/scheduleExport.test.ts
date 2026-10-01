@@ -73,8 +73,12 @@ describe("schedule exports", () => {
     expect(csv).toContain("' =1+1");
     expect(csv).toContain("'=HYPERLINK");
     expect(csv).toContain('"\'=HYPERLINK(""https://bad.example"",""click"")\nsecond line"');
-    expect(csv).toContain("Prédecessor <unsafe> (FF, -60 min)");
-    expect(csv).toContain(",-30\r\n");
+    expect(csv).toContain("Prédecessor <unsafe> (FF, -0.125 working days)");
+    expect(csv).toContain(",2026-08-17,2026-08-17,1,25,inProgress,No,Needs attention: negative float,-0.125,");
+    expect(csv).toContain(",2026-08-18,2026-08-18,0,25,inProgress,No,Needs attention: negative float,-0.125,");
+    expect(csv).toContain(",2026-08-17,2026-08-17,0,1,1,-0.0625\r\n");
+    expect(csv).not.toContain("T08:");
+    expect(csv).not.toContain("minutes");
     expect(csv.split("\r\n")).toHaveLength(4);
   });
 
@@ -83,16 +87,37 @@ describe("schedule exports", () => {
 
     expect(report).toContain("<meta charset=\"utf-8\">");
     expect(report).toContain("A &lt; B &amp; &#39;quoted&#39;");
-    expect(report).toContain("Prédecessor &lt;unsafe&gt; (FF, -60 min)");
+    expect(report).toContain("Prédecessor &lt;unsafe&gt; (FF, -0.125 days)");
     expect(report).toContain("No comparison baseline selected");
     expect(report).toContain("No baseline");
     expect(report).toContain("0 of 2 activities completed");
     expect(report).toContain("Needs attention: negative float");
-    expect(report).toContain("start 1440 min, finish 1440 min, duration -30 min variance");
+    expect(report).toContain("start +1 calendar day, finish +1 calendar day, duration -0.063 days variance");
+    expect(report).toContain("2026-08-20</dd>");
+    expect(report).not.toContain("08:00");
+    expect(report).not.toContain(" min");
     expect(report).toContain("@page{size:landscape");
     expect(report).toContain("overflow-wrap:anywhere");
     expect(report).not.toContain('href="https://bad.example"');
     expect(report).toContain("@media print");
+  });
+
+  it("converts exported day numbers with a non-default workday without rounding CSV", () => {
+    const schedule = model([row({ durationMinutes: 480, totalFloatMinutes: -60, predecessors: [
+      { taskId: "source", dependencyType: "FS", lagMinutes: -60 },
+      { taskId: "source", dependencyType: "SS", lagMinutes: 1 },
+    ] })]);
+    const csv = createScheduleCsv(schedule, "Job", 360);
+    expect(csv).toContain("Duration (working days)");
+    expect(csv).toContain(",1.3333333333333333,");
+    expect(csv).toContain(",-0.16666666666666666,");
+    expect(csv).toContain(`${1 / 360} working days`);
+
+    const report = createScheduleReport(schedule, "Job", 360);
+    expect(report).toContain(">1.333 days<");
+    expect(report).toContain(">-0.167 days<");
+    expect(report).toContain("FS, -0.167 days");
+    expect(report).toContain("SS, +0.003 days");
   });
 
   it("honestly renders an empty schedule", () => {

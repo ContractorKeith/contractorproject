@@ -735,7 +735,7 @@ describe("job workspace", () => {
 
   it("edits persisted schedule inputs and keeps the shared job version synchronized", async () => {
     const user = userEvent.setup();
-    const job = { ...fixtureJob(), version: 3, calendar: defaultCalendar() };
+    const job = { ...fixtureJob(), version: 3, calendar: { ...defaultCalendar(), workdayStartMinute: 510, workdayDurationMinutes: 450 } };
     const first = {
       ...fixtureTask(job, "first", null, "Excavate", 0, 1),
       durationMinutes: null,
@@ -760,7 +760,7 @@ describe("job workspace", () => {
       version: 5,
       scheduleStart: "2026-08-17",
       calendar: {
-        ...defaultCalendar(),
+        ...job.calendar!,
         workingWeekdays: [
           ...defaultCalendar().workingWeekdays,
           "saturday" as const,
@@ -798,12 +798,14 @@ describe("job workspace", () => {
     await user.click(
       await screen.findByRole("button", { name: `Open schedule for ${job.name}` }),
     );
-    await user.selectOptions(screen.getByLabelText("Duration unit for Excavate"), "minutes");
-    await user.type(screen.getByLabelText("Duration for Excavate"), "480");
+    expect(screen.queryByLabelText("Workday start minute")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Workday duration minutes")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Duration unit for Excavate")).not.toBeInTheDocument();
+    await user.type(screen.getByLabelText("Duration for Excavate"), "1");
     await user.click(screen.getByRole("button", { name: "Save duration" }));
     expect(client.updateTaskDuration).toHaveBeenCalledWith({
       taskId: first.id,
-      durationMinutes: 480,
+      durationMinutes: 450,
       expectedVersion: 1,
       expectedJobVersion: 3,
     });
@@ -823,6 +825,8 @@ describe("job workspace", () => {
           scheduleStart: "2026-08-17",
           calendar: expect.objectContaining({
             workingWeekdays: expect.arrayContaining(["saturday"]),
+            workdayStartMinute: 510,
+            workdayDurationMinutes: 450,
           }),
         }),
       ),
@@ -837,8 +841,8 @@ describe("job workspace", () => {
       second.id,
     );
     await user.selectOptions(screen.getByLabelText("Dependency type"), "SS");
-    await user.clear(screen.getByLabelText("Dependency lag minutes"));
-    await user.type(screen.getByLabelText("Dependency lag minutes"), "-60");
+    await user.clear(screen.getByLabelText("Dependency lag in working days"));
+    await user.type(screen.getByLabelText("Dependency lag in working days"), "-0.13333333333333333");
     await user.click(screen.getByRole("button", { name: "Add dependency" }));
     await waitFor(() =>
       expect(client.addDependency).toHaveBeenCalledWith({
@@ -898,12 +902,12 @@ describe("job workspace", () => {
     await user.selectOptions(screen.getByLabelText("Dependency successor"), second.id);
     // A decimal (or any non-integer that would reach NaN, like a bare "-") must be
     // rejected client-side rather than sent to the store.
-    await user.clear(screen.getByLabelText("Dependency lag minutes"));
-    await user.type(screen.getByLabelText("Dependency lag minutes"), "1.5");
+    await user.clear(screen.getByLabelText("Dependency lag in working days"));
+    await user.type(screen.getByLabelText("Dependency lag in working days"), "0.001");
     await user.click(screen.getByRole("button", { name: "Add dependency" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /whole number of minutes/i,
+      /valid lag in working days/i,
     );
     expect(client.addDependency).not.toHaveBeenCalled();
   });

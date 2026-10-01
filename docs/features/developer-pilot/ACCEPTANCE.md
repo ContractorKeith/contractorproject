@@ -103,3 +103,31 @@ Creation, draft protection, dialog keyboard behavior and responsive layout passe
 in the synthetic browser suite. All 102 unit tests, 36 browser tests, TypeScript,
 production build and local Rust gates passed. Canonical docs are in
 opencontractoros PR #9; app integration is PR #81.
+
+## 2026-10-01 schedule setup and days update
+
+Source: `c3be2561d1c18ea25a39eec63d80bc9d811e837c`, clean at build.
+Archive: `ContractorProject-Pilot-c3be2561d1c1.zip` in `pilot-artifacts/`.
+SHA-256: `8bd0e469878e2b7349679c1494267c2ad90e3385b7416c2a6b3ac2e1122c3257`.
+Version 0.1.0, macOS 26.6.2, aarch64-apple-darwin, ad-hoc signed local Pilot.
+
+Installed in `~/Applications/ContractorProject Pilot.app`. Deep strict signature
+verification passed; the installed executable hash matches the staged bundle.
+Retained archive checksum matches its metadata. The previous installed bundle
+is retained in `pilot-artifacts/installed-before-day-planning-20261001.app`.
+The Pilot data directory was left in place; the existing job remains visible
+and no synthetic tasks, schedule settings or progress records were saved there.
+
+Native inspection confirmed readable setup guidance in dark and light themes,
+start/data-date and weekday controls without workday clock/minute fields, and
+Settings with creation and Backups but no SQLite status. The backup Save dialog
+opens; Cancel returns feedback and focus to its button, and Escape closes
+Settings. Dark appearance and the existing job survive a fresh restart.
+
+Day inputs, custom saved calendars, signed dependency lag, precise CSV numbers,
+Gantt/report dates and day-based variance were verified using synthetic tests.
+All 106 unit tests, 37 browser tests, TypeScript/build, Rust fmt/Clippy and
+265 Rust tests (one existing ignored) pass. Setup contrast exceeds 4.5:1 and
+axe checks pass in both themes; baseline facts fit the 760px window.
+Canonical docs merged in opencontractoros PR #10. Integration is PR #86,
+closing #82–#85. This evidence entry changes no runtime code.

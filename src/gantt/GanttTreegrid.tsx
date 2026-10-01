@@ -17,7 +17,7 @@ import type {
   GanttReadModel,
   GanttRow,
 } from "../types/gantt";
-import { formatInstant, formatSignedMinutes } from "./format";
+import { formatDayQuantity, formatDays, formatInstant, formatSignedCalendarDays, formatSignedDays } from "./format";
 import { GANTT_ZOOMS, GanttTimeline, type GanttZoom } from "./GanttTimeline";
 import {
   selectPresentedGanttRows,
@@ -40,6 +40,8 @@ interface ActiveCell {
 
 export interface GanttTreegridProps {
   readModel: GanttReadModel;
+  /** Job calendar workday length in minutes. Defaults for older consumers. */
+  workdayDurationMinutes?: number;
   ariaLabel?: string;
   viewportHeight?: number;
   todayDate?: string | undefined;
@@ -55,6 +57,7 @@ export interface GanttTreegridProps {
 /** Authoritative, keyboard-operable work-breakdown projection for a Gantt schedule. */
 export function GanttTreegrid({
   readModel,
+  workdayDurationMinutes = 480,
   ariaLabel = "Work breakdown schedule",
   viewportHeight = DEFAULT_VIEWPORT_HEIGHT,
   todayDate,
@@ -492,6 +495,7 @@ export function GanttTreegrid({
                     <TaskRow
                       key={ganttRow.taskId}
                       row={ganttRow}
+                      workdayDurationMinutes={workdayDurationMinutes}
                       visibleIndex={virtualRow.index}
                       collapsed={presentation.filtering ? false : collapsedTaskIds.has(ganttRow.taskId)}
                       hierarchyReadOnly={presentation.filtering}
@@ -533,6 +537,7 @@ export function GanttTreegrid({
 
 interface TaskRowProps {
   row: GanttRow;
+  workdayDurationMinutes: number;
   visibleIndex: number;
   collapsed: boolean;
   hierarchyReadOnly: boolean;
@@ -554,6 +559,7 @@ interface TaskRowProps {
 
 function TaskRow({
   row,
+  workdayDurationMinutes,
   visibleIndex,
   collapsed,
   hierarchyReadOnly,
@@ -607,7 +613,7 @@ function TaskRow({
         </span>
       </span>
     </span>,
-    detailsVisible ? <DurationValue key="duration" row={row} /> : <span key="duration" title={formatMinutes(row.durationMinutes)}>{row.durationMinutes % 60 === 0 ? `${row.durationMinutes / 60} h` : formatMinutes(row.durationMinutes)}</span>,
+    detailsVisible ? <DurationValue key="duration" row={row} workdayDurationMinutes={workdayDurationMinutes} /> : <span key="duration">{row.milestone ? "Milestone" : formatDayQuantity(row.durationMinutes, workdayDurationMinutes)}</span>,
     <ProgressValue key="progress" row={row} />,
     detailsVisible ? <ScheduleDate
       key="start"
@@ -623,8 +629,8 @@ function TaskRow({
       variance={row.baseline?.finishVarianceMinutes ?? null}
       constraint={row.finishNoLaterThan ? `≤ ${row.finishNoLaterThan}` : null}
     /> : <span key="finish" title={currentFinish}>{formatLocalDate(row.finish)}</span>,
-    <PredecessorValue key="predecessors" row={row} />,
-    <FloatValue key="float" row={row} />,
+    <PredecessorValue key="predecessors" row={row} workdayDurationMinutes={workdayDurationMinutes} />,
+    <FloatValue key="float" row={row} workdayDurationMinutes={workdayDurationMinutes} />,
   ];
 
   return (
@@ -647,7 +653,7 @@ function TaskRow({
             key={columns[columnIndex]}
             role={columnIndex === TREE_COLUMN_INDEX ? "rowheader" : "gridcell"}
             scope={columnIndex === TREE_COLUMN_INDEX ? "row" : undefined}
-            aria-label={cellLabel(row, columnIndex)}
+            aria-label={cellLabel(row, columnIndex, workdayDurationMinutes)}
             tabIndex={active ? 0 : -1}
             ref={(element) => registerCell(cellKey({ taskId: row.taskId, columnIndex }), element)}
             onClick={(event) => onActivate(event, row, columnIndex)}
@@ -677,14 +683,14 @@ function ScheduleDate({
     <span className="gantt-treegrid__date gantt-treegrid__date--detail">
       <span data-testid="schedule-current">{current}</span>
       <span className="gantt-treegrid__secondary" data-testid="schedule-baseline">
-        {baseline ? `Baseline ${baseline} ${formatSignedMinutes(variance ?? 0)}` : "No baseline"}
+        {baseline ? `Baseline ${baseline} ${compactCalendarVariance(variance ?? 0)}` : "No baseline"}
       </span>
       {constraint ? <span className="gantt-treegrid__constraint-date" data-testid="schedule-constraint">{constraint}</span> : null}
     </span>
   );
 }
 
-function DurationValue({ row }: { row: GanttRow }) {
+function DurationValue({ row, workdayDurationMinutes }: { row: GanttRow; workdayDurationMinutes: number }) {
   // Visible duration plus the Rust-derived baseline duration variance fact, so
   // schedule slippage in scope is text, not color-only. Summaries carry no
   // baseline and simply show their rolled-up duration. Milestones (zero-length)
@@ -694,11 +700,11 @@ function DurationValue({ row }: { row: GanttRow }) {
   return (
     <span className="gantt-treegrid__duration gantt-treegrid__date--detail">
       <span data-testid={`duration-current-${row.taskId}`}>
-        {row.milestone ? "Milestone" : formatMinutes(row.durationMinutes)}
+        {row.milestone ? "Milestone" : formatDayQuantity(row.durationMinutes, workdayDurationMinutes)}
       </span>
       {showBaseline ? (
         <span className="gantt-treegrid__secondary" data-testid={`duration-baseline-${row.taskId}`}>
-          {baselineDurationFact(baseline)}
+          {baselineDurationFact(baseline, workdayDurationMinutes)}
         </span>
       ) : null}
     </span>
@@ -718,11 +724,11 @@ function ProgressValue({ row }: { row: GanttRow }) {
   );
 }
 
-function FloatValue({ row }: { row: GanttRow }) {
+function FloatValue({ row, workdayDurationMinutes }: { row: GanttRow; workdayDurationMinutes: number }) {
   if (row.constraintViolated) {
     return (
       <span className="gantt-treegrid__constraint-float" data-testid={`constraint-float-${row.taskId}`}>
-        <span>{formatCompactFloat(row.totalFloatMinutes)}</span>
+        <span>{formatSignedDays(row.totalFloatMinutes, workdayDurationMinutes)}</span>
         <span>Constraint</span>
         <span>violated</span>
       </span>
@@ -748,32 +754,32 @@ function FloatValue({ row }: { row: GanttRow }) {
         </svg>
       ) : null}
       {row.critical
-        ? `Critical · ${formatSignedMinutes(row.totalFloatMinutes)}`
-        : formatSignedMinutes(row.totalFloatMinutes)}
+        ? `Critical · ${formatSignedDays(row.totalFloatMinutes, workdayDurationMinutes)}`
+        : formatSignedDays(row.totalFloatMinutes, workdayDurationMinutes)}
     </span>
   );
 }
 
 // The Predecessors cell always renders explicit per-link annotations so a bare
-// id can never be mistaken for FS+0. Each link reads "T2 SS +120 min" (the lag
+// id can never be mistaken for FS+0. Each link reads "T2 SS +0.25 days" (the lag
 // text is dropped at zero: "T2 FS"). Links flow comma-separated and wrap in
 // reading order; the inline flow keeps multi-link cells compact enough to hold
 // spare vertical track lines at the compact wide-screen row height.
-function PredecessorValue({ row }: { row: GanttRow }) {
+function PredecessorValue({ row, workdayDurationMinutes }: { row: GanttRow; workdayDurationMinutes: number }) {
   if (row.predecessors.length === 0) {
     return <span data-testid={`predecessors-${row.taskId}`}>None</span>;
   }
   return (
     <span className="gantt-treegrid__predecessors" data-testid={`predecessors-${row.taskId}`}>
-      {row.predecessors.map(predecessorAnnotation).join(", ")}
+      {row.predecessors.map((link) => predecessorAnnotation(link, workdayDurationMinutes)).join(", ")}
     </span>
   );
 }
 
-// Visible annotation for one predecessor link, e.g. "T2 SS +120 min" or "T2 FS".
-function predecessorAnnotation(link: GanttPredecessorLink): string {
+// Visible annotation for one predecessor link, e.g. "T2 SS +0.25 days" or "T2 FS".
+function predecessorAnnotation(link: GanttPredecessorLink, workdayDurationMinutes: number): string {
   if (link.lagMinutes === 0) return `${link.taskId} ${link.dependencyType}`;
-  return `${link.taskId} ${link.dependencyType} ${formatSignedMinutes(link.lagMinutes)}`;
+  return `${link.taskId} ${link.dependencyType} ${formatSignedDays(link.lagMinutes, workdayDurationMinutes)}`;
 }
 
 // Full spoken relationship name for a dependency type code.
@@ -791,12 +797,12 @@ function dependencyTypeName(type: GanttDependencyType): string {
 }
 
 // Accessible fragment for one predecessor link, joined into the row label,
-// e.g. "predecessor T2, start-to-start, lag +120 minutes".
-function predecessorLinkLabel(link: GanttPredecessorLink): string {
+// e.g. "predecessor T2, start-to-start, lag +0.25 days".
+function predecessorLinkLabel(link: GanttPredecessorLink, workdayDurationMinutes: number): string {
   const lag =
     link.lagMinutes === 0
       ? "no lag"
-      : `lag ${formatSignedMinutes(link.lagMinutes).replace(" min", " minutes")}`;
+      : `lag ${formatSignedDays(link.lagMinutes, workdayDurationMinutes)}`;
   return `predecessor ${link.taskId}, ${dependencyTypeName(link.dependencyType)}, ${lag}`;
 }
 
@@ -815,28 +821,21 @@ function cellKey(cell: ActiveCell): string {
 // Shared with the explanation panel; the lockstep instant format is a contract.
 const formatLocalDateTime = formatInstant;
 
-// Civil date only (drops the clock time). The visible baseline fragment uses
-// this to fit the narrow cell; the full instant stays in the accessible name.
+// Civil date only for all schedule surfaces.
 function formatLocalDate(value: string): string {
   return value.slice(0, 10);
 }
 
-function formatMinutes(value: number): string {
-  return `${value.toLocaleString("en-US")} min`;
+// Visible baseline duration fact, with duration and variance in working days.
+function baselineDurationFact(baseline: NonNullable<GanttRow["baseline"]>, workdayDurationMinutes: number): string {
+  return `Baseline ${formatDays(baseline.durationMinutes, workdayDurationMinutes)} ${formatSignedDays(baseline.durationVarianceMinutes, workdayDurationMinutes)}`;
 }
 
-function formatCompactFloat(value: number): string {
-  if (value === 0) return "0";
-  return `${value > 0 ? "+" : ""}${value.toLocaleString("en-US")}`;
+function compactCalendarVariance(minutes: number): string {
+  return formatSignedCalendarDays(minutes).replace("calendar day", "cal. day");
 }
 
-// Visible baseline duration fact. The unit is dropped from the first number
-// (the variance keeps it) to shorten the fragment for the narrow Duration cell.
-function baselineDurationFact(baseline: NonNullable<GanttRow["baseline"]>): string {
-  return `Baseline ${baseline.durationMinutes.toLocaleString("en-US")} ${formatSignedMinutes(baseline.durationVarianceMinutes)}`;
-}
-
-function cellLabel(row: GanttRow, columnIndex: number): string {
+function cellLabel(row: GanttRow, columnIndex: number, workdayDurationMinutes: number): string {
   const prefix = `${row.wbs} ${row.name}`;
   switch (columnIndex) {
     case 0:
@@ -844,7 +843,7 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 1:
       return `${prefix}, task, ${row.summary ? "summary" : row.milestone ? "milestone" : "activity"}, ${row.critical ? "critical" : "not critical"}, ${constraintLabel(row)}`;
     case 2:
-      return `${prefix}, duration, ${row.milestone ? "milestone" : formatMinutes(row.durationMinutes)}, ${baselineDurationLabel(row)}`;
+      return `${prefix}, duration, ${row.milestone ? "milestone" : formatDayQuantity(row.durationMinutes, workdayDurationMinutes)}, ${baselineDurationLabel(row, workdayDurationMinutes)}`;
     case 3:
       return `${prefix}, percent complete, ${progressLabel(row)}`;
     case 4:
@@ -852,9 +851,9 @@ function cellLabel(row: GanttRow, columnIndex: number): string {
     case 5:
       return `${prefix}, finish, ${formatLocalDateTime(row.finish)}, ${baselineLabel(row, "finish")}`;
     case 6:
-      return `${prefix}, predecessors, ${row.predecessors.length > 0 ? row.predecessors.map(predecessorLinkLabel).join(", ") : "none"}`;
+      return `${prefix}, predecessors, ${row.predecessors.length > 0 ? row.predecessors.map((link) => predecessorLinkLabel(link, workdayDurationMinutes)).join(", ") : "none"}`;
     default:
-      return `${prefix}, total float, ${formatSignedMinutes(row.totalFloatMinutes)}, ${row.critical ? "critical" : "not critical"}, ${row.constraintViolated ? "constraint violated" : "constraint satisfied"}`;
+      return `${prefix}, total float, ${formatSignedDays(row.totalFloatMinutes, workdayDurationMinutes)}, ${row.critical ? "critical" : "not critical"}, ${row.constraintViolated ? "constraint violated" : "constraint satisfied"}`;
   }
 }
 
@@ -883,17 +882,16 @@ function constraintLabel(row: GanttRow): string {
   return constraints.length > 0 ? constraints.join(", ") : "no task constraints";
 }
 
-function baselineDurationLabel(row: GanttRow): string {
+function baselineDurationLabel(row: GanttRow, workdayDurationMinutes: number): string {
   // Milestones suppress the visible duration fact, so the label matches.
   if (!row.baseline || row.milestone) return "no baseline";
-  return `baseline duration ${formatMinutes(row.baseline.durationMinutes)}, variance ${formatSignedMinutes(row.baseline.durationVarianceMinutes)}`;
+  return `baseline duration ${formatDayQuantity(row.baseline.durationMinutes, workdayDurationMinutes)}, variance ${formatSignedDays(row.baseline.durationVarianceMinutes, workdayDurationMinutes)}`;
 }
 
 function baselineLabel(row: GanttRow, field: "start" | "finish"): string {
   if (!row.baseline) return "no baseline";
   const value = field === "start" ? row.baseline.start : row.baseline.finish;
   const variance = field === "start" ? row.baseline.startVarianceMinutes : row.baseline.finishVarianceMinutes;
-  // The accessible name keeps the precise instant even though the visible fact
-  // shows the civil date only.
-  return `baseline ${field} ${formatLocalDateTime(value)}, variance ${formatSignedMinutes(variance)}`;
+  // Start/finish variance is elapsed calendar time, expressed in calendar days.
+  return `baseline ${field} ${formatLocalDate(value)}, variance ${formatSignedCalendarDays(variance)}`;
 }

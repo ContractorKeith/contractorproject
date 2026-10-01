@@ -5,7 +5,7 @@ import type {
   GanttScheduleDriver,
   GanttTaskExplanation,
 } from "../types/gantt";
-import { formatInstant, formatSignedMinutes } from "./format";
+import { formatInstant, formatSignedDays } from "./format";
 import "./explanationPanel.css";
 
 export interface ExplanationPanelProps {
@@ -13,6 +13,8 @@ export interface ExplanationPanelProps {
   row: GanttRow | null;
   /** Resolve relationship identities to names in the contractor workspace. */
   taskNames?: ReadonlyMap<string, string>;
+  /** Job calendar workday length in minutes. Defaults for older fixtures. */
+  workdayDurationMinutes?: number;
 }
 
 /**
@@ -21,7 +23,7 @@ export interface ExplanationPanelProps {
  * scheduler's typed facts verbatim and never does schedule math. The model-prose
  * treatment stays reserved for the future AI assistant layer.
  */
-export function ExplanationPanel({ row, taskNames }: ExplanationPanelProps) {
+export function ExplanationPanel({ row, taskNames, workdayDurationMinutes = 480 }: ExplanationPanelProps) {
   const label = row ? `Schedule explanation for ${row.name}` : "Schedule explanation";
   return (
     <section className="explanation-panel" role="region" aria-label={label}>
@@ -35,7 +37,7 @@ export function ExplanationPanel({ row, taskNames }: ExplanationPanelProps) {
       </h2>
       <div className="explanation-panel__facts">
         {row ? (
-          explanationFactLines(row.explanation, taskNames).map((line, index) => (
+          explanationFactLines(row.explanation, taskNames, workdayDurationMinutes).map((line, index) => (
             <p className="explanation-panel__fact" key={index}>
               {line}
             </p>
@@ -51,7 +53,7 @@ export function ExplanationPanel({ row, taskNames }: ExplanationPanelProps) {
 }
 
 /** The ordered deterministic fact lines for one explanation. */
-function explanationFactLines(explanation: GanttTaskExplanation, names?: ReadonlyMap<string, string>): string[] {
+function explanationFactLines(explanation: GanttTaskExplanation, names: ReadonlyMap<string, string> | undefined, workdayDurationMinutes: number): string[] {
   switch (explanation.kind) {
     case "summary":
       return ["Derived from children"];
@@ -62,9 +64,9 @@ function explanationFactLines(explanation: GanttTaskExplanation, names?: Readonl
         )}`,
       ];
     case "scheduled": {
-      const lines = [`Driver ${driverText(explanation.primaryDriver, names)}`];
+      const lines = [`Driver ${driverText(explanation.primaryDriver, names, workdayDurationMinutes)}`];
       for (const driver of explanation.otherBindingDrivers) {
-        lines.push(`Also ${driverText(driver, names)}`);
+        lines.push(`Also ${driverText(driver, names, workdayDurationMinutes)}`);
       }
       if (explanation.startedActualStart) {
         lines.push(`Started ${formatInstant(explanation.startedActualStart)}`);
@@ -74,15 +76,15 @@ function explanationFactLines(explanation: GanttTaskExplanation, names?: Readonl
         const noun = nonWorkingDayCount === 1 ? "non-working day" : "non-working days";
         lines.push(`${nonWorkingDayCount} ${noun} between ${fromDate} and ${toDate}`);
       }
-      lines.push(floatText(explanation.totalFloatMinutes, explanation.critical));
-      lines.push(limitText(explanation.lateFinishLimit, names));
+      lines.push(floatText(explanation.totalFloatMinutes, explanation.critical, workdayDurationMinutes));
+      lines.push(limitText(explanation.lateFinishLimit, names, workdayDurationMinutes));
       return lines;
     }
   }
 }
 
 /** Driver rendering for a `Driver`/`Also` fact line. */
-function driverText(driver: GanttScheduleDriver, names?: ReadonlyMap<string, string>): string {
+function driverText(driver: GanttScheduleDriver, names: ReadonlyMap<string, string> | undefined, workdayDurationMinutes: number): string {
   switch (driver.kind) {
     case "scheduleStart":
       return "Starts at schedule start";
@@ -99,18 +101,19 @@ function driverText(driver: GanttScheduleDriver, names?: ReadonlyMap<string, str
         names?.get(driver.taskId) ?? driver.taskId,
         driver.dependencyType,
         driver.lagMinutes,
+        workdayDurationMinutes,
       )}`;
   }
 }
 
-/** Float rationale line, e.g. `Float +480 min` or `Float -480 min · critical`. */
-function floatText(totalFloatMinutes: number, critical: boolean): string {
-  const base = `Float ${formatSignedMinutes(totalFloatMinutes)}`;
+/** Float rationale line, e.g. `Float +1 day` or `Float -1 day · critical`. */
+function floatText(totalFloatMinutes: number, critical: boolean, workdayDurationMinutes: number): string {
+  const base = `Float ${formatSignedDays(totalFloatMinutes, workdayDurationMinutes)}`;
   return critical ? `${base} · critical` : base;
 }
 
 /** Late-finish limit fact line. */
-function limitText(limit: GanttLateFinishLimit, names?: ReadonlyMap<string, string>): string {
+function limitText(limit: GanttLateFinishLimit, names: ReadonlyMap<string, string> | undefined, workdayDurationMinutes: number): string {
   switch (limit.kind) {
     case "deadline":
       return `Finish limited by deadline ${limit.date}${appliedFragment(
@@ -122,6 +125,7 @@ function limitText(limit: GanttLateFinishLimit, names?: ReadonlyMap<string, stri
         names?.get(limit.taskId) ?? limit.taskId,
         limit.dependencyType,
         limit.lagMinutes,
+        workdayDurationMinutes,
       )}`;
     case "projectFinish":
       return "Finish limited by project finish";
@@ -138,9 +142,9 @@ function finishAnchored(type: GanttDependencyType): boolean {
   return type === "FF" || type === "SF";
 }
 
-// Typed-link fragment mirroring the Predecessors-cell format, e.g. `B FS +480 min`.
+// Typed-link fragment mirroring the Predecessors-cell format, e.g. `B FS +1 day`.
 // The lag fragment is dropped at zero (`B FS`).
-function linkText(taskId: string, type: GanttDependencyType, lagMinutes: number): string {
+function linkText(taskId: string, type: GanttDependencyType, lagMinutes: number, workdayDurationMinutes: number): string {
   if (lagMinutes === 0) return `${taskId} ${type}`;
-  return `${taskId} ${type} ${formatSignedMinutes(lagMinutes)}`;
+  return `${taskId} ${type} ${formatSignedDays(lagMinutes, workdayDurationMinutes)}`;
 }

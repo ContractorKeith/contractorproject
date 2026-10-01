@@ -21,40 +21,23 @@ inside the % Done cell's accessible name rather than as dedicated visible cells.
 - The contractor workspace defaults to six columns: WBS, Name, Duration,
   % Done, Start and Finish (`aria-colcount="6"`). **Show schedule details** adds
   Predecessors and Float (`aria-colcount="8"`), baseline and constraint text,
-  and precise timestamps. Standalone verification defaults to this detailed
-  mode. The Name column remains the tree column and disclosure owner. Compact
-  mode gives names more space, uses civil dates and whole hours when exact,
-  and preserves precise facts in accessible names and the explanation panel.
-- Task, duration, current and baseline dates, signed variance, total float,
-  critical and milestone state, typed predecessor links, leaf constraint dates,
-  and scheduler-provided constraint violations remain visible cell text. A
-  leaf violation is direct; a summary violation is derived from descendants.
-  The Start and Finish cells use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; the Float
-  cell shows compact `Constraint` / `violated` text, so color is never the only
-  signal.
-- The Duration cell renders the Rust `durationMinutes` as visible `NNN min`
-  text (or `Milestone`) and, for non-milestone rows carrying a baseline, a
-  stacked baseline duration variance fact `Baseline 360 +120 min` (the unit is
-  dropped from the first number to fit the narrow cell; the variance keeps it).
-  Its accessible name adds the same fact, e.g. `..., duration, 480 min, baseline
-  duration 360 min, variance +120 min`, or `no baseline` when absent or on a
-  milestone. Milestones suppress the duration fact because their slippage
-  already reads on Start and Finish. The Start and Finish cells show the visible
-  baseline fact as the civil date only, e.g. `Baseline 2026-08-14 +4,320 min`
-  (the clock time is dropped so the fact fits the narrow cell and the Name column
-  keeps its reading width); their accessible names keep the precise instant, e.g.
-  `..., start, 2026-08-17 08:00, baseline start 2026-08-14 08:00, variance +4,320
-  min`, and the timeline ghost bar carries the exact position. Duration variance
-  is computed in Rust and never derived in React.
-- The Predecessors cell renders every link explicitly so a bare id can never be
-  read as an implicit `FS+0`. Each link shows `<pred> <TYPE> <±lag> min`, e.g.
-  `T2 SS +120 min` or `T3 FF -60 min`; the lag fragment is dropped at zero
-  (`T2 FS`). Links wrap one per line and stretch to the row track, mirroring the
-  baseline facts, and long task ids break within the cell so a line never
-  overflows. The cell's accessible name spells each link out in the joined-string
-  style, e.g. `..., predecessors, predecessor T2, start-to-start, lag +120
-  minutes, predecessor T3, finish-to-finish, lag -60 minutes` (a zero-lag link
-  reads `no lag`). React renders the Rust-sorted links and derives nothing.
+  and day-based variance. Standalone verification defaults to this detailed
+  mode. The Name column remains the tree column and disclosure owner.
+- Current and baseline dates render civil dates. Duration, dependency lag,
+  total float and duration variance render working days using the saved job
+  calendar; start/finish variance renders elapsed calendar days. The internal
+  read model retains exact timestamps and minute values for schedule geometry.
+- Leaf constraint dates use `≥ YYYY-MM-DD` and `≤ YYYY-MM-DD`; violated
+  constraints and critical/milestone state remain text as well as color.
+- Duration cells show days (or `Milestone`) with baseline duration and signed
+  variance when present. Accessible names include the same day-based facts.
+  Baseline Start and Finish cells include the civil date and signed calendar-day
+  variance; the timeline ghost bar retains its exact position. Rust computes
+  all variance values; React only converts their presentation units.
+- Predecessor cells spell out every link: `T2 SS +2 days` or `T3 FF -1 day`;
+  zero lag is omitted (`T2 FS`). Accessible names spell out the relationship
+  and signed day value. Links wrap one per line, long ids break within the
+  cell, and Rust supplies the sorted links.
 - The supplemental timeline draws a dependency line per link with type-aware
   anchors taken straight from the row instants (no schedule math): the line
   leaves the predecessor start for `SS`/`SF` and its finish for `FS`/`FF`, and
@@ -126,13 +109,13 @@ flags" treatment, never the indented model-prose treatment reserved for the AI
 layer. Each fact is the scheduler's own typed data rendered verbatim (no
 schedule math): a `summary` shows `Derived from children`; a `complete` leaf
 shows `Complete · actual <start> – <finish>`; a `scheduled` leaf shows a
-`Driver` line, any `Also` co-binding drivers, an optional `Started <instant>`, an
-optional singular/plural non-working-day gap, a `Float <signed> min` line
+`Driver` line, any `Also` co-binding drivers, an optional `Started <date>`, an
+optional singular/plural non-working-day gap, a `Float <signed> days` line
 (`· critical` appended when critical), and the `lateFinishLimit` fact. A
 predecessor driver reads `After <link>` for the start-anchored FS/SS types and
 `Finish after <link>` for the finish-anchored FF/SF types; constraint and
 deadline facts append ` · applied <date>` when normalization moved the entered
-date. Typed links reuse the Predecessors-cell format (`B FS +480 min`, lag
+date. Typed links reuse the Predecessors-cell format (`B FS +1 day`, lag
 dropped at zero). The workspace resolves relationship IDs to task names;
 unknown IDs and standalone verification retain the identity as a fallback.
 With no focused task the panel reads `Focus a task to see what drives it.`

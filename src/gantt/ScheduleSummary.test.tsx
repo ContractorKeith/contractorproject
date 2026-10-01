@@ -86,7 +86,7 @@ describe("ScheduleSummary", () => {
 
     render(<ScheduleSummary readModel={readModel} />);
     expect(screen.getByRole("region", { name: "Schedule summary" })).toHaveTextContent("1 of 3 complete");
-    expect(screen.getByRole("region", { name: "Schedule summary" })).toHaveTextContent("Set posts2026-08-18 08:00");
+    expect(screen.getByRole("region", { name: "Schedule summary" })).toHaveTextContent("Set posts2026-08-18");
     expect(screen.getByRole("region", { name: "Schedule summary" })).toHaveTextContent("No progress recorded yet");
   });
 

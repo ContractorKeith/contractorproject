@@ -92,14 +92,14 @@ test("announces visible constraint values and direct violations without color-on
     await expect(constrainedName).toBeVisible();
     const constrainedRow = page.locator('tr[data-task-id="phase-1-task-1"]');
     const visibleFacts = constrainedRow.locator("[data-testid='schedule-current'], [data-testid='schedule-baseline'], [data-testid='schedule-constraint'], .gantt-treegrid__constraint-float");
-    await expect(visibleFacts.nth(0)).toHaveText("2026-08-17 08:00");
-    await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 +4,320 min");
+    await expect(visibleFacts.nth(0)).toHaveText("2026-08-17");
+    await expect(visibleFacts.nth(1)).toHaveText("Baseline 2026-08-14 +3 cal. days");
     await expect(visibleFacts.nth(2)).toHaveText("≥ 2026-08-18");
     await expect(constrainedRow.getByTestId("constraint-float-phase-1-task-1")).toHaveText(/Constraint\s*violated/);
     // The Duration cell surfaces the Rust-derived baseline duration variance fact
-    // (unit dropped from the first number to shorten the narrow-cell fragment).
+    // Duration facts show the calendar's working-day units.
     const durationBaseline = constrainedRow.getByTestId("duration-baseline-phase-1-task-1");
-    await expect(durationBaseline).toHaveText("Baseline 360 +120 min");
+    await expect(durationBaseline).toHaveText("Baseline 0.75 +0.25 days");
 
     // Milestone rows suppress the duration fact (they carry start/finish baselines).
     const milestoneDuration = page.locator('tr[data-task-id="phase-1-task-99"] [data-testid="duration-baseline-phase-1-task-99"]');
@@ -182,7 +182,7 @@ test("announces visible constraint values and direct violations without color-on
   }
 
   const float = page.getByRole("gridcell", {
-    name: /1\.1 Activity 1, total float, 0 min, critical, constraint violated/,
+    name: /1\.1 Activity 1, total float, 0 days, critical, constraint violated/,
   });
   await expect(float).toHaveText(/Constraint\s*violated/);
 });
@@ -875,20 +875,20 @@ test("renders typed predecessor annotations with accessible names and stays acce
 
   // Activity 5 carries an SS+120 link from Activity 4 (phase-1-task-4).
   const ssCell = page.getByRole("gridcell", {
-    name: /1\.5 Activity 5, predecessors, predecessor phase-1-task-4, start-to-start, lag \+120 minutes/,
+    name: /1\.5 Activity 5, predecessors, predecessor phase-1-task-4, start-to-start, lag \+0.25 days/,
   });
   await expect(ssCell).toBeVisible();
-  await expect(page.getByTestId("predecessors-phase-1-task-5")).toHaveText(/phase-1-task-4 SS \+120 min/);
+  await expect(page.getByTestId("predecessors-phase-1-task-5")).toHaveText(/phase-1-task-4 SS \+0.25 days/);
 
   // Activity 6 carries an FF-60 link (negative lag).
   const ffCell = page.getByRole("gridcell", {
-    name: /1\.6 Activity 6, predecessors, predecessor phase-1-task-5, finish-to-finish, lag -60 minutes/,
+    name: /1\.6 Activity 6, predecessors, predecessor phase-1-task-5, finish-to-finish, lag -0.125 days/,
   });
   await expect(ffCell).toBeVisible();
-  await expect(page.getByTestId("predecessors-phase-1-task-6")).toHaveText(/phase-1-task-5 FF -60 min/);
+  await expect(page.getByTestId("predecessors-phase-1-task-6")).toHaveText(/phase-1-task-5 FF -0.125 days/);
 
   // Activity 7 carries an SF+240 link.
-  await expect(page.getByTestId("predecessors-phase-1-task-7")).toHaveText(/phase-1-task-6 SF \+240 min/);
+  await expect(page.getByTestId("predecessors-phase-1-task-7")).toHaveText(/phase-1-task-6 SF \+0.5 days/);
   // A plain FS+0 link drops the lag text entirely.
   await expect(page.getByTestId("predecessors-phase-1-task-2")).toHaveText(/^phase-1-task-1 FS$/);
 

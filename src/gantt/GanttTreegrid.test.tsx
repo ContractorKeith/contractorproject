@@ -148,6 +148,17 @@ const fixtureRows = [
 ];
 
 describe("GanttTreegrid", () => {
+  it("uses the supplied workday length for duration, lag, float, and baseline facts", () => {
+    render(<GanttTreegrid readModel={model(fixtureRows)} workdayDurationMinutes={600} />);
+    const layout = screen.getByRole("row", { name: /1\.1 Layout/ });
+    expect(layout).toHaveTextContent("Baseline 0.7 +0.1 days");
+    expect(layout).toHaveTextContent("survey-control SS +0.2 days");
+    const closeout = screen.getByRole("row", { name: /2 Closeout/ });
+    expect(closeout).toHaveTextContent("-0.1 days");
+    expect(closeout).toHaveTextContent("task-b FF -0.1 days");
+    expect(layout).not.toHaveTextContent("min");
+  });
+
   it("renders stable treegrid semantics and every authoritative schedule fact as text", () => {
     render(<GanttTreegrid readModel={model(fixtureRows)} />);
 
@@ -163,23 +174,22 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).toHaveAttribute("aria-posinset", "1");
     expect(layoutRow).toHaveAttribute("aria-setsize", "2");
     expect(layoutRow).not.toHaveAttribute("aria-expanded");
-    expect(layoutRow).toHaveTextContent("2026-08-17 08:00");
-    // The visible baseline fact shows the civil date only; the clock time stays
-    // in the accessible name.
-    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 +60 min");
+    expect(layoutRow).toHaveTextContent("2026-08-17");
+    expect(layoutRow).not.toHaveTextContent("08:00");
+    expect(layoutRow).toHaveTextContent("Baseline 2026-08-17 +0.042 cal. days");
     expect(
       screen.getByRole("gridcell", {
-        name: /1\.1 Layout, start, 2026-08-17 08:00, baseline start 2026-08-17 07:00, variance \+60 min/,
+        name: /1\.1 Layout, start, 2026-08-17, baseline start 2026-08-17, variance \+0.042 calendar days/,
       }),
     ).toBeInTheDocument();
     // Duration cell surfaces the Rust-derived baseline duration variance fact
     // (unit dropped from the first number to shorten the narrow-cell fragment).
     expect(screen.getByTestId("duration-baseline-task-a")).toHaveTextContent(
-      "Baseline 420 +60 min",
+      "Baseline 0.875 +0.125 days",
     );
     expect(
       screen.getByRole("gridcell", {
-        name: /1\.1 Layout, duration, 480 min, baseline duration 420 min, variance \+60 min/,
+        name: /1\.1 Layout, duration, 1 day, baseline duration 0.875 days, variance \+0.125 days/,
       }),
     ).toBeInTheDocument();
     // The milestone row suppresses the duration baseline fact and its label.
@@ -190,18 +200,18 @@ describe("GanttTreegrid", () => {
     expect(layoutRow).toHaveTextContent("Critical");
     // The Predecessors cell renders an explicit per-link annotation and an
     // accessible name that spells out the relationship and signed lag.
-    expect(layoutRow).toHaveTextContent("survey-control SS +120 min");
+    expect(layoutRow).toHaveTextContent("survey-control SS +0.25 days");
     expect(
       screen.getByRole("gridcell", {
-        name: /1\.1 Layout, predecessors, predecessor survey-control, start-to-start, lag \+120 minutes/,
+        name: /1\.1 Layout, predecessors, predecessor survey-control, start-to-start, lag \+0.25 days/,
       }),
     ).toBeInTheDocument();
     const closeoutRow = screen.getByRole("row", { name: /2 Closeout/ });
     expect(closeoutRow).toHaveTextContent("task-a FS");
-    expect(closeoutRow).toHaveTextContent("task-b FF -60 min");
+    expect(closeoutRow).toHaveTextContent("task-b FF -0.125 days");
     expect(
       screen.getByRole("gridcell", {
-        name: /2 Closeout, predecessors, predecessor task-a, finish-to-start, no lag, predecessor task-b, finish-to-finish, lag -60 minutes/,
+        name: /2 Closeout, predecessors, predecessor task-a, finish-to-start, no lag, predecessor task-b, finish-to-finish, lag -0.125 days/,
       }),
     ).toBeInTheDocument();
     expect(layoutRow).toHaveTextContent("≥ 2026-08-18");
@@ -212,7 +222,7 @@ describe("GanttTreegrid", () => {
     // The % Done column renders visible percent text and an accessible progress fact.
     expect(screen.getByTestId("progress-task-a")).toHaveTextContent("42%");
     expect(
-      screen.getByRole("gridcell", { name: /1\.1 Layout, percent complete, 42 percent complete, in progress, actual start 2026-08-17 08:00/ }),
+      screen.getByRole("gridcell", { name: /1\.1 Layout, percent complete, 42 percent complete, in progress, actual start 2026-08-17/ }),
     ).toBeInTheDocument();
     expect(
       screen.getByRole("gridcell", { name: /1 Site work, percent complete, 0 percent complete, not started/ }),
@@ -220,12 +230,12 @@ describe("GanttTreegrid", () => {
 
     const milestoneRow = screen.getByRole("row", { name: /1\.2 Inspection/ });
     expect(milestoneRow).toHaveTextContent("Milestone");
-    expect(milestoneRow).toHaveTextContent("+240 min");
+    expect(milestoneRow).toHaveTextContent("+0.5 days");
 
     const negativeFloat = screen.getByRole("gridcell", {
-      name: /2 Closeout, total float, -60 min/,
+      name: /2 Closeout, total float, -0.125 days/,
     });
-    expect(negativeFloat).toHaveTextContent("-60 min");
+    expect(negativeFloat).toHaveTextContent("-0.125 days");
     expect(negativeFloat.querySelector("svg")).toBeInTheDocument();
 
     const summaryRow = screen.getByRole("row", { name: /1 Site work/ });

@@ -8,7 +8,7 @@ import {
 } from "../scheduleExport";
 import type { GanttReadModel } from "../types/gantt";
 
-export function ScheduleExports({ readModel, jobName, disabled = false }: { readModel: GanttReadModel; jobName: string; disabled?: boolean }) {
+export function ScheduleExports({ readModel, jobName, disabled = false, workdayDurationMinutes = 480 }: { readModel: GanttReadModel; jobName: string; disabled?: boolean; workdayDurationMinutes?: number }) {
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
@@ -16,7 +16,7 @@ export function ScheduleExports({ readModel, jobName, disabled = false }: { read
     if (disabled || saving) return;
     setSaving(true);
     try {
-      const content = kind === "csv" ? createScheduleCsv(readModel, jobName) : createScheduleReport(readModel, jobName);
+      const content = kind === "csv" ? createScheduleCsv(readModel, jobName, workdayDurationMinutes) : createScheduleReport(readModel, jobName, workdayDurationMinutes);
       await saveSchedule(content, safeScheduleFilename(jobName, kind), kind);
       setError(null);
     } catch (cause) {
