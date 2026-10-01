@@ -1491,6 +1491,7 @@ describe("job workspace", () => {
     expect(createVerifiedBackup).toHaveBeenCalledOnce();
     expect(backup).toBeDisabled();
     expect(backup).toHaveTextContent("Creating backup…");
+    backup.blur(); // The system Save dialog takes focus away while the button is disabled.
     resolveBackup?.(null);
     expect(await screen.findByText("Backup cancelled. Your local data was not changed.")).toBeVisible();
     expect(backup).toHaveFocus();

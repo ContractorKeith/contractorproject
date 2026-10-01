@@ -74,6 +74,11 @@ export function App({ client = tauriJobClient }: AppProps) {
   );
 
   useEffect(() => {
+    // Wait for React to re-enable the button before restoring native dialog focus.
+    if (!backupPending && (backupResult || backupError)) backupButtonRef.current?.focus();
+  }, [backupPending, backupResult, backupError]);
+
+  useEffect(() => {
     let active = true;
     client
       .listJobs()
@@ -146,7 +151,6 @@ export function App({ client = tauriJobClient }: AppProps) {
       setBackupError(errorMessage(reason));
     } finally {
       setBackupPending(false);
-      backupButtonRef.current?.focus();
     }
   }
 
