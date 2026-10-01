@@ -161,7 +161,7 @@ describe("task workspace", () => {
     expect(screen.getByText("Advanced task details").closest("details")).not.toHaveAttribute("open");
   });
 
-  it("converts working days, preserves exact minutes across unit changes, and rejects fractional minutes", async () => {
+  it("edits duration only in working days, preserves existing minute values, and rejects fractional-minute days", async () => {
     const user = userEvent.setup();
     const updateTaskDuration = vi.fn().mockResolvedValue(hierarchy([
       task("layout", "Layout", 360),
@@ -182,19 +182,14 @@ describe("task workspace", () => {
     screen.getByRole("rowheader", { name: /2 Inspection, task/ }).focus();
     await screen.findByRole("heading", { name: "Edit Inspection" });
     const oneMinute = screen.getByLabelText("Duration for Inspection");
-    const oneMinuteUnit = screen.getByLabelText("Duration unit for Inspection");
-    await user.selectOptions(oneMinuteUnit, "minutes");
-    expect(oneMinute).toHaveValue(1);
-    await user.selectOptions(oneMinuteUnit, "hours");
-    expect(oneMinute).toHaveValue(1 / 60);
-    await user.selectOptions(oneMinuteUnit, "minutes");
-    expect(oneMinute).toHaveValue(1);
+    expect(oneMinute).toHaveValue(1 / 360);
+    expect(screen.queryByLabelText("Duration unit for Inspection")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Save duration" })).toBeDisabled();
 
     await user.clear(oneMinute);
-    await user.type(oneMinute, "1.5");
+    await user.type(oneMinute, "0.0001");
     await user.click(screen.getByRole("button", { name: "Save duration" }));
-    expect(await screen.findByText(/resolves to a whole minute/)).toBeVisible();
+    expect(await screen.findByText("Enter a valid duration in working days.")).toBeVisible();
     expect(updateTaskDuration).toHaveBeenCalledTimes(1);
   });
 });

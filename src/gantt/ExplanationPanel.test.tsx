@@ -73,7 +73,7 @@ describe("ExplanationPanel", () => {
       />,
     );
     expect(
-      screen.getByText("Complete · actual 2026-01-05 08:00 – 2026-01-05 16:00"),
+      screen.getByText("Complete · actual 2026-01-05 – 2026-01-05"),
     ).toBeInTheDocument();
   });
 
@@ -95,11 +95,23 @@ describe("ExplanationPanel", () => {
         })}
       />,
     );
-    expect(screen.getByText("Driver After A FS +480 min")).toBeInTheDocument();
+    expect(screen.getByText("Driver After A FS +1 day")).toBeInTheDocument();
     expect(screen.getByText("Also Start no earlier than 2026-01-07")).toBeInTheDocument();
-    expect(screen.getByText("Started 2026-01-05 08:00")).toBeInTheDocument();
-    expect(screen.getByText("Float +480 min")).toBeInTheDocument();
-    expect(screen.getByText("Finish limited by successor C FS +480 min")).toBeInTheDocument();
+    expect(screen.getByText("Started 2026-01-05")).toBeInTheDocument();
+    expect(screen.getByText("Float +1 day")).toBeInTheDocument();
+    expect(screen.getByText("Finish limited by successor C FS +1 day")).toBeInTheDocument();
+  });
+
+  it("uses a non-default workday length for signed lag and float", () => {
+    render(<ExplanationPanel workdayDurationMinutes={360} row={row("Backfill", "b", {
+      kind: "scheduled", taskId: "b",
+      primaryDriver: { kind: "predecessor", taskId: "A", dependencyType: "FS", lagMinutes: -180 },
+      otherBindingDrivers: [], startedActualStart: null, calendarGap: null,
+      totalFloatMinutes: -360, critical: true,
+      lateFinishLimit: { kind: "projectFinish" },
+    })} />);
+    expect(screen.getByText("Driver After A FS -0.5 days")).toBeInTheDocument();
+    expect(screen.getByText("Float -1 day · critical")).toBeInTheDocument();
   });
 
   it("uses known task names and preserves unknown relationship identities", () => {
@@ -112,7 +124,7 @@ describe("ExplanationPanel", () => {
     })} />);
     expect(screen.getByRole("heading")).toHaveTextContent("Backfill");
     expect(screen.getByRole("heading")).not.toHaveTextContent("· b");
-    expect(screen.getByText("Driver After Inspection FS +60 min")).toBeInTheDocument();
+    expect(screen.getByText("Driver After Inspection FS +0.125 days")).toBeInTheDocument();
     expect(screen.getByText("Finish limited by successor C FF")).toBeInTheDocument();
   });
 
@@ -133,7 +145,7 @@ describe("ExplanationPanel", () => {
       />,
     );
     expect(screen.getByText("Driver Starts at schedule start")).toBeInTheDocument();
-    expect(screen.getByText("Float -480 min · critical")).toBeInTheDocument();
+    expect(screen.getByText("Float -1 day · critical")).toBeInTheDocument();
     expect(screen.getByText("Finish limited by deadline 2026-01-05")).toBeInTheDocument();
   });
 
@@ -156,7 +168,7 @@ describe("ExplanationPanel", () => {
       />,
     );
     expect(screen.getByText("Driver Finish after A FF")).toBeInTheDocument();
-    expect(screen.getByText("Also Finish after C SF +120 min")).toBeInTheDocument();
+    expect(screen.getByText("Also Finish after C SF +0.25 days")).toBeInTheDocument();
   });
 
   it("shows the normalized applied date on a moved deadline limit", () => {
@@ -239,7 +251,7 @@ describe("ExplanationPanel", () => {
         })}
       />,
     );
-    expect(screen.getByText("Driver Pushed to data date 2026-01-12 08:00")).toBeInTheDocument();
+    expect(screen.getByText("Driver Pushed to data date 2026-01-12")).toBeInTheDocument();
     expect(
       screen.getByText("2 non-working days between 2026-01-09 and 2026-01-12"),
     ).toBeInTheDocument();

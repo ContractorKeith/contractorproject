@@ -86,11 +86,7 @@ export function SettingsDialog({
       </section>
 
       <section className="settings-dialog__section" aria-labelledby="settings-storage-title">
-        <h3 id="settings-storage-title">Local data</h3>
-        <div className="storage-state" aria-label="Local storage status">
-          <span className="storage-state__dot" />
-          Local SQLite · on this device
-        </div>
+        <h3 id="settings-storage-title">Backups</h3>
         {canCreateBackup ? (
           <>
             <button

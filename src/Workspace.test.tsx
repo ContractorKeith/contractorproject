@@ -60,6 +60,7 @@ describe("workspace state guards", () => {
     await open(user);
     await user.click(await screen.findByRole("rowheader", { name: /2 Inspection/ }));
     expect(await screen.findByRole("heading", { name: "Edit Inspection" })).toBeVisible();
+    expect(screen.getAllByRole("gridcell", { name: /duration, 0.167 days/ })).toHaveLength(2);
     const duration = screen.getByLabelText("Duration for Inspection");
     await user.clear(duration);
     await user.type(duration, "2");
@@ -125,14 +126,9 @@ describe("workspace state guards", () => {
     const user = userEvent.setup();
     render(<App client={client({ listTasks: vi.fn().mockResolvedValue(thirteenMinutes) })} />);
     await open(user);
-    const unit = await screen.findByLabelText("Duration unit for Layout");
-    const save = screen.getByRole("button", { name: "Save duration" });
-    expect(save).toBeDisabled();
-    await user.selectOptions(unit, "hours");
-    expect(save).toBeDisabled();
-    await user.selectOptions(unit, "minutes");
-    expect(screen.getByLabelText("Duration for Layout")).toHaveValue(13);
-    expect(save).toBeDisabled();
+    expect(await screen.findByLabelText("Duration for Layout")).toHaveValue(13 / 360);
+    expect(screen.queryByLabelText("Duration unit for Layout")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Save duration" })).toBeDisabled();
   });
 
   it("keeps 31 minutes clean under an eight-hour workday", async () => {
@@ -141,23 +137,19 @@ describe("workspace state guards", () => {
     const user = userEvent.setup();
     render(<App client={client({ listJobs: vi.fn().mockResolvedValue([eightHourJob]), listTasks: vi.fn().mockResolvedValue(thirtyOneMinutes) })} />);
     await open(user);
-    const unit = await screen.findByLabelText("Duration unit for Layout");
-    await user.selectOptions(unit, "hours");
+    expect(await screen.findByLabelText("Duration for Layout")).toHaveValue(31 / 480);
     expect(screen.getByRole("button", { name: "Save duration" })).toBeDisabled();
-    await user.selectOptions(unit, "minutes");
-    expect(screen.getByLabelText("Duration for Layout")).toHaveValue(31);
   });
 
   it("rejects meaningful fractional minutes rather than rounding them", async () => {
     const user = userEvent.setup();
     render(<App client={client()} />);
     await open(user);
-    await user.selectOptions(await screen.findByLabelText("Duration unit for Layout"), "minutes");
-    const duration = screen.getByLabelText("Duration for Layout");
+    const duration = await screen.findByLabelText("Duration for Layout");
     await user.clear(duration);
     await user.type(duration, "0.001");
     await user.click(screen.getByRole("button", { name: "Save duration" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("resolves to a whole minute");
+    expect(await screen.findByRole("alert")).toHaveTextContent("Enter a valid duration in working days.");
   });
 
   it("refreshes the active hierarchy before a post-conflict duration save", async () => {

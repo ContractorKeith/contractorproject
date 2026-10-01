@@ -25,9 +25,9 @@ start/finish/duration variance, and per-task explanation facts surfaced in a
 focus-following panel) in the normal desktop workflow. The scheduling-core
 MVP section is complete. The contractor workspace now opens directly to a
 compact schedule with finish/progress/attention facts, hierarchy-aware search,
-one selected task editor with working-day/hour/minute entry, and full-job CSV
+one selected task editor with working-day entry, and full-job CSV
 and printable HTML downloads. Advanced scheduling controls remain available
-through disclosures. Last touched 2026-09-08.
+through disclosures. Last touched 2026-10-01.
 
 ## Commands
 

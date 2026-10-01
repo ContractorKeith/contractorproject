@@ -4,6 +4,8 @@ import { tauriJobClient, type JobClient } from "./api/jobs";
 import { BrandMark } from "./components/BrandMark";
 import { ScheduleExports } from "./components/ScheduleExports";
 import { ExplanationPanel } from "./gantt/ExplanationPanel";
+import { formatWorkingDays, parseSignedWorkingDayLag, parseWorkingDays } from "./workingDays";
+import { formatSignedDays } from "./gantt/format";
 import { GanttTreegrid } from "./gantt/GanttTreegrid";
 import { ScheduleSummary } from "./gantt/ScheduleSummary";
 import { SettingsDialog } from "./components/SettingsDialog";
@@ -588,7 +590,7 @@ function TaskPanel({
         <summary>Schedule setup</summary>
         <ScheduleSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
       </details>
-      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} jobVersion={state.hierarchy.jobVersion} initialActiveTaskId={selectedTaskId} onTaskSelection={selectTask} onRetry={() => setScheduleReload((current) => current + 1)} /> : null}
+      {client.getSchedule ? <ScheduleProjection schedule={schedule} jobName={job.name} workdayDurationMinutes={job.calendar?.workdayDurationMinutes ?? DEFAULT_CALENDAR.workdayDurationMinutes} jobVersion={state.hierarchy.jobVersion} initialActiveTaskId={selectedTaskId} onTaskSelection={selectTask} onRetry={() => setScheduleReload((current) => current + 1)} /> : null}
       <section className="task-workspace" aria-label={`Tasks for ${job.name}`}>
         {schedule.status !== "loaded" || schedule.readModel.rowCount === 0 ? (
           <div className="task-workspace__list">
@@ -613,7 +615,7 @@ function TaskPanel({
         <summary>Advanced schedule settings</summary>
         <CalendarExceptions job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
         <BaselineSettings job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
-        <DependencyControls hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
+        <DependencyControls job={job} hierarchy={hierarchy} client={client} onHierarchyChange={onHierarchyChange} onJobChange={onJobChange} />
       </details>
     </div>
   );
@@ -623,7 +625,7 @@ function hierarchyVersion(state: TaskLoadState): number {
   return state.status === "loaded" ? state.hierarchy.jobVersion : 0;
 }
 
-function ScheduleProjection({ schedule, jobName, jobVersion, initialActiveTaskId, onTaskSelection, onRetry }: { schedule: ScheduleLoadState; jobName: string; jobVersion: number; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void; onRetry: () => void }) {
+function ScheduleProjection({ schedule, jobName, workdayDurationMinutes, jobVersion, initialActiveTaskId, onTaskSelection, onRetry }: { schedule: ScheduleLoadState; jobName: string; workdayDurationMinutes: number; jobVersion: number; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void; onRetry: () => void }) {
   if (schedule.status === "loading") {
     return <p className="gantt-state" aria-live="polite">Loading schedule…</p>;
   }
@@ -636,12 +638,12 @@ function ScheduleProjection({ schedule, jobName, jobVersion, initialActiveTaskId
   if (schedule.readModel.rowCount === 0) {
     return <p className="gantt-state">No scheduled tasks yet.</p>;
   }
-  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} current={schedule.readModel.jobVersion === jobVersion} initialActiveTaskId={initialActiveTaskId} onTaskSelection={onTaskSelection} />;
+  return <LoadedSchedule readModel={schedule.readModel} jobName={jobName} workdayDurationMinutes={workdayDurationMinutes} current={schedule.readModel.jobVersion === jobVersion} initialActiveTaskId={initialActiveTaskId} onTaskSelection={onTaskSelection} />;
 }
 
 // Holds the focused-task state so the explanation panel follows the treegrid's
 // roving cell. React renders the Rust-provided explanation facts and derives none.
-function LoadedSchedule({ readModel, jobName, current, initialActiveTaskId, onTaskSelection }: { readModel: GanttReadModel; jobName: string; current: boolean; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void }) {
+function LoadedSchedule({ readModel, jobName, workdayDurationMinutes, current, initialActiveTaskId, onTaskSelection }: { readModel: GanttReadModel; jobName: string; workdayDurationMinutes: number; current: boolean; initialActiveTaskId: string | null; onTaskSelection: (taskId: string) => void }) {
   const [focusedTaskId, setFocusedTaskId] = useState<string | null>(null);
   const [todayDate] = useState(() => {
     const now = new Date();
@@ -658,10 +660,11 @@ function LoadedSchedule({ readModel, jobName, current, initialActiveTaskId, onTa
   return (
     <div className="schedule-reading" aria-busy={!current}>
       <ScheduleSummary readModel={readModel} />
-      <ScheduleExports readModel={readModel} jobName={jobName} disabled={!current} />
+      <ScheduleExports readModel={readModel} jobName={jobName} workdayDurationMinutes={workdayDurationMinutes} disabled={!current} />
       {!current ? <p role="status">Updating schedule…</p> : null}
       <GanttTreegrid
         readModel={readModel}
+        workdayDurationMinutes={workdayDurationMinutes}
         ariaLabel={`Schedule for ${jobName}`}
         todayDate={todayDate}
         initialDetailsVisible={false}
@@ -672,7 +675,7 @@ function LoadedSchedule({ readModel, jobName, current, initialActiveTaskId, onTa
           if (taskId) onTaskSelection(taskId);
         }}
       />
-      <ExplanationPanel row={focusedRow} taskNames={taskNames} />
+      <ExplanationPanel row={focusedRow} taskNames={taskNames} workdayDurationMinutes={workdayDurationMinutes} />
     </div>
   );
 }
@@ -691,36 +694,8 @@ function TaskPicker({ tasks, label, selectedTaskId, onSelect }: { tasks: Task[];
   );
 }
 
-type DurationUnit = "days" | "hours" | "minutes";
-
-function formatDurationInput(minutes: number | null | undefined, unit: DurationUnit, workdayMinutes: number): string {
-  if (minutes == null) return "";
-  const divisor = unit === "days" ? workdayMinutes : unit === "hours" ? 60 : 1;
-  return String(minutes / divisor);
-}
-
-/** Undefined means invalid; null preserves the deliberate unset-duration state. */
-function parseDurationInput(value: string, unit: DurationUnit, workdayMinutes: number): number | null | undefined {
-  if (value.trim() === "") return null;
-  const parsed = Number(value);
-  const multiplier = unit === "days" ? workdayMinutes : unit === "hours" ? 60 : 1;
-  const minutes = parsed * multiplier;
-  const nearestMinute = Math.round(minutes);
-  // A persisted integer rendered as working days may return as 12.999999999999998
-  // after the browser parses it. Accept only the tiny IEEE-754 residue around a
-  // safe integer; meaningful fractional-minute input remains invalid.
-  const roundingTolerance = Number.EPSILON * Math.max(1, Math.abs(minutes)) * 8;
-  if (
-    !Number.isFinite(minutes) ||
-    minutes < 0 ||
-    !Number.isSafeInteger(nearestMinute) ||
-    Math.abs(minutes - nearestMinute) > roundingTolerance
-  ) return undefined;
-  return nearestMinute;
-}
-
-function durationInputMatchesPersisted(value: string, unit: DurationUnit, persisted: number | null | undefined, workdayMinutes: number): boolean {
-  return parseDurationInput(value, unit, workdayMinutes) === (persisted ?? null);
+function durationInputMatchesPersisted(value: string, persisted: number | null | undefined, workdayMinutes: number): boolean {
+  return parseWorkingDays(value, workdayMinutes) === (persisted ?? null);
 }
 
 function TaskEditor({
@@ -750,8 +725,7 @@ function TaskEditor({
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
-  const [duration, setDuration] = useState(() => formatDurationInput(task?.durationMinutes, "days", workdayMinutes));
-  const [durationUnit, setDurationUnit] = useState<DurationUnit>("days");
+  const [duration, setDuration] = useState(() => formatWorkingDays(task?.durationMinutes, workdayMinutes));
   const [durationBaseVersion, setDurationBaseVersion] = useState<number | null>(
     null,
   );
@@ -787,7 +761,7 @@ function TaskEditor({
     if (draftBaseVersion === null) setName(task.name);
     else if (task.version !== draftBaseVersion) setConflict(true);
     if (durationBaseVersion === null) {
-      setDuration(formatDurationInput(task.durationMinutes, durationUnit, workdayMinutes));
+      setDuration(formatWorkingDays(task.durationMinutes, workdayMinutes));
     } else if (task.version !== durationBaseVersion) {
       setConflict(true);
     }
@@ -806,7 +780,7 @@ function TaskEditor({
     } else if (task.version !== progressBaseVersion) {
       setConflict(true);
     }
-  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, durationUnit, progressBaseVersion, task, workdayMinutes]);
+  }, [constraintBaseVersion, draftBaseVersion, durationBaseVersion, progressBaseVersion, task, workdayMinutes]);
 
   useEffect(() => {
     onDirtyChange?.(draftBaseVersion !== null || durationBaseVersion !== null || constraintBaseVersion !== null || progressBaseVersion !== null || newChildName !== "" || newParentTaskId !== null || pending);
@@ -907,9 +881,9 @@ function TaskEditor({
 
   async function saveDuration() {
     if (!task || !client.updateTaskDuration || pending) return;
-    const parsed = parseDurationInput(duration, durationUnit, workdayMinutes);
+    const parsed = parseWorkingDays(duration, workdayMinutes);
     if (parsed === undefined) {
-      setError("Duration must be a finite, nonnegative value that resolves to a whole minute.");
+      setError("Enter a valid duration in working days.");
       return;
     }
     await run(
@@ -1039,29 +1013,20 @@ function TaskEditor({
                   const nextDuration = event.target.value;
                   setDuration(nextDuration);
                   setDurationBaseVersion(
-                    durationInputMatchesPersisted(nextDuration, durationUnit, task.durationMinutes, workdayMinutes)
+                    durationInputMatchesPersisted(nextDuration, task.durationMinutes, workdayMinutes)
                       ? null
                       : (current) => current ?? task.version,
                   );
                 }}
               />
-              <select aria-label={`Duration unit for ${task.name}`} value={durationUnit} onChange={(event) => {
-                const nextUnit = event.target.value as DurationUnit;
-                const exact = parseDurationInput(duration, durationUnit, workdayMinutes);
-                setDurationUnit(nextUnit);
-                setDuration(exact === undefined ? duration : formatDurationInput(exact, nextUnit, workdayMinutes));
-              }}>
-                <option value="days">working days</option>
-                <option value="hours">hours</option>
-                <option value="minutes">minutes</option>
-              </select>
+              <span>working days</span>
             </label>
             <button
               type="button"
               disabled={
                 pending ||
                 !client.updateTaskDuration ||
-                durationInputMatchesPersisted(duration, durationUnit, task.durationMinutes, workdayMinutes)
+                durationInputMatchesPersisted(duration, task.durationMinutes, workdayMinutes)
               }
               onClick={() => void saveDuration()}
             >
@@ -1534,40 +1499,6 @@ function ScheduleSettings({
           </label>
         ))}
       </fieldset>
-      <label>
-        Workday start (minutes after midnight){" "}
-        <input
-          aria-label="Workday start minute"
-          type="number"
-          min="0"
-          max="1439"
-          value={calendar.workdayStartMinute}
-          onChange={(event) => {
-            markDirty();
-            setCalendar((current) => ({
-              ...current,
-              workdayStartMinute: Number(event.target.value),
-            }));
-          }}
-        />
-      </label>
-      <label>
-        Working minutes per day{" "}
-        <input
-          aria-label="Workday duration minutes"
-          type="number"
-          min="1"
-          max="1440"
-          value={calendar.workdayDurationMinutes}
-          onChange={(event) => {
-            markDirty();
-            setCalendar((current) => ({
-              ...current,
-              workdayDurationMinutes: Number(event.target.value),
-            }));
-          }}
-        />
-      </label>
       <button type="submit" disabled={saving}>
         {saving ? "Saving…" : "Save schedule settings"}
       </button>
@@ -1901,20 +1832,23 @@ function BaselineSettings({
 }
 
 function DependencyControls({
+  job,
   hierarchy,
   client,
   onHierarchyChange,
   onJobChange,
 }: {
+  job: Job;
   hierarchy: TaskHierarchy;
   client: JobClient;
   onHierarchyChange: (hierarchy: TaskHierarchy) => void;
   onJobChange: (job: Job) => void;
 }) {
+  const workdayMinutes = job.calendar?.workdayDurationMinutes ?? DEFAULT_CALENDAR.workdayDurationMinutes;
   const [predecessorTaskId, setPredecessor] = useState("");
   const [successorTaskId, setSuccessor] = useState("");
   const [dependencyType, setDependencyType] = useState<DependencyType>("FS");
-  const [lagMinutes, setLag] = useState("0");
+  const [lagDays, setLagDays] = useState("0");
   const [message, setMessage] = useState<string | null>(null);
   const [conflict, setConflict] = useState(false);
   if (
@@ -1947,19 +1881,17 @@ function DependencyControls({
     // Reject a non-integer lag client-side so a decimal — or a bare "-" that
     // would coerce to NaN — never reaches the store. Lag is signed working
     // minutes; the store bounds the magnitude.
-    if (lagMinutes.trim() !== "") {
-      const parsed = Number(lagMinutes);
-      if (!Number.isInteger(parsed) || Math.abs(parsed) > 10_000_000) {
-        setMessage("Lag must be a whole number of minutes within ±10,000,000.");
-        return;
-      }
+    const lag = parseSignedWorkingDayLag(lagDays, workdayMinutes);
+    if (lag === undefined) {
+      setMessage("Enter a valid lag in working days within the supported range.");
+      return;
     }
     void client.addDependency!({
       jobId: hierarchy.jobId,
       predecessorTaskId,
       successorTaskId,
       dependencyType,
-      lagMinutes: lagMinutes.trim() === "" ? 0 : Number(lagMinutes),
+      lagMinutes: lag,
       expectedJobVersion: hierarchy.jobVersion,
     })
       .then(succeeded)
@@ -2019,12 +1951,13 @@ function DependencyControls({
         <label>
           Lag{" "}
           <input
-            aria-label="Dependency lag minutes"
+            aria-label="Dependency lag in working days"
             type="number"
-            step="1"
-            value={lagMinutes}
-            onChange={(event) => setLag(event.target.value)}
+            step="any"
+            value={lagDays}
+            onChange={(event) => setLagDays(event.target.value)}
           />
+          <span>working days</span>
         </label>
         <button type="submit" disabled={!predecessorTaskId || !successorTaskId}>
           Add dependency
@@ -2038,7 +1971,7 @@ function DependencyControls({
             {taskName(dependency.predecessorTaskId)} {dependency.dependencyType}{" "}
             {taskName(dependency.successorTaskId)}
             {dependency.lagMinutes !== 0
-              ? ` ${dependency.lagMinutes > 0 ? "+" : ""}${dependency.lagMinutes} min`
+              ? ` ${formatSignedDays(dependency.lagMinutes, workdayMinutes)}`
               : ""}
           </span>
           <button

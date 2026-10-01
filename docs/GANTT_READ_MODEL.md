@@ -121,7 +121,8 @@ Positive start/finish variance means the current date is later than its baseline
 date; negative variance means it is earlier. Positive duration variance means
 the current task runs longer than its baseline. Contract v2+ reports the exact
 local civil-time difference in minutes; v4 adds the duration difference. React
-displays these values and never recalculates them.
+converts these values to working days for duration variance and calendar days
+for start/finish variance; it never recalculates schedule facts.
 
 The application adapter loads the job's comparison-default baseline leaf
 snapshot into `GanttBaselineSource`. Only tasks that are still leaves at read
