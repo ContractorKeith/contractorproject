@@ -36,3 +36,21 @@ Object.defineProperty(window, "localStorage", {
   configurable: true,
   value: new MemoryStorage(),
 });
+
+// jsdom has no native modal behavior; browser tests cover inertness and Escape.
+const dialogOpeners = new WeakMap<HTMLDialogElement, HTMLElement | null>();
+Object.defineProperty(HTMLDialogElement.prototype, "showModal", {
+  configurable: true,
+  value(this: HTMLDialogElement) {
+    dialogOpeners.set(this, document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    this.setAttribute("open", "");
+  },
+});
+Object.defineProperty(HTMLDialogElement.prototype, "close", {
+  configurable: true,
+  value(this: HTMLDialogElement) {
+    this.removeAttribute("open");
+    this.dispatchEvent(new Event("close"));
+    dialogOpeners.get(this)?.focus();
+  },
+});

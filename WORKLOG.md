@@ -35,3 +35,10 @@ Original main fast-forwarded; complete branch reviewed. Retained ZIP independent
 extracted/signature-checked and matched to installed runtime. Fresh Project Pilot opens with zero jobs. Retained snapshots passed standalone integrity and foreign-key checks. The installed packaged importer passed cross-app retry/re-export acceptance.
 Normal app data and unrelated checkout files preserved.
 Next: Keith enters the remaining-work schedule and takeover forecast baseline with Sheets in parallel.
+
+### 2026-10-01 America/New_York - Compact pilot jobs page
+
+- Outcome: Implemented #78, #79, and #80 with Luna 6 workers and primary integration review. Removed the jobs hero, added a persistent light/dark moon toggle and gear button, and moved job creation, local storage status, and verified backups into native Settings. Creation respects pending saves and unsaved task drafts.
+- Review: Corrected dark-mode tokens, heading order, icon alignment, and legacy creation tests. Native dialog tests allow browser chrome focus while checking that the background page remains inert.
+- Checks: TypeScript, 102 unit tests, all 36 browser tests, production build, Rust fmt, Clippy and all Rust tests passed. Desktop/minimum-window layout and jobs-page accessibility passed. Canonical docs merged in opencontractoros PR #9.
+- Next: Build and verify the updated installed Pilot, then merge the app PR and remove the branch.

@@ -43,6 +43,12 @@ Use `ACCEPTANCE.md` in this directory for evidence. Mark incomplete native steps
 
 ## First consulting week
 
+The jobs page now starts with the local job list. Use the header gear to create
+a job or make a verified backup in Settings. The half-moon button switches
+between light and dark appearance and remembers the selection. This UI update
+is tracked in #78, #79, and #80; its packaging checks are recorded separately
+from the original recovery acceptance in `ACCEPTANCE.md`.
+
 Create separate records for the active house and other lots. Confirm completed work through the slab without inventing historical dates. Label the first schedule baseline as the takeover/remaining-work forecast. Keep dated contact follow-ups, a reviewed two-week schedule export and the cross-app ID register alongside Google Sheets. Compare Books reports to independently checked records; partial entries do not establish profitability.
 
 After each work session, make application-consistent backups and copy completed backups and external documents off-machine. Keep live SQLite databases local. Record reproducible defects with app/source version, steps, expected and actual behavior, using synthetic examples.

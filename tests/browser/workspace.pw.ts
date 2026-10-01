@@ -86,8 +86,11 @@ test("downloads the full job from a filtered schedule and renders a self-contain
 
 test("creates a job directly into an actionable task workspace", async ({ page }) => {
   await page.goto("/tests/browser/workspace.html?empty");
+  await page.getByRole("button", { name: "Open settings" }).click();
+  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
   await page.getByRole("textbox", { name: "Job name", exact: true }).fill("Kitchen renovation");
   await page.getByRole("button", { name: "Create job" }).click();
+  await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(0);
   await expect(page.getByText("Choose a schedule start to calculate task dates.")).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByRole("button", { name: "Add task", exact: true })).toBeVisible();
@@ -101,4 +104,41 @@ test("creates a job directly into an actionable task workspace", async ({ page }
   await page.getByRole("spinbutton", { name: "Duration for Prepare site", exact: true }).fill("1");
   await page.getByRole("button", { name: "Save duration", exact: true }).click();
   await expect(page.getByRole("treegrid", { name: "Schedule for Kitchen renovation" })).toBeVisible();
+});
+
+test("keeps settings focus contained and returns focus to the gear after Escape", async ({ page }) => {
+  await page.goto("/tests/browser/workspace.html?empty");
+  const trigger = page.getByRole("button", { name: "Open settings" });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const dialog = page.getByRole("dialog", { name: "Settings" });
+  await expect(dialog).toBeVisible();
+
+  const close = page.getByRole("button", { name: "Close settings" });
+  const jobName = page.getByRole("textbox", { name: "Job name" });
+  await jobName.focus();
+  for (let step = 0; step < 6; step += 1) {
+    await page.keyboard.press("Tab");
+    // Native dialogs allow browser-chrome focus, but keep the page behind them inert.
+    expect(await page.evaluate(() => !document.hasFocus() || document.activeElement?.closest("dialog") !== null)).toBe(true);
+  }
+
+  await close.focus();
+  await page.keyboard.press("Escape");
+  await expect(dialog).toHaveCount(0);
+  await expect(trigger).toBeFocused();
+});
+
+test("keeps an unsaved task when creating another job is cancelled", async ({ page }) => {
+  await page.locator('tr[data-task-id="phase-1-task-4"]').getByRole("rowheader").click();
+  const taskName = page.getByRole("textbox", { name: "Task name for Rough plumbing" });
+  await taskName.fill("Keep this task draft");
+  await page.getByRole("button", { name: "Open settings" }).click();
+  await page.getByRole("textbox", { name: "Job name", exact: true }).fill("Another job");
+  page.once("dialog", (dialog) => dialog.dismiss());
+  await page.getByRole("button", { name: "Create job", exact: true }).click();
+  await expect(page.getByRole("dialog", { name: "Settings" })).toBeVisible();
+  await page.getByRole("button", { name: "Close settings" }).click();
+  await expect(taskName).toHaveValue("Keep this task draft");
+  await expect(page.getByRole("heading", { name: "Another job" })).toHaveCount(0);
 });

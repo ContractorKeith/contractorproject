@@ -27,6 +27,22 @@ describe("job workspace", () => {
     vi.useRealTimers();
   });
 
+  it("opens an accessible settings dialog and returns focus when closed", async () => {
+    const user = userEvent.setup();
+    const client: JobClient = {
+      listJobs: vi.fn().mockResolvedValue([]), createJob: vi.fn(), listTasks: vi.fn(),
+      createTask: vi.fn(), updateTask: vi.fn(), reorderTask: vi.fn(),
+    };
+    render(<App client={client} />);
+    const trigger = await screen.findByRole("button", { name: "Open settings" });
+    await user.click(trigger);
+    expect(screen.getByRole("dialog", { name: "Settings" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "Close settings" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Close settings" }));
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
+    expect(trigger).toHaveFocus();
+  });
+
   it("creates a first job and shows it in the workspace", async () => {
     const user = userEvent.setup();
     const createdJob = {
@@ -52,6 +68,7 @@ describe("job workspace", () => {
     expect(
       await screen.findByRole("heading", { name: "No jobs yet" }),
     ).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.type(screen.getByLabelText("Job name"), createdJob.name);
     await user.click(screen.getByRole("button", { name: "Create job" }));
 
@@ -62,6 +79,7 @@ describe("job workspace", () => {
       name: createdJob.name,
       timezone: expect.any(String),
     });
+    expect(screen.queryByRole("dialog", { name: "Settings" })).not.toBeInTheDocument();
   });
 
   it("lets the user override the system theme", async () => {
@@ -76,7 +94,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
-    await user.selectOptions(screen.getByLabelText("Theme"), "dark");
+    await user.click(screen.getByRole("button", { name: "Switch to dark theme" }));
 
     expect(document.documentElement).toHaveAttribute("data-theme", "dark");
     expect(window.localStorage.getItem("contractorproject.theme")).toBe("dark");
@@ -1443,6 +1461,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Open settings" }));
     const backup = await screen.findByRole("button", { name: "Create verified backup" });
     backup.focus();
     await user.keyboard("{Enter}");
@@ -1464,6 +1483,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Open settings" }));
     const backup = await screen.findByRole("button", { name: "Create verified backup" });
     backup.focus();
     await user.keyboard(" ");
@@ -1486,6 +1506,7 @@ describe("job workspace", () => {
     };
 
     render(<App client={client} />);
+    await user.click(await screen.findByRole("button", { name: "Open settings" }));
     await user.click(await screen.findByRole("button", { name: "Create verified backup" }));
     expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't create verified backup.");
     expect(screen.getByRole("heading", { name: job.name })).toBeVisible();

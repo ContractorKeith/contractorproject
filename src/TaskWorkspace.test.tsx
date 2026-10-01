@@ -138,6 +138,7 @@ describe("task workspace", () => {
     });
 
     render(<App client={appClient} />);
+    await user.click(screen.getByRole("button", { name: "Open settings" }));
     await user.type(screen.getByLabelText("Job name"), created.name);
     await user.click(screen.getByRole("button", { name: "Create job" }));
 
