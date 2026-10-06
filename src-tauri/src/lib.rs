@@ -3,6 +3,7 @@ mod domain;
 mod error;
 pub mod gantt;
 pub mod handoff_import;
+pub mod mcp;
 pub mod recovery_cli;
 mod schedule_export;
 pub mod scheduling;

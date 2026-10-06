@@ -54,7 +54,7 @@ npm run tauri dev
 - `docs/SCHEDULING.md` owns the implemented deterministic scheduling contract.
 - `docs/GANTT_READ_MODEL.md` owns the versioned Rust-to-React schedule projection.
 - `docs/GANTT_TREEGRID.md` owns the production work-breakdown interaction contract.
-- `docs/LOCAL_API.md` owns the local agent interface.
+- `docs/LOCAL_API.md` owns the local agent interface; `src-tauri/src/mcp/` is the `contractorproject-mcp` stdio helper that implements it.
 - `docs/MVP_PLAN.md` is the issue-ready delivery sequence.
 - `docs/MERIDIANPLAN_REVIEW.md` records the comparative audit and bounded UX milestone.
 - `src/` owns the React UI and its narrow Tauri command client.
