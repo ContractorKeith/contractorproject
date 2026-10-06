@@ -1,47 +1,100 @@
 # Local agent API
 
-Status: proposed v1 contract
-Updated: 2026-08-14
+Status: v1 helper shipped (`contractorproject-mcp`); proposal, risk, resource, and cost tools deferred
+Updated: 2026-10-06
 
 ## Interface
 
-Ship an MCP helper with the desktop application and use stdio as the v1 transport. The agent client launches the helper; ContractorProject does not open a network listener for normal single-user use.
+The MCP helper is a second binary, `contractorproject-mcp`, that speaks MCP over
+stdio. The agent client launches the helper; ContractorProject does not open a
+network listener for normal single-user use.
+
+```
+contractorproject-mcp [--read-write] [--db <path>] [--client-name <name>]
+```
+
+- **Mode.** Read-only by default. `--read-write` also lists the write tools. In
+  read-only, write tools are not listed and calling one returns `read_only`.
+- **Database.** `--db` wins, then `CONTRACTORPROJECT_APP_DATA_DIR`, then the app's
+  own `contractorproject.sqlite3` in the platform app-data directory. The helper
+  never creates a database: a missing path, a directory, or a foreign SQLite file
+  is refused after a read-only probe and left untouched.
+- **Migration.** Read-only never migrates; a database behind this build is refused.
+  Read-write may migrate (storage writes its pre-migration backup) and says so on
+  stderr. A database written by a newer build is always refused.
+- **Protocol.** JSON-RPC 2.0 over newline-delimited stdio, MCP revision
+  `2025-06-18`. `initialize` reports the product version and `apiVersion` `1.0`.
+  Messages over 1 MiB are discarded at the frame boundary. The structure mirrors
+  `contractorbooks-mcp`.
+- **Stderr.** Before serving, the helper prints its mode, database path, draft and
+  archived job counts, and client name. Never job names.
 
 The MCP adapter calls the same Rust application interface as the desktop UI. It never opens SQLite directly and cannot bypass validation, record-version checks, or audit logging.
 
-## Initial tools
+Example client configuration (Claude Code, Codex, or any MCP client):
 
-### Read
+```json
+{
+  "mcpServers": {
+    "contractorproject": {
+      "command": "/path/to/contractorproject-mcp",
+      "args": ["--client-name", "claude"]
+    }
+  }
+}
+```
 
-- `list_jobs(status?, limit?, cursor?)`
-- `get_job(jobId, include?)`
-- `get_schedule(jobId, window?, includeBaseline?)`
-- `list_resources(jobId)`
-- `get_job_risks(jobId, dataDate?)`
+Add `"--read-write"` to `args` to allow changes. Build the helper with
+`cargo build --release --bin contractorproject-mcp --manifest-path src-tauri/Cargo.toml`.
+Bundling it inside the app (as ContractorBooks does with a Tauri `externalBin`)
+is a follow-up.
 
-### Propose
+## Tools (shipped)
 
-- `propose_work_breakdown(jobId, objective, constraints?)`
-- `propose_schedule_change(jobId, request, expectedVersions)`
-- `explain_schedule(jobId, taskIds?)`
-- `explain_variance(jobId, baselineId?)`
+### Read (both modes)
 
-Proposal tools return a typed diff, warnings, affected versions, and an opaque proposal ID. They do not mutate job data.
+- `list_jobs(status?, limit?, offset?)` — draft by default; `{ items, totalCount, limit, offset }`, default 50, max 200
+- `get_job(jobId, includeTasks?)`
+- `list_tasks(jobId)` — flat pre-order hierarchy, dependencies, job version
+- `get_schedule(jobId)` — the desktop Gantt read model
+- `list_baselines(jobId)`
 
-### Write
+### Write (read-write mode only)
 
+Every write takes a caller-supplied `commandId` (see below) plus the same
+fields as the matching desktop command:
+
+- `create_job(name, timezone)`
 - `archive_job(jobId, expectedJobVersion)`
 - `restore_job(jobId, expectedJobVersion)`
-- `apply_proposal(proposalId, expectedVersions)`
-- `create_task(jobId, task, expectedJobVersion)`
-- `update_task(taskId, patch, expectedVersion)`
-- `reorder_task(taskId, parentTaskId?, siblingIndex, expectedVersion, expectedJobVersion)`
-- `add_dependency(jobId, dependency, expectedJobVersion)`
- - `remove_dependency(jobId, predecessorTaskId, successorTaskId, expectedJobVersion)`
- - `update_schedule(jobId, scheduleStart?, calendar, expectedJobVersion)`
- - `update_task_duration(taskId, durationMinutes?, expectedVersion, expectedJobVersion)`
- - `update_task_constraint(taskId, kind, value?, expectedVersion, expectedJobVersion)`
-- `record_actual_cost(jobId, taskId, costCodeId, amount, expectedVersion)`
+- `create_task(jobId, parentTaskId?, name, expectedJobVersion)`
+- `update_task(taskId, name, expectedVersion)`
+- `reorder_task(taskId, newParentTaskId?, newSiblingIndex, expectedVersion, expectedJobVersion)`
+- `add_dependency(jobId, predecessorTaskId, successorTaskId, dependencyType?, lagMinutes, expectedJobVersion)` — both tasks must be scheduled leaf tasks
+- `remove_dependency(jobId, predecessorTaskId, successorTaskId, dependencyType?, expectedJobVersion)`
+- `update_schedule(jobId, scheduleStart?, calendar, expectedJobVersion)`
+- `update_task_duration(taskId, durationMinutes?, expectedVersion, expectedJobVersion)`
+- `update_task_constraint(taskId, kind, value?, expectedVersion, expectedJobVersion)`
+- `update_job_data_date(jobId, dataDate?, expectedJobVersion)`
+- `add_calendar_exception(jobId, date, expectedJobVersion)`
+- `remove_calendar_exception(jobId, date, expectedJobVersion)`
+- `update_task_progress(taskId, clear, percentComplete?, actualStart?, actualFinish?, expectedVersion, expectedJobVersion)`
+- `create_baseline(jobId, name, expectedJobVersion)`
+- `set_baseline_comparison_default(jobId, baselineId, expectedJobVersion)`
+
+## Deferred contract tools
+
+These were in the proposed contract but have no application-seam support yet.
+Add each one to the helper when its Rust service method exists:
+
+- Read: `list_resources`, `get_job_risks`, and the `window` / `includeBaseline`
+  options on `get_schedule`
+- Propose/explain: `propose_work_breakdown`, `propose_schedule_change`,
+  `explain_schedule`, `explain_variance`, and `apply_proposal` (no proposal store yet)
+- Write: `record_actual_cost` (no cost model yet)
+
+List tools page with `limit`/`offset`, matching ContractorBooks, rather than an
+opaque cursor.
 
 Write tools are available only in read-write mode. The default agent onboarding experience should make the selected mode visible and reversible.
 
