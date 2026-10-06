@@ -11,7 +11,7 @@ if (process.platform !== "darwin") throw new Error("This pilot build is verified
 const run = (command, args, extra = {}) => execFileSync(command, args, { cwd: root, stdio: "inherit", ...extra });
 const capture = (command, args) => execFileSync(command, args, { cwd: root, encoding: "utf8" }).trim();
 const manifest = join(root, "src-tauri/Cargo.toml");
-const bins = ["contractorproject-recovery","handoff-import"];
+const bins = ["contractorproject-recovery","handoff-import","contractorproject-mcp"];
 const host = capture("rustc", ["-vV"]).split("\n").find(line => line.startsWith("host: ")).slice(6);
 const targetDir = JSON.parse(capture("cargo", ["metadata", "--manifest-path", manifest, "--no-deps", "--format-version", "1"])).target_directory;
 mkdirSync(join(root, "src-tauri/binaries"), { recursive: true });
