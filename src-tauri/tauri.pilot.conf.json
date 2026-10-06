@@ -2,7 +2,7 @@
   "productName": "ContractorProject Pilot",
   "identifier": "com.contractorkeith.contractorproject.pilot",
   "bundle": {
-    "externalBin": ["binaries/contractorproject-recovery","binaries/handoff-import"]
+    "externalBin": ["binaries/contractorproject-recovery","binaries/handoff-import","binaries/contractorproject-mcp"]
   },
   "app": {
     "windows": [
