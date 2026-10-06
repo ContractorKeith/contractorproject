@@ -10,18 +10,19 @@ stdio. The agent client launches the helper; ContractorProject does not open a
 network listener for normal single-user use.
 
 ```
-contractorproject-mcp [--read-write] [--db <path>] [--client-name <name>]
+contractorproject-mcp [--read-only] [--db <path>] [--client-name <name>]
 ```
 
-- **Mode.** Read-only by default. `--read-write` also lists the write tools. In
-  read-only, write tools are not listed and calling one returns `read_only`.
+- **Mode.** Read-write by default, so an agent can build and manage jobs.
+  `--read-only` lists the read tools only; calling a write tool then returns
+  `read_only`. `--read-write` is still accepted for older client configs.
 - **Database.** `--db` wins, then `CONTRACTORPROJECT_APP_DATA_DIR`, then the app's
   own `contractorproject.sqlite3` in the platform app-data directory. The helper
   never creates a database: a missing path, a directory, or a foreign SQLite file
   is refused after a read-only probe and left untouched.
-- **Migration.** Read-only never migrates; a database behind this build is refused.
-  Read-write may migrate (storage writes its pre-migration backup) and says so on
-  stderr. A database written by a newer build is always refused.
+- **Migration.** Read-write may migrate (storage writes its pre-migration backup)
+  and says so on stderr. `--read-only` never migrates; a database behind this build
+  is refused. A database written by a newer build is always refused.
 - **Protocol.** JSON-RPC 2.0 over newline-delimited stdio, MCP revision
   `2025-06-18`. `initialize` reports the product version and `apiVersion` `1.0`.
   Messages over 1 MiB are discarded at the frame boundary. The structure mirrors
@@ -44,7 +45,7 @@ Example client configuration (Claude Code, Codex, or any MCP client):
 }
 ```
 
-Add `"--read-write"` to `args` to allow changes. Build the helper with
+Add `"--read-only"` to `args` for a client that should not change jobs. Build the helper with
 `cargo build --release --bin contractorproject-mcp --manifest-path src-tauri/Cargo.toml`.
 Bundling it inside the app (as ContractorBooks does with a Tauri `externalBin`)
 is a follow-up.
@@ -59,7 +60,7 @@ is a follow-up.
 - `get_schedule(jobId)` — the desktop Gantt read model
 - `list_baselines(jobId)`
 
-### Write (read-write mode only)
+### Write (default; hidden with `--read-only`)
 
 Every write takes a caller-supplied `commandId` (see below) plus the same
 fields as the matching desktop command:

@@ -124,8 +124,9 @@ pub fn read_only_error() -> ApplicationError {
     ApplicationError::ValidationFailed {
         code: "read_only",
         field: "mode",
-        message: "this helper is running read-only; restart it with --read-write to change jobs"
-            .into(),
+        message:
+            "this helper was started with --read-only; restart it without that flag to change jobs"
+                .into(),
     }
 }
 

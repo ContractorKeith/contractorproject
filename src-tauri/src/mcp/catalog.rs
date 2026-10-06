@@ -6,7 +6,7 @@
 
 use serde_json::{json, Map, Value};
 
-/// Read tools are listed in both modes; write tools only with --read-write.
+/// Read tools are listed in both modes; write tools only in read-write (the default).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Access {
     Read,

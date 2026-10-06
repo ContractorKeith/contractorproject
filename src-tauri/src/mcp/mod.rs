@@ -5,9 +5,10 @@
 //! SQL. It never creates a database: the app owns creation, so a missing or
 //! foreign file is refused with nothing written.
 //!
-//! Two modes, chosen at launch. Read-only (the default) lists read tools only.
-//! With --read-write the write tools are listed too, and every write is audited
-//! with actor `agent`, the helper's client name, and the caller's command ID.
+//! Two modes, chosen at launch. Read-write (the default) lists every tool so an
+//! agent can build and manage jobs; every write is audited with actor `agent`,
+//! the helper's client name, and the caller's command ID. --read-only lists the
+//! read tools only, for a client that should look but not change anything.
 //! The structure mirrors `contractorbooks-mcp` so the suite's helpers behave alike.
 
 pub mod catalog;
@@ -67,16 +68,17 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            mode: Mode::ReadOnly,
+            mode: Mode::ReadWrite,
             database_path: None,
             client_name: DEFAULT_CLIENT_NAME.into(),
         }
     }
 }
 
-pub const USAGE: &str = "contractorproject-mcp [--read-write] [--db <path>] [--client-name <name>]
+pub const USAGE: &str = "contractorproject-mcp [--read-only] [--db <path>] [--client-name <name>]
 
-  --read-write        expose the write tools too (default: read-only)
+  --read-only         expose the read tools only (default: read-write)
+  --read-write        the default; accepted for older client configs
   --db <path>         the database to open (default: the app's own)
   --client-name <n>   the client name recorded on every audit row (default: mcp)
   --help              print this and exit";
@@ -89,12 +91,13 @@ pub enum Launch {
 }
 
 /// Parse the command line. Unknown flags are refused, so a misspelled
-/// --read-write never silently starts a server in the wrong mode.
+/// --read-only never silently starts a server in the wrong mode.
 pub fn parse_options<I: IntoIterator<Item = String>>(args: I) -> Result<Launch, String> {
     let mut options = Options::default();
     let mut args = args.into_iter();
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--read-only" => options.mode = Mode::ReadOnly,
             "--read-write" => options.mode = Mode::ReadWrite,
             "--db" => {
                 options.database_path = Some(PathBuf::from(args.next().ok_or("--db needs a path")?))
@@ -199,7 +202,7 @@ impl Server {
                 Mode::ReadOnly => {
                     return Err(format!(
                         "this database needs migration to v{LATEST_SCHEMA_VERSION} (it is at \
-                         v{applied}); open it in the app first, or run with --read-write"
+                         v{applied}); open it in the app first, or run without --read-only"
                     ))
                 }
                 Mode::ReadWrite => {
@@ -527,16 +530,17 @@ mod tests {
     }
 
     #[test]
-    fn read_only_is_the_default_and_read_write_is_explicit() {
-        assert_eq!(serve_options(&[]).mode, Mode::ReadOnly);
-        let options = serve_options(&["--read-write", "--client-name", "claude"]);
-        assert_eq!(options.mode, Mode::ReadWrite);
+    fn read_write_is_the_default_and_read_only_is_explicit() {
+        assert_eq!(serve_options(&[]).mode, Mode::ReadWrite);
+        assert_eq!(serve_options(&["--read-write"]).mode, Mode::ReadWrite);
+        let options = serve_options(&["--read-only", "--client-name", "claude"]);
+        assert_eq!(options.mode, Mode::ReadOnly);
         assert_eq!(options.client_name, "claude");
     }
 
     #[test]
     fn an_unknown_flag_is_refused() {
-        let error = parse_options(["--read-only".to_string()]).expect_err("refused");
+        let error = parse_options(["--readonly".to_string()]).expect_err("refused");
         assert!(error.contains("unknown argument"), "{error}");
     }
 
