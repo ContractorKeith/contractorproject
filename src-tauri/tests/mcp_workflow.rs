@@ -257,3 +257,96 @@ fn unknown_tools_and_methods_get_clear_errors() {
     let response = helper.handle("not json").unwrap();
     assert_eq!(response["error"]["code"], json!(-32700));
 }
+
+/// The field scenario: "concrete got delayed from this Wednesday to next
+/// Monday — update the schedule." A start-no-earlier-than constraint on the
+/// concrete task moves it, and the dependent framing task follows.
+#[test]
+fn an_agent_pushes_a_delayed_task_and_its_successor_moves() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut helper = server(&app_database(dir.path()), Mode::ReadWrite);
+    let job = call(
+        &mut helper,
+        "create_job",
+        json!({ "commandId": "j", "name": "Garage slab", "timezone": "America/New_York" }),
+    )
+    .unwrap();
+    let job_id = job["id"].as_str().unwrap().to_string();
+
+    // Wednesday 2026-10-14 start, Monday–Friday, 7:00 for 8 hours.
+    let mut job_version = call(
+        &mut helper,
+        "update_schedule",
+        json!({ "commandId": "s", "jobId": job_id, "scheduleStart": "2026-10-14",
+                "calendar": { "workingWeekdays": ["monday","tuesday","wednesday","thursday","friday"],
+                              "workdayStartMinute": 420, "workdayDurationMinutes": 480 },
+                "expectedJobVersion": 1 }),
+    )
+    .unwrap()["version"]
+        .as_i64()
+        .unwrap();
+
+    let mut ids = Vec::new();
+    for (name, days) in [("Pour concrete", 1), ("Frame walls", 2)] {
+        let created = call(
+            &mut helper,
+            "create_task",
+            json!({ "commandId": format!("t-{name}"), "jobId": job_id, "name": name,
+                    "expectedJobVersion": job_version }),
+        )
+        .unwrap();
+        let task_id = created["task"]["id"].as_str().unwrap().to_string();
+        let task_version = created["task"]["version"].as_i64().unwrap();
+        job_version = created["jobVersion"].as_i64().unwrap();
+        let updated = call(
+            &mut helper,
+            "update_task_duration",
+            json!({ "commandId": format!("d-{name}"), "taskId": task_id,
+                    "durationMinutes": 480 * days, "expectedVersion": task_version,
+                    "expectedJobVersion": job_version }),
+        )
+        .unwrap();
+        job_version = updated["jobVersion"].as_i64().unwrap();
+        ids.push((task_id, updated["task"]["version"].as_i64().unwrap()));
+    }
+    let (concrete, concrete_version) = ids[0].clone();
+    let framing = ids[1].0.clone();
+    job_version = call(
+        &mut helper,
+        "add_dependency",
+        json!({ "commandId": "link", "jobId": job_id, "predecessorTaskId": concrete,
+                "successorTaskId": framing, "lagMinutes": 0, "expectedJobVersion": job_version }),
+    )
+    .unwrap()["jobVersion"]
+        .as_i64()
+        .unwrap();
+
+    let start_of = |schedule: &Value, task: &str| -> String {
+        schedule["rows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["taskId"] == json!(task))
+            .unwrap()["start"]
+            .as_str()
+            .unwrap()[..10]
+            .to_string()
+    };
+    let before = call(&mut helper, "get_schedule", json!({ "jobId": job_id })).unwrap();
+    assert_eq!(start_of(&before, &concrete), "2026-10-14");
+    assert_eq!(start_of(&before, &framing), "2026-10-15");
+
+    // The delay: concrete cannot start before next Monday.
+    call(
+        &mut helper,
+        "update_task_constraint",
+        json!({ "commandId": "delay", "taskId": concrete, "kind": "start_no_earlier_than",
+                "value": "2026-10-19", "expectedVersion": concrete_version,
+                "expectedJobVersion": job_version }),
+    )
+    .unwrap();
+
+    let after = call(&mut helper, "get_schedule", json!({ "jobId": job_id })).unwrap();
+    assert_eq!(start_of(&after, &concrete), "2026-10-19");
+    assert_eq!(start_of(&after, &framing), "2026-10-20");
+}
